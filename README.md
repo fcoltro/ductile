@@ -41,9 +41,12 @@ code from them.
   flat curve, the plane they lie in. Ctrl+Space faces the view; Space with
   nothing selected goes back to the world XY plane.
 - Curves on the construction plane: polyline (Shift+A), spline through points
-  (open or closed C2), three-point arc, rectangle,
-  circle, ellipse, regular polygon,
+  (open or closed C2), arc (three points or from the center), rectangle
+  (from a corner, the center or three points), circle (from the center,
+  two or three points), slot, ellipse, regular polygon,
   helix (radius, height and turns; sweep a circle along it for a spring).
+  C inside the rectangle, circle and arc commands switches between their
+  variants, as in Plasticity.
   Curves drawn separately that meet end to end form one profile. In vertex
   mode (1) spline control points show and can be selected and moved (G).
   Fillet (B) with curves selected rounds their corners (or just the

@@ -1460,6 +1460,47 @@ pub enum CurveKind {
     Ellipse,
     /// Regular polygon from its center and a corner.
     Polygon,
+    /// Rectangle from its center and a corner.
+    CenterRectangle,
+    /// Rectangle from one side's two ends and the height.
+    ThreePointRectangle,
+    /// Circle across a diameter.
+    TwoPointCircle,
+    /// Circle through three points.
+    ThreePointCircle,
+    /// Arc from its center, start and end.
+    CenterArc,
+    /// Slot: two centers and a radius.
+    Slot,
+}
+
+impl CurveKind {
+    /// The kind `C` switches to inside the command, as Plasticity's
+    /// center / corner / three-point toggles.
+    fn next_variant(self) -> Option<CurveKind> {
+        use CurveKind::*;
+        Some(match self {
+            Rectangle => CenterRectangle,
+            CenterRectangle => ThreePointRectangle,
+            ThreePointRectangle => Rectangle,
+            Circle => TwoPointCircle,
+            TwoPointCircle => ThreePointCircle,
+            ThreePointCircle => Circle,
+            Arc => CenterArc,
+            CenterArc => Arc,
+            _ => return None,
+        })
+    }
+
+    /// Clicks that place the whole curve, for kinds placed point by point.
+    fn clicks(self) -> Option<usize> {
+        use CurveKind::*;
+        match self {
+            Arc | ThreePointCircle | CenterArc | ThreePointRectangle | Slot => Some(3),
+            TwoPointCircle => Some(2),
+            _ => None,
+        }
+    }
 }
 
 /// Draws planar curves on the construction plane as wire objects.
@@ -1474,11 +1515,15 @@ pub struct CurveTool {
     angle: f64,
     sides: usize,
     closed: bool,
+    /// Typed value of the point-by-point kinds: a three-point rectangle's
+    /// height, a slot's radius, a center arc's sweep in degrees, a
+    /// two-point circle's diameter.
+    typed: Option<f64>,
 }
 
 impl CurveTool {
     pub fn new(kind: CurveKind) -> Self {
-        Self { kind, points: vec![], cursor: None, size: DVec3::ZERO, angle: 0.0, sides: 6, closed: false }
+        Self { kind, points: vec![], cursor: None, size: DVec3::ZERO, angle: 0.0, sides: 6, closed: false, typed: None }
     }
 
     /// Points the multi-click kinds pass through, with the cursor as the
@@ -1568,6 +1613,88 @@ impl CurveTool {
                 let frame = Frame { origin: c, ..f };
                 vec![Segment::new(ductile_geom::Curve3::Circle { frame, radius: self.size.x }, 0.0, std::f64::consts::TAU)]
             }
+            CurveKind::CenterRectangle => {
+                let Some(&c) = pts.first() else { return vec![] };
+                let (w, h) = (self.size.x.abs(), self.size.y.abs());
+                if w < 1e-9 || h < 1e-9 {
+                    return vec![];
+                }
+                let q = [c - f.x * w - f.y * h, c + f.x * w - f.y * h, c + f.x * w + f.y * h, c - f.x * w + f.y * h];
+                (0..4).map(|i| Segment::line(q[i], q[(i + 1) % 4])).collect()
+            }
+            _ => self.point_segments(&self.path(), &f),
+        }
+    }
+
+    /// The curves of the kinds placed point by point, from the points so
+    /// far (the cursor last).
+    fn point_segments(&self, pts: &[DVec3], f: &Frame) -> Vec<ductile_brep::profile::Segment> {
+        use ductile_brep::profile::Segment;
+        use ductile_geom::Curve3;
+        use std::f64::consts::{PI, TAU};
+        let circle = |c: DVec3, x: DVec3, r: f64, sweep: f64| Segment::new(Curve3::Circle { frame: Frame::new(c, f.z, x), radius: r }, 0.0, sweep);
+        match (self.kind, pts) {
+            (_, [] | [_]) => vec![],
+            (CurveKind::TwoPointCircle, [a, b, ..]) => {
+                let r = self.typed.map(|d| d.abs() * 0.5).unwrap_or(a.distance(*b) * 0.5);
+                let x = (*b - *a).try_normalize().unwrap_or(f.x);
+                if r < 1e-9 {
+                    return vec![];
+                }
+                vec![circle(*a + x * r, -x, r, TAU)]
+            }
+            (_, [a, b]) => vec![Segment::line(*a, *b)],
+            (CurveKind::ThreePointCircle, [a, b, m, ..]) => match arc_through(*a, *b, *m) {
+                Some(s) => {
+                    let Curve3::Circle { frame, radius } = s.curve else { unreachable!() };
+                    vec![Segment::new(Curve3::Circle { frame, radius }, 0.0, TAU)]
+                }
+                None => vec![Segment::line(*a, *b)],
+            },
+            (CurveKind::CenterArc, [c, s, e, ..]) => {
+                let r = c.distance(*s);
+                let x = (*s - *c).try_normalize().unwrap_or(f.x);
+                let l = f.dir_to_local(*e - *c);
+                let (u, v) = (f.dir_to_local(x), f.dir_to_local(f.z.cross(x)));
+                let mut sweep = (l.x * v.x + l.y * v.y).atan2(l.x * u.x + l.y * u.y);
+                if sweep <= 0.0 {
+                    sweep += TAU;
+                }
+                let sweep = self.typed.map(|d| d.to_radians().clamp(-TAU, TAU)).unwrap_or(sweep);
+                if r < 1e-9 || sweep.abs() < 1e-9 {
+                    return vec![];
+                }
+                if sweep < 0.0 {
+                    return vec![Segment::new(Curve3::Circle { frame: Frame::new(*c, -f.z, x), radius: r }, 0.0, -sweep)];
+                }
+                vec![circle(*c, x, r, sweep)]
+            }
+            (CurveKind::ThreePointRectangle, [a, b, q, ..]) => {
+                let Some(d) = (*b - *a).try_normalize() else { return vec![] };
+                let n = f.z.cross(d);
+                let h = self.typed.unwrap_or((*q - *a).dot(n));
+                if h.abs() < 1e-9 {
+                    return vec![Segment::line(*a, *b)];
+                }
+                let c = [*a, *b, *b + n * h, *a + n * h];
+                (0..4).map(|i| Segment::line(c[i], c[(i + 1) % 4])).collect()
+            }
+            (CurveKind::Slot, [p0, p1, q, ..]) => {
+                let Some(d) = (*p1 - *p0).try_normalize() else { return vec![] };
+                let n = d.cross(f.z);
+                let off = *q - *p0;
+                let r = self.typed.map(f64::abs).unwrap_or((off - d * off.dot(d).clamp(0.0, p0.distance(*p1))).length());
+                if r < 1e-9 {
+                    return vec![Segment::line(*p0, *p1)];
+                }
+                vec![
+                    Segment::line(*p0 + n * r, *p1 + n * r),
+                    circle(*p1, n, r, PI),
+                    Segment::line(*p1 - n * r, *p0 - n * r),
+                    circle(*p0, -n, r, PI),
+                ]
+            }
+            _ => vec![],
         }
     }
 }
@@ -1585,25 +1712,44 @@ impl Tool for CurveTool {
             CurveKind::Circle => "Circle",
             CurveKind::Ellipse => "Ellipse",
             CurveKind::Polygon => "Polygon",
+            CurveKind::CenterRectangle | CurveKind::ThreePointRectangle => "Rectangle",
+            CurveKind::TwoPointCircle | CurveKind::ThreePointCircle => "Circle",
+            CurveKind::CenterArc => "Arc",
+            CurveKind::Slot => "Slot",
         }
     }
     fn hint(&self) -> String {
         match (self.kind, self.points.len()) {
             (CurveKind::Polyline, 0) => "Curve: click the first point".into(),
             (CurveKind::Polyline, _) => "Curve: click points; click the first point to close, Enter to finish open".into(),
-            (CurveKind::Rectangle, 0) => "Rectangle: click the first corner".into(),
+            (CurveKind::Rectangle, 0) => "Rectangle: click the first corner (C: from the center)".into(),
             (CurveKind::Rectangle, _) => "Rectangle: click the opposite corner or type the size".into(),
-            (CurveKind::Circle, 0) => "Circle: click the center".into(),
+            (CurveKind::Circle, 0) => "Circle: click the center (C: two points)".into(),
             (CurveKind::Circle, _) => "Circle: click to set the radius or type it".into(),
             (CurveKind::Spline, 0) => "Spline: click the first point".into(),
             (CurveKind::Spline, _) => "Spline: click points it passes through; click the first point to close, Enter to finish open".into(),
-            (CurveKind::Arc, 0) => "Arc: click the start".into(),
+            (CurveKind::Arc, 0) => "Arc: click the start (C: from the center)".into(),
             (CurveKind::Arc, 1) => "Arc: click the end".into(),
             (CurveKind::Arc, _) => "Arc: click a point the arc passes through".into(),
             (CurveKind::Ellipse, 0) => "Ellipse: click the center".into(),
             (CurveKind::Ellipse, _) => "Ellipse: click a corner of its bounding box or type the radii".into(),
             (CurveKind::Polygon, 0) => "Polygon: click the center".into(),
             (CurveKind::Polygon, _) => "Polygon: click a corner or type the radius; set the sides in the panel".into(),
+            (CurveKind::CenterRectangle, 0) => "Rectangle from the center: click the center (C: three points)".into(),
+            (CurveKind::CenterRectangle, _) => "Rectangle from the center: click a corner or type the half size".into(),
+            (CurveKind::ThreePointRectangle, 0) => "Rectangle by three points: click one end of a side (C: from a corner)".into(),
+            (CurveKind::ThreePointRectangle, 1) => "Rectangle by three points: click the other end of the side".into(),
+            (CurveKind::ThreePointRectangle, _) => "Rectangle by three points: click or type the height".into(),
+            (CurveKind::TwoPointCircle, 0) => "Circle by two points: click one end of a diameter (C: three points)".into(),
+            (CurveKind::TwoPointCircle, _) => "Circle by two points: click the other end or type the diameter".into(),
+            (CurveKind::ThreePointCircle, 0) => "Circle by three points: click the first point (C: from the center)".into(),
+            (CurveKind::ThreePointCircle, _) => "Circle by three points: click the next point".into(),
+            (CurveKind::CenterArc, 0) => "Arc from the center: click the center (C: three points)".into(),
+            (CurveKind::CenterArc, 1) => "Arc from the center: click the start".into(),
+            (CurveKind::CenterArc, _) => "Arc from the center: click the end or type the angle".into(),
+            (CurveKind::Slot, 0) => "Slot: click the first center".into(),
+            (CurveKind::Slot, 1) => "Slot: click the second center".into(),
+            (CurveKind::Slot, _) => "Slot: click or type the radius".into(),
         }
     }
     fn pointer(&mut self, _doc: &Document, cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
@@ -1628,22 +1774,27 @@ impl Tool for CurveTool {
                     self.size.x = snap_len(d.truncate().length(), p.world_per_px);
                     self.angle = d.y.atan2(d.x);
                 }
-                CurveKind::Polyline | CurveKind::Spline | CurveKind::Arc => {}
+                CurveKind::CenterRectangle => {
+                    let d = cplane.frame.dir_to_local(q - c);
+                    self.size = DVec3::new(d.x, d.y, 0.0);
+                }
+                _ => {}
             }
         }
         if !p.clicked {
             return ToolOutcome::Continue;
         }
         let Some(q) = pt else { return ToolOutcome::Continue };
-        match self.kind {
-            CurveKind::Arc => {
-                self.points.push(q);
-                if self.points.len() == 3 {
-                    ToolOutcome::Finished
-                } else {
-                    ToolOutcome::Continue
-                }
+        if let Some(n) = self.kind.clicks() {
+            if self.points.last().is_some_and(|l| l.distance(q) < 1e-9) {
+                return ToolOutcome::Continue;
             }
+            self.points.push(q);
+            // A typed value stands in for the last click.
+            let done = self.points.len() >= n || (self.typed.is_some() && self.points.len() + 1 >= n);
+            return if done { ToolOutcome::Finished } else { ToolOutcome::Continue };
+        }
+        match self.kind {
             CurveKind::Polyline | CurveKind::Spline => {
                 if self.points.len() > 2 && q.distance(self.points[0]) < p.world_per_px * 8.0 {
                     self.closed = true;
@@ -1696,11 +1847,40 @@ impl Tool for CurveTool {
                     ch = true;
                 }
             }
-            CurveKind::Polyline | CurveKind::Spline | CurveKind::Arc => {
+            CurveKind::CenterRectangle => {
+                ch |= drag_value(ui, "Half width", &mut self.size.x, 0.1);
+                ch |= drag_value(ui, "Half height", &mut self.size.y, 0.1);
+            }
+            CurveKind::Polyline | CurveKind::Spline | CurveKind::Arc | CurveKind::ThreePointCircle => {
                 ui.label(format!("{} points", self.points.len()));
+            }
+            CurveKind::ThreePointRectangle | CurveKind::Slot | CurveKind::CenterArc | CurveKind::TwoPointCircle => {
+                let label = match self.kind {
+                    CurveKind::ThreePointRectangle => "Height",
+                    CurveKind::Slot => "Radius",
+                    CurveKind::CenterArc => "Angle",
+                    _ => "Diameter",
+                };
+                let mut v = self.typed.unwrap_or(0.0);
+                if drag_value(ui, label, &mut v, 0.05) {
+                    self.typed = Some(v);
+                    ch = true;
+                }
             }
         }
         ch
+    }
+    fn command_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
+        if key != egui::Key::C || m.any() {
+            return false;
+        }
+        let Some(next) = self.kind.next_variant() else { return false };
+        // Keep the first point; the variants all start with one.
+        self.kind = next;
+        self.points.truncate(1);
+        self.typed = None;
+        self.size = DVec3::ZERO;
+        true
     }
     fn typed_value(&mut self, v: Option<f64>) {
         if let Some(v) = v {
@@ -1714,8 +1894,15 @@ impl Tool for CurveTool {
                     self.size.x = v;
                     self.size.y = v;
                 }
-                CurveKind::Polyline | CurveKind::Spline | CurveKind::Arc => {}
+                CurveKind::CenterRectangle => {
+                    self.size.x = v;
+                    self.size.y = v;
+                }
+                CurveKind::ThreePointRectangle | CurveKind::Slot | CurveKind::CenterArc | CurveKind::TwoPointCircle => self.typed = Some(v),
+                CurveKind::Polyline | CurveKind::Spline | CurveKind::Arc | CurveKind::ThreePointCircle => {}
             }
+        } else {
+            self.typed = None;
         }
     }
     fn accept(&mut self) -> ToolOutcome {
@@ -3591,6 +3778,39 @@ mod tests {
             let v = volume(&doc.object(bx).unwrap().body);
             assert!((v - expect).abs() < 1e-2, "{d}: {v} vs {expect}");
         }
+    }
+
+    #[test]
+    fn sketch_variants_close_up() {
+        use std::f64::consts::PI;
+        let v = |x: f64, y: f64| DVec3::new(x, y, 0.0);
+        let f = Frame::WORLD;
+        let ends = |s: &ductile_brep::profile::Segment| {
+            let (a, b) = (s.curve.point(s.t0), s.curve.point(s.t1));
+            if s.reversed { (b, a) } else { (a, b) }
+        };
+        for (kind, pts, typed, length) in [
+            (CurveKind::Slot, vec![v(0.0, 0.0), v(4.0, 0.0), v(2.0, 1.0)], None, 8.0 + 2.0 * PI),
+            (CurveKind::Slot, vec![v(0.0, 0.0), v(4.0, 0.0), v(9.0, 9.0)], Some(0.5), 8.0 + PI),
+            (CurveKind::ThreePointCircle, vec![v(1.0, 0.0), v(-1.0, 0.0), v(0.0, 1.0)], None, 2.0 * PI),
+            (CurveKind::TwoPointCircle, vec![v(1.0, 1.0), v(3.0, 1.0)], None, 2.0 * PI),
+            (CurveKind::ThreePointRectangle, vec![v(0.0, 0.0), v(3.0, 4.0), v(0.0, 9.0)], Some(2.0), 14.0),
+        ] {
+            let mut t = CurveTool::new(kind);
+            t.typed = typed;
+            let segs = t.point_segments(&pts, &f);
+            let total: f64 = segs.iter().map(|s| s.curve.length(s.t0, s.t1)).sum();
+            assert!((total - length).abs() < 1e-6, "{kind:?}: {total} vs {length}");
+            for (i, s) in segs.iter().enumerate() {
+                let next = &segs[(i + 1) % segs.len()];
+                assert!(ends(s).1.distance(ends(next).0) < 1e-9, "{kind:?}: gap after segment {i}");
+            }
+        }
+        // A quarter arc counter-clockwise from +X about the center.
+        let t = CurveTool::new(CurveKind::CenterArc);
+        let segs = t.point_segments(&[v(0.0, 0.0), v(2.0, 0.0), v(0.0, 5.0)], &f);
+        let s = &segs[0];
+        assert!((s.curve.length(s.t0, s.t1) - PI).abs() < 1e-9 && s.curve.point(s.t1).distance(v(0.0, 2.0)) < 1e-9);
     }
 
     #[test]

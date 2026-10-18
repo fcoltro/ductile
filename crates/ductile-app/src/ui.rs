@@ -28,7 +28,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 }
             });
             ui.menu_button("Curve", |ui| {
-                for c in [Command::Curve, Command::Spline, Command::Arc, Command::Rectangle, Command::Circle, Command::Ellipse, Command::Polygon, Command::Helix, Command::OffsetCurve, Command::JoinCurves, Command::Trim, Command::BridgeCurve, Command::ExtendCurve, Command::IntersectionCurve, Command::ProjectCurve] {
+                for c in [Command::Curve, Command::Spline, Command::Arc, Command::Rectangle, Command::Circle, Command::Ellipse, Command::Polygon, Command::Slot, Command::Helix, Command::OffsetCurve, Command::JoinCurves, Command::Trim, Command::BridgeCurve, Command::ExtendCurve, Command::IntersectionCurve, Command::ProjectCurve] {
                     menu_item(app, ui, c);
                 }
             });
