@@ -60,7 +60,7 @@ impl Side {
 /// At parameter `t` of an edge: the unit direction leaving the face
 /// across it, the face's outward normal, and the face's normal curvature
 /// in that direction (signed along that normal).
-fn leave(curve: &Curve3, t: f64, face: &(Surface, bool, bool)) -> Option<(DVec3, DVec3, f64)> {
+pub(crate) fn leave(curve: &Curve3, t: f64, face: &(Surface, bool, bool)) -> Option<(DVec3, DVec3, f64)> {
     let (s, reversed, against) = face;
     let p = curve.point(t);
     let uv = s.project(p, None);

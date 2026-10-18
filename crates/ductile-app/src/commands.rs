@@ -57,6 +57,7 @@ pub enum Command {
     Patch,
     Thicken,
     BridgeSurface,
+    MatchSurface,
     Cut,
     Imprint,
     Draft,
@@ -157,6 +158,7 @@ impl Command {
         Command::Patch,
         Command::Thicken,
         Command::BridgeSurface,
+        Command::MatchSurface,
         Command::Cut,
         Command::Imprint,
         Command::Draft,
@@ -258,6 +260,7 @@ impl Command {
             Patch => "Patch surface",
             Thicken => "Thicken surface",
             BridgeSurface => "Bridge surface",
+            MatchSurface => "Match surface",
             Cut => "Cut solid with curves",
             Imprint => "Imprint curves onto faces",
             Draft => "Draft faces",
@@ -619,6 +622,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Pipe => match crate::tools::PipeTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Select curves to run a pipe along".into(),
+        },
+        MatchSurface => match crate::tools::MatchSurfaceTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select an open edge of a surface and the edge it should meet".into(),
         },
         BridgeSurface => match crate::tools::BridgeSurfaceTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),

@@ -86,8 +86,9 @@ code from them.
   open surface edges selected grows the surface past them, naturally (its
   own shape continued) or straight along the tangent. Join (J) with
   surfaces selected sews them along the edges they share, turning them to
-  face the same way, and makes a solid when they close up. Back faces show
-  tinted.
+  face the same way, and makes a solid when they close up. Match surface
+  reshapes a surface along its open edge so it lands on another edge and
+  continues the face beyond it with G0, G1 or G2. Back faces show tinted.
 - Fillets (B) and chamfers (Shift+K) on edges between planes, on
   circular plane/cylinder edges (boss and hole rims), with spherical corner
   patches where three filleted edges meet. Closed edges between any two

@@ -2881,6 +2881,103 @@ impl Tool for ExtendSheetTool {
     }
 }
 
+/// Match surface: reshapes a surface along its open edge to land on
+/// another edge and continue the face beyond it.
+pub struct MatchSurfaceTool {
+    /// (object, its body, edge) for the surface to change, then the target.
+    picks: [(ObjectId, std::sync::Arc<Body>, ductile_brep::EdgeId); 2],
+    pub continuity: ductile_brep::ops::bridge::Continuity,
+    pub tension: f64,
+    cache: std::cell::RefCell<Option<(String, Result<Body, String>)>>,
+}
+
+impl MatchSurfaceTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let edges = doc.selected_edges();
+        let [(oa, ea), (ob, eb)] = edges[..] else { return None };
+        let pick = |o: ObjectId, e| Some((o, doc.object(o)?.body.clone(), e));
+        let (a, b) = (pick(oa, ea)?, pick(ob, eb)?);
+        let open = |p: &(ObjectId, std::sync::Arc<Body>, ductile_brep::EdgeId)| p.1.kind == ductile_brep::BodyKind::Sheet && p.1.edge_faces(p.2).len() == 1;
+        // Change the newer surface to meet the older one's edge.
+        let picks = match (open(&a), open(&b)) {
+            (true, true) if oa > ob => [a, b],
+            (true, true) => [b, a],
+            (true, false) => [a, b],
+            (false, true) => [b, a],
+            (false, false) => return None,
+        };
+        Some(Self { picks, continuity: ductile_brep::ops::bridge::Continuity::G2, tension: 1.0, cache: Default::default() })
+    }
+
+    fn result(&self) -> Result<Body, String> {
+        use ductile_brep::ops::bridge::Side;
+        let key = format!("{:?} {} {:?}", self.continuity, self.tension, self.picks[0].0);
+        if let Some((k, r)) = &*self.cache.borrow() {
+            if *k == key {
+                return r.clone();
+            }
+        }
+        let [(_, body, e), (_, tb, te)] = &self.picks;
+        let target = Side::of_edge(tb, *te, body.edge(*e).mid(), self.continuity, self.tension);
+        // The face beyond the target edge that leans towards the surface.
+        let r = ductile_brep::ops::match_face::match_surface(body, *e, &target);
+        *self.cache.borrow_mut() = Some((key, r.clone()));
+        r
+    }
+}
+
+impl Tool for MatchSurfaceTool {
+    fn name(&self) -> &'static str {
+        "Match surface"
+    }
+    fn hint(&self) -> String {
+        match self.result() {
+            Err(e) => format!("Match surface: {e}"),
+            Ok(_) => "Match surface: pick G0 / G1 / G2 and the tension, Swap to change the other surface; Enter to finish".into(),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if p.clicked { ToolOutcome::Finished } else { ToolOutcome::Continue }
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        self.result().ok()
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        use ductile_brep::ops::bridge::Continuity;
+        let mut ch = false;
+        ui.horizontal(|ui| {
+            for (c, name) in [(Continuity::G0, "G0"), (Continuity::G1, "G1"), (Continuity::G2, "G2")] {
+                ch |= ui.selectable_value(&mut self.continuity, c, name).changed();
+            }
+        });
+        ch |= drag_value(ui, "Tension", &mut self.tension, 0.01);
+        self.tension = self.tension.clamp(0.05, 5.0);
+        let other_open = self.picks[1].1.kind == ductile_brep::BodyKind::Sheet && self.picks[1].1.edge_faces(self.picks[1].2).len() == 1;
+        if other_open && ui.button("Swap").clicked() {
+            self.picks.swap(0, 1);
+            ch = true;
+        }
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        use ductile_brep::ops::bridge::Continuity;
+        self.continuity = match v.map(|v| v.round() as i64) {
+            Some(0) => Continuity::G0,
+            Some(1) => Continuity::G1,
+            Some(2) => Continuity::G2,
+            _ => return,
+        };
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        if self.result().is_ok() { vec![self.picks[0].0] } else { vec![] }
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let Ok(b) = self.result() else { return false };
+        doc.replace_body(self.picks[0].0, b);
+        true
+    }
+}
+
 /// A sheet spanning two selected edges, meeting the faces beyond them
 /// with the continuity chosen per side.
 pub struct BridgeSurfaceTool {

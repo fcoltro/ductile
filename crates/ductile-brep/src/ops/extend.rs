@@ -7,7 +7,7 @@
 use crate::curves::Extension;
 use crate::ops::sheet::Sewer;
 use crate::profile::Segment;
-use crate::topo::{Body, BodyKind, EdgeId};
+use crate::topo::{Body, EdgeId};
 use ductile_geom::{DVec3, DVec4, NurbsCurve, NurbsSurface, Surface};
 
 /// A side of a surface's parameter rectangle.
@@ -19,7 +19,7 @@ pub enum Side {
     VEnd,
 }
 
-fn reversed_v(s: &NurbsSurface) -> NurbsSurface {
+pub(crate) fn reversed_v(s: &NurbsSurface) -> NurbsSurface {
     s.transposed().reversed_u().transposed()
 }
 
@@ -120,9 +120,10 @@ fn loops(body: &Body, f: crate::topo::FaceId) -> Vec<Vec<Segment>> {
         .collect()
 }
 
-/// Grows the face of sheet `body` along boundary edge `e` by `len`. The
-/// face must be untrimmed (bounded by its parameter rectangle).
-pub fn extend_sheet(body: &Body, e: EdgeId, len: f64, how: Extension) -> Result<Body, String> {
+/// The face beyond open edge `e` of `body` as a NURBS surface over its
+/// boundary, the side of its parameter rectangle the edge lies on, and
+/// the sewing tolerance. The face must be untrimmed.
+pub(crate) fn edge_side(body: &Body, e: EdgeId) -> Result<(crate::topo::FaceId, NurbsSurface, Side, f64), String> {
     let faces = body.edge_faces(e);
     let [(f, _)] = faces[..] else { return Err("pick an open edge of a surface".into()) };
     let face = body.face(f);
@@ -161,7 +162,7 @@ pub fn extend_sheet(body: &Body, e: EdgeId, len: f64, how: Extension) -> Result<
         c.point(t).distance(p)
     };
     if pts.iter().any(|p| sides.iter().all(|(_, c)| near(c, *p) > tol.max(1e-5 * size))) {
-        return Err("only untrimmed faces can be extended".into());
+        return Err("only untrimmed faces can be changed this way".into());
     }
     let ed = body.edge(e);
     let probe = [0.25, 0.5, 0.75].map(|f| ed.curve.point(ed.t0 + (ed.t1 - ed.t0) * f));
@@ -173,16 +174,26 @@ pub fn extend_sheet(body: &Body, e: EdgeId, len: f64, how: Extension) -> Result<
         })
         .unwrap()
         .0;
-    let grown = extend_surface(&ns, side, len, how);
+    Ok((f, ns, side, tol))
+}
+
+/// `body` with face `f` replaced by the whole of `s`.
+pub(crate) fn replace_face(body: &Body, f: crate::topo::FaceId, s: NurbsSurface, tol: f64) -> Body {
     let mut sw = Sewer::new(body.kind, tol);
     for g in body.face_ids().filter(|g| *g != f) {
         let gl = loops(body, g);
         let other = body.face(g);
         sw.face(other.surface.clone(), other.reversed, &gl[0], &gl[1..]);
     }
-    sw.patch_oriented(grown, face.reversed);
-    debug_assert!(sw.body.kind == BodyKind::Sheet || body.kind != BodyKind::Sheet);
-    Ok(sw.body)
+    sw.patch_oriented(s, body.face(f).reversed);
+    sw.body
+}
+
+/// Grows the face of sheet `body` along boundary edge `e` by `len`. The
+/// face must be untrimmed (bounded by its parameter rectangle).
+pub fn extend_sheet(body: &Body, e: EdgeId, len: f64, how: Extension) -> Result<Body, String> {
+    let (f, ns, side, tol) = edge_side(body, e)?;
+    Ok(replace_face(body, f, extend_surface(&ns, side, len, how), tol))
 }
 
 #[cfg(test)]
