@@ -236,20 +236,16 @@ fn knot_runs(knots: &[f64]) -> (Vec<usize>, Vec<f64>) {
     (mults, vals)
 }
 
-/// Writes the solids among `objects` (name, body) as one STEP part.
-/// Returns the number of solids written.
+/// Writes the solids among `objects` (name, body) to STEP. A single solid
+/// is written as one part; several become an assembly of one part per
+/// object, so other systems keep the object names. Returns the number of
+/// solids written.
 pub fn write_step(out: &mut impl std::io::Write, part_name: &str, objects: &[(&str, &Body)]) -> crate::Result<usize> {
     let mut w = Writer { lines: Vec::new() };
     let ctx_app = w.add("APPLICATION_CONTEXT('core data for automotive mechanical design processes')");
     w.add(format!("APPLICATION_PROTOCOL_DEFINITION('international standard','automotive_design',2000,#{ctx_app})"));
     let pctx = w.add(format!("PRODUCT_CONTEXT('',#{ctx_app},'mechanical')"));
-    let name = string(part_name);
-    let product = w.add(format!("PRODUCT({name},{name},'',(#{pctx}))"));
-    w.add(format!("PRODUCT_RELATED_PRODUCT_CATEGORY('part',$,(#{product}))"));
-    let pdf = w.add(format!("PRODUCT_DEFINITION_FORMATION('','',#{product})"));
     let pdctx = w.add(format!("PRODUCT_DEFINITION_CONTEXT('part definition',#{ctx_app},'design')"));
-    let pd = w.add(format!("PRODUCT_DEFINITION('design','',#{pdf},#{pdctx})"));
-    let pds = w.add(format!("PRODUCT_DEFINITION_SHAPE('','',#{pd})"));
     let mm = w.add("(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.))");
     let rad = w.add("(NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.))");
     let sr = w.add("(NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT())");
@@ -257,15 +253,49 @@ pub fn write_step(out: &mut impl std::io::Write, part_name: &str, objects: &[(&s
     let ctx = w.add(format!(
         "(GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#{unc})) GLOBAL_UNIT_ASSIGNED_CONTEXT((#{mm},#{rad},#{sr})) REPRESENTATION_CONTEXT('Context #1','3D Context with UNIT and UNCERTAINTY'))"
     ));
+    // PRODUCT .. PRODUCT_DEFINITION_SHAPE for one part; returns (definition, shape).
+    let product = |w: &mut Writer, name: &str| {
+        let name = string(name);
+        let product = w.add(format!("PRODUCT({name},{name},'',(#{pctx}))"));
+        w.add(format!("PRODUCT_RELATED_PRODUCT_CATEGORY('part',$,(#{product}))"));
+        let pdf = w.add(format!("PRODUCT_DEFINITION_FORMATION('','',#{product})"));
+        let pd = w.add(format!("PRODUCT_DEFINITION('design','',#{pdf},#{pdctx})"));
+        let pds = w.add(format!("PRODUCT_DEFINITION_SHAPE('','',#{pd})"));
+        (pd, pds)
+    };
+    let solids: Vec<(&str, &Body)> = objects.iter().copied().filter(|(_, b)| b.kind == BodyKind::Solid && !b.faces.is_empty()).collect();
+    let name = string(part_name);
     let origin = w.placement(&Frame::WORLD);
-    let mut items = vec![origin];
-    for (n, b) in objects {
-        if b.kind == BodyKind::Solid && !b.faces.is_empty() {
+    let (pd, pds) = product(&mut w, part_name);
+    if solids.len() <= 1 {
+        let mut items = vec![origin];
+        for (n, b) in &solids {
             items.push(w.solid(n, b));
         }
+        let rep = w.add(format!("ADVANCED_BREP_SHAPE_REPRESENTATION({name},{},#{ctx})", refs(&items)));
+        w.add(format!("SHAPE_DEFINITION_REPRESENTATION(#{pds},#{rep})"));
+    } else {
+        // Each part sits at the assembly origin: its geometry is already in
+        // world coordinates, so every placement is the identity.
+        let places: Vec<usize> = solids.iter().map(|_| w.placement(&Frame::WORLD)).collect();
+        let mut items = vec![origin];
+        items.extend(&places);
+        let asm = w.add(format!("SHAPE_REPRESENTATION({name},{},#{ctx})", refs(&items)));
+        w.add(format!("SHAPE_DEFINITION_REPRESENTATION(#{pds},#{asm})"));
+        for (i, ((n, b), place)) in solids.iter().zip(places).enumerate() {
+            let (cpd, cpds) = product(&mut w, n);
+            let solid = w.solid(n, b);
+            let child = w.add(format!("ADVANCED_BREP_SHAPE_REPRESENTATION({},(#{origin},#{solid}),#{ctx})", string(n)));
+            w.add(format!("SHAPE_DEFINITION_REPRESENTATION(#{cpds},#{child})"));
+            let nauo = w.add(format!("NEXT_ASSEMBLY_USAGE_OCCURRENCE('{}',{},'',#{pd},#{cpd},$)", i + 1, string(n)));
+            let npds = w.add(format!("PRODUCT_DEFINITION_SHAPE('','',#{nauo})"));
+            let t = w.add(format!("ITEM_DEFINED_TRANSFORMATION('','',#{origin},#{place})"));
+            let rel = w.add(format!(
+                "(REPRESENTATION_RELATIONSHIP('','',#{child},#{asm}) REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{t}) SHAPE_REPRESENTATION_RELATIONSHIP())"
+            ));
+            w.add(format!("CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{rel},#{npds})"));
+        }
     }
-    let rep = w.add(format!("ADVANCED_BREP_SHAPE_REPRESENTATION({name},{},#{ctx})", refs(&items)));
-    w.add(format!("SHAPE_DEFINITION_REPRESENTATION(#{pds},#{rep})"));
 
     let mut s = String::new();
     s.push_str("ISO-10303-21;\nHEADER;\n");
@@ -277,7 +307,7 @@ pub fn write_step(out: &mut impl std::io::Write, part_name: &str, objects: &[(&s
     }
     s.push_str("ENDSEC;\nEND-ISO-10303-21;\n");
     out.write_all(s.as_bytes())?;
-    Ok(items.len() - 1)
+    Ok(solids.len())
 }
 
 #[cfg(test)]

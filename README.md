@@ -53,21 +53,23 @@ code from them.
   (Alt+F, or E on a curved face) pushes and pulls any faces. Faces move along
   their normals with exact offset surfaces for analytic faces, sharp edges
   stay sharp, and tangent faces (fillets) move together.
-- STEP (AP214) export of exact solids, checked against OpenCascade; STL and
+- STEP (AP214) export of exact solids, checked against OpenCascade; several
+  objects are written as an assembly with one named part each. STL and
   OBJ export. Headless: `ductile --demo --export-step out.step`.
 - STEP import (File > Import STEP, or `ductile part.step`): planes,
   cylinders, cones, spheres, tori, B-spline and rational surfaces, surfaces
   of extrusion and revolution, in any length unit. Parts written by
   OpenCascade import with the volumes OpenCascade reports for them
-  (`crates/ductile-io/tests/occ_import.rs`).
+  (`crates/ductile-io/tests/occ_import.rs`). Assemblies are flattened:
+  every placed instance of a part becomes its own object, named after the
+  part.
 - Zebra stripes (Alt+R, or the Zebra button) to judge surface continuity:
   stripes stay unbroken across tangent (G1) joins and keep their direction
   across curvature-continuous (G2) ones. Headless: `--zebra`.
 - Move / rotate / scale / mirror, linear and radial arrays (Alt+A,
   Alt+Shift+A), undo/redo.
 
-In progress: STEP assemblies; smooth corners between non-perpendicular
-faces.
+In progress: smooth corners between non-perpendicular faces.
 
 ## Layout
 
