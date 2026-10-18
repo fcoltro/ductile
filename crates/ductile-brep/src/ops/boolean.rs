@@ -114,6 +114,13 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     if a.kind != BodyKind::Solid || b.kind != BodyKind::Solid {
         return Err(BoolError::NotSolid);
     }
+    // A whole sphere whose poles or seam lie on the other body's surfaces
+    // is turned so they keep clear: the same solid, without a needlessly
+    // degenerate intersection.
+    let (ra, rb) = (reseamed(a, b), reseamed(b, a));
+    if ra.is_some() || rb.is_some() {
+        return boolean(ra.as_ref().unwrap_or(a), rb.as_ref().unwrap_or(b), op);
+    }
     let diag = a.bbox().union(&b.bbox()).diagonal().max(1e-9);
     let tol = ductile_geom::LINEAR_TOL * (diag / 10.0).max(0.01);
     let mesh_opts = TessOptions::for_size(diag);
@@ -359,6 +366,40 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
         }
         *ex = kept.into_iter().collect();
     }
+    // Intersection curves crossing each other inside a face (where the
+    // faces touch at a point and the section crosses itself, as a plane
+    // tangent to a torus's inner rim) meet at a shared vertex there.
+    {
+        let samples: Vec<Vec<(f64, DVec3)>> = w.edge_ids().map(|e| tessellate_edge(&w, e, &fine_opts)).collect();
+        let mut splits: HashMap<EdgeId, Vec<(f64, VertexId)>> = HashMap::new();
+        for ex in &extras {
+            let list: Vec<EdgeId> = ex.iter().copied().collect();
+            for i in 0..list.len() {
+                for j in i + 1..list.len() {
+                    let Some(p) = edge_edge_crossing(&w, list[i], list[j], &samples, tol) else { continue };
+                    let v = find_vertex(&w, p, tol * 10.0).unwrap_or_else(|| w.add_vertex(p));
+                    for e in [list[i], list[j]] {
+                        let ed = w.edge(e);
+                        if v != ed.v0 && v != ed.v1 {
+                            let t = ed.curve.closest_param_in(w.vertex(v), ed.t0, ed.t1);
+                            splits.entry(e).or_default().push((t, v));
+                        }
+                    }
+                }
+            }
+        }
+        for list in splits.values_mut() {
+            list.sort_by(|a, b| a.0.total_cmp(&b.0));
+            list.dedup_by_key(|x| x.1);
+        }
+        if !splits.is_empty() {
+            let pieces = apply_splits(&mut w, splits);
+            for ex in extras.iter_mut() {
+                let grown: Vec<EdgeId> = ex.iter().filter_map(|e| pieces.get(e)).flatten().copied().collect();
+                ex.extend(grown);
+            }
+        }
+    }
     if debug() {
         eprintln!("crossings {} coincident {:?}", crossing_points.len(), coincident);
         for (f, ex) in extras.iter().enumerate() {
@@ -504,6 +545,45 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     Ok(body)
 }
 
+/// `a` rebuilt with its poles and seam turned away from the surfaces of
+/// `other`, when `a` is a whole sphere and they lie on or near them.
+fn reseamed(a: &Body, other: &Body) -> Option<Body> {
+    use ductile_geom::{DQuat, Frame};
+    if a.faces.len() != 1 {
+        return None;
+    }
+    let Surface::Sphere { frame, radius } = &a.faces[0].surface else { return None };
+    let r = *radius;
+    // The poles and points down the seam, and how far the nearest is from
+    // any surface of `other`.
+    let clearance = |f: &Frame| {
+        let pts: Vec<DVec3> = (0..=8).map(|k| {
+            let v = -std::f64::consts::FRAC_PI_2 + std::f64::consts::PI * k as f64 / 8.0;
+            f.to_world(DVec3::new(r * v.cos(), 0.0, r * v.sin()))
+        }).collect();
+        other.faces.iter().flat_map(|face| pts.iter().map(move |p| {
+            let uv = face.surface.project(*p, None);
+            face.surface.point(uv.x, uv.y).distance(*p)
+        })).fold(f64::MAX, f64::min)
+    };
+    let margin = 1e-3 * r;
+    if clearance(frame) > margin {
+        return None;
+    }
+    let turned = (1..24).map(|k| {
+        let q = DQuat::from_axis_angle(DVec3::new(0.3, 0.5, 0.81).normalize(), 0.37 * k as f64);
+        Frame { origin: frame.origin, x: q * frame.x, y: q * frame.y, z: q * frame.z }
+    });
+    let best = turned.map(|f| (clearance(&f), f)).max_by(|x, y| x.0.total_cmp(&y.0))?;
+    (best.0 > margin).then(|| {
+        let mut s = crate::primitives::make_sphere_in(&best.1, r);
+        if a.faces[0].reversed != s.faces[0].reversed {
+            s = crate::primitives::flip_orientation(s);
+        }
+        s
+    })
+}
+
 fn debug() -> bool {
     std::env::var_os("DUCTILE_DEBUG_BOOL").is_some()
 }
@@ -641,7 +721,7 @@ fn find_edge(w: &Body, index: &HashMap<(u32, u32), Vec<EdgeId>>, va: VertexId, v
 }
 
 /// Cuts edges at the given (parameter, vertex) positions, rewriting loops.
-pub(crate) fn apply_splits(w: &mut Body, splits: HashMap<EdgeId, Vec<(f64, VertexId)>>) {
+pub(crate) fn apply_splits(w: &mut Body, splits: HashMap<EdgeId, Vec<(f64, VertexId)>>) -> HashMap<EdgeId, Vec<EdgeId>> {
     let mut pieces: HashMap<EdgeId, Vec<EdgeId>> = HashMap::new();
     for (e, mut list) in splits {
         list.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -683,6 +763,7 @@ pub(crate) fn apply_splits(w: &mut Body, splits: HashMap<EdgeId, Vec<(f64, Verte
         }
         l.coedges = out;
     }
+    pieces
 }
 
 /// Splits an intersection curve at the vertices lying on it. Returns
@@ -1350,6 +1431,34 @@ mod tests {
 
     fn bx(o: DVec3, s: DVec3) -> Body {
         make_box(&Frame { origin: o, ..Frame::WORLD }, s)
+    }
+
+    /// Checks V(A u B) + V(A n B) = V(A) + V(B) and V(A - B) = V(A) - V(A n B),
+    /// with every result closed.
+    fn identities(a: &Body, b: &Body) {
+        let (va, vb) = (vol(a), vol(b));
+        let r: Vec<Body> = [BoolOp::Union, BoolOp::Intersection, BoolOp::Difference].iter().map(|op| boolean(a, b, *op).unwrap()).collect();
+        assert!(r.iter().all(|x| open_edges(x) == 0));
+        let (u, n, d) = (vol(&r[0]), vol(&r[1]), vol(&r[2]));
+        assert!((u + n - va - vb).abs() < 1e-4 * (va + vb), "{u} + {n} vs {va} + {vb}");
+        assert!((d - (va - n)).abs() < 1e-4 * (va + vb), "{d} vs {va} - {n}");
+    }
+
+    #[test]
+    fn plane_through_a_sphere_seam_and_poles() {
+        // The box's y = 0 face holds the sphere's seam and both poles.
+        let s = make_sphere(DVec3::new(-0.9, 0.0, -0.5), 0.75);
+        let b = make_box(&Frame::new(DVec3::new(0.5, 0.0, -0.8), DVec3::Y, DVec3::NEG_Z), DVec3::new(2.5, 1.9, 1.75));
+        identities(&s, &b);
+    }
+
+    #[test]
+    fn plane_tangent_to_a_torus_inner_rim() {
+        // The box's x = 0 face touches the torus's inner equator, so the
+        // section through it crosses itself there.
+        let t = make_torus(&Frame::new(DVec3::new(-1.0, -0.18, -0.13), DVec3::Z, DVec3::X), 1.5, 0.5);
+        let b = make_box(&Frame::new(DVec3::new(0.0, -0.5, 0.0), DVec3::Y, DVec3::NEG_Z), DVec3::new(1.5, 1.125, 1.25));
+        identities(&t, &b);
     }
 
     #[test]
