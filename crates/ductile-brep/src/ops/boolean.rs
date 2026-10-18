@@ -1331,6 +1331,9 @@ fn split_face(w: &Body, f: FaceId, extras: &[EdgeId], samples: &[Vec<(f64, DVec3
                     eprintln!("  face {} walk: revisits half-edge {h} after {}", f.idx(), d.join(" "));
                     for (k, he) in hes.iter().enumerate() {
                         eprintln!("    he {k} {}->{} out {:.3} inrev {:.3} extra {:?} uv0 {:.4} uv1 {:.4}", he.from, he.to, he.dir_out, he.dir_in_rev, he.extra.map(|e| e.0), he.uv[0], he.uv.last().unwrap());
+                        if he.extra.is_some() && std::env::var("DUCTILE_DEBUG_UV").is_ok() {
+                            eprintln!("      uv {:?}", he.uv.iter().map(|p| format!("({:.4},{:.4})", p.x, p.y)).collect::<Vec<_>>());
+                        }
                     }
                 }
                 return None;
@@ -1473,10 +1476,14 @@ fn refine_dirs(he: &mut HalfEdge, w: &Body, surf: &Surface, c: Coedge, flip: boo
     };
     let start = he.uv[0];
     let end = *he.uv.last().unwrap();
-    if let Some(a) = map(start, ed.curve.tangent(ts) * sign) {
+    // The exact tangent sharpens the polyline's direction; one pointing
+    // far off it (a fitted curve's end overshooting, a degenerate
+    // parametrisation) is wrong, and the polyline is kept.
+    let near = |x: f64, y: f64| (x - y + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+    if let Some(a) = map(start, ed.curve.tangent(ts) * sign).filter(|a| near(*a, he.dir_out).abs() < 1.0) {
         he.dir_out = a;
     }
-    if let Some(a) = map(end, -ed.curve.tangent(te) * sign) {
+    if let Some(a) = map(end, -ed.curve.tangent(te) * sign).filter(|a| near(*a, he.dir_in_rev).abs() < 1.0) {
         he.dir_in_rev = a;
     }
 }
