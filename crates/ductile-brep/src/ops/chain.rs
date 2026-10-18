@@ -24,9 +24,10 @@ pub struct Link {
 }
 
 /// The edges running on smoothly from `e` through each of its vertices,
-/// for as long as exactly one edge continues tangentially (as picking one
-/// edge of a filleted outline picks the whole outline), `e` included.
-pub fn grow_tangent_chain(body: &Body, e: EdgeId) -> Vec<EdgeId> {
+/// for as long as exactly one edge continues tangentially and `accept`
+/// takes it (as picking one edge of a filleted outline picks the whole
+/// outline), `e` included.
+pub fn grow_tangent_chain(body: &Body, e: EdgeId, accept: &dyn Fn(EdgeId) -> bool) -> Vec<EdgeId> {
     let dir_at = |x: EdgeId, v: VertexId| {
         let ed = body.edge(x);
         // Pointing away from `v` along the edge.
@@ -50,7 +51,7 @@ pub fn grow_tangent_chain(body: &Body, e: EdgeId) -> Vec<EdgeId> {
                 .filter(|x| dir_at(*x, v).dot(into) > cos)
                 .collect();
             let [x] = next[..] else { break };
-            if out.contains(&x) {
+            if out.contains(&x) || !accept(x) {
                 break;
             }
             out.push(x);
@@ -531,7 +532,7 @@ mod tests {
             let ed = b.edge(*e);
             ed.start().z > 1.4 && ed.end().z > 1.4
         }).unwrap();
-        let mut chain = grow_tangent_chain(&b, e);
+        let mut chain = grow_tangent_chain(&b, e, &|_| true);
         assert_eq!(chain.len(), 8);
         chain.sort();
         chain.dedup();
@@ -542,7 +543,7 @@ mod tests {
             (ed.start().z - ed.end().z).abs() > 1.0
         });
         if let Some(v) = v {
-            assert_eq!(grow_tangent_chain(&b, v), vec![v]);
+            assert_eq!(grow_tangent_chain(&b, v, &|_| true), vec![v]);
         }
     }
 

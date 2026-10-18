@@ -133,21 +133,36 @@ fn vertex_faces(b: &Body, v: VertexId) -> BTreeSet<FaceId> {
 /// together, the edges are blended one after another instead, each found
 /// again on the body the earlier ones left.
 pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, FilletError> {
+    let first = blend_selected(body, edges, blend);
+    if first.is_ok() || edges.is_empty() {
+        return first;
+    }
     // An edge running on tangentially into others (into an earlier
-    // fillet's arc, say) is blended along the whole run: a blend stopping
-    // part-way along a smooth outline has no sensible end.
+    // fillet's arc, say) may have no sensible end on its own: blend the
+    // whole run instead. Only through clearly sharp edges: the boundaries
+    // of earlier blends are tangent, or nearly so where a corner patch is
+    // fitted.
+    let sharp = |x: EdgeId| edge_info(body, x).map(|i| i.n1.cross(i.n2).length() > 0.09).unwrap_or(false);
     let mut grown: Vec<EdgeId> = Vec::new();
     for &e in edges {
-        for x in super::chain::grow_tangent_chain(body, e) {
-            if !grown.contains(&x) && !matches!(edge_info(body, x), Err(FilletError::NotManifold | FilletError::Smooth)) {
+        for x in super::chain::grow_tangent_chain(body, e, &sharp) {
+            if !grown.contains(&x) {
                 grown.push(x);
             }
         }
     }
-    if !grown.contains(&edges[0]) {
-        grown = edges.to_vec();
+    if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+        eprintln!("blend failed ({:?}); tangent chains {:?}", first.as_ref().err(), grown.iter().map(|e| e.0).collect::<Vec<_>>());
     }
-    let edges = &grown[..];
+    if grown.len() > edges.len() && grown.contains(&edges[0]) {
+        if let Ok(b) = blend_selected(body, &grown, blend) {
+            return Ok(b);
+        }
+    }
+    first
+}
+
+fn blend_selected(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, FilletError> {
     match blend_together(body, edges, blend) {
         Err(err @ (FilletError::Boolean(_) | FilletError::Unsupported)) if edges.len() > 1 => {
             let back: Vec<EdgeId> = edges.iter().rev().copied().collect();

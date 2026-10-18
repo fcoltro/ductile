@@ -99,7 +99,19 @@ fn main() {
         let mut b = make_box(&Frame::WORLD, size);
         let mut v = vol(&b);
         for k in 0..6 {
-            let step = random_step(&mut rng, &b, size);
+            let mut step = random_step(&mut rng, &b, size);
+            // `DEBUG_STEP=k [EDGE=n]`: debug output for step k (blending
+            // only edge n, if given).
+            let debug_step = std::env::var("DEBUG_STEP").ok().and_then(|s| s.parse::<usize>().ok()) == Some(k);
+            if debug_step {
+                if let (Step::Blend(_, edges, _), Some(n)) = (&mut step, std::env::var("EDGE").ok().and_then(|s| s.parse::<u32>().ok())) {
+                    *edges = vec![EdgeId(n)];
+                }
+                unsafe {
+                    std::env::set_var("DUCTILE_DEBUG_BOOL", "1");
+                    std::env::set_var("DUCTILE_DEBUG_FILLET", "1");
+                }
+            }
             if only.is_some() {
                 if k == 0 {
                     println!("  block {size:.3}");

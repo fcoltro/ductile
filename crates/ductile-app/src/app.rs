@@ -651,7 +651,7 @@ impl DuctileApp {
         let mode = self.tool.as_ref().and_then(|t| t.wants_selection()).unwrap_or(self.doc.mode);
         if let Some(Pick::Edge(o, e)) = picking::pick(&self.doc, &self.camera, c, size, mode) {
             let Some(ob) = self.doc.object(o) else { return };
-            for x in ductile_brep::ops::chain::grow_tangent_chain(&ob.body, e) {
+            for x in ductile_brep::ops::chain::grow_tangent_chain(&ob.body, e, &|_| true) {
                 self.doc.selection.insert(Pick::Edge(o, x));
             }
         }
