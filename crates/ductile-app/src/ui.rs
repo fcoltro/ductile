@@ -195,8 +195,10 @@ pub fn side_panel(app: &mut DuctileApp, ui: &mut egui::Ui) {
             for o in &app.doc.objects {
                 let selected = app.doc.selection.contains(&crate::document::Pick::Object(o.id));
                 ui.horizontal(|ui| {
-                    let eye = if o.visible { "on" } else { "off" };
-                    if ui.small_button(eye).on_hover_text("Toggle visibility").clicked() {
+                    let r = ui.add(egui::Button::new("").frame(false).min_size(egui::vec2(18.0, 18.0)));
+                    let col = if r.hovered() { theme::TEXT } else if o.visible { theme::TEXT_DIM } else { theme::TEXT_DIM.gamma_multiply(0.5) };
+                    crate::icons::eye(ui.painter(), r.rect.shrink2(egui::vec2(1.0, 3.0)), col, o.visible);
+                    if r.on_hover_text(if o.visible { "Hide" } else { "Show" }).clicked() {
                         toggle_vis = Some(o.id);
                     }
                     let text = RichText::new(o.name.as_str()).color(if o.visible { theme::TEXT } else { theme::TEXT_DIM });

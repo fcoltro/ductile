@@ -214,3 +214,24 @@ pub fn paint(cmd: Command, painter: &Painter, rect: Rect, color: Color32) -> boo
     }
     true
 }
+
+/// An eye, open or struck through, for visibility toggles.
+pub fn eye(painter: &Painter, rect: Rect, color: Color32, open: bool) {
+    let p = Pen { painter, rect, stroke: Stroke::new(1.3, color) };
+    // An almond: the lids meet in points at either corner.
+    let lid = |sign: f32| -> Vec<(f32, f32)> {
+        (0..=16)
+            .map(|i| {
+                let t = i as f32 / 16.0;
+                (0.06 + 0.88 * t, 0.5 + sign * 0.62 * t * (1.0 - t) * 2.0 * 0.62)
+            })
+            .collect()
+    };
+    p.line(&lid(-1.0));
+    p.line(&lid(1.0));
+    if open {
+        p.painter.circle_filled(p.at(0.5, 0.5), rect.height() * 0.17, color);
+    } else {
+        p.line(&[(0.18, 0.88), (0.82, 0.12)]);
+    }
+}
