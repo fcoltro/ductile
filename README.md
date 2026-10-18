@@ -12,6 +12,21 @@ code from them.
 
 ![Ductile screenshot](docs/screenshot.png)
 
+## What works today
+
+- Primitives: box, cylinder, cone, sphere, torus (exact analytic surfaces).
+- Exact booleans: union, subtract, intersect (Shift+U / Shift+D / Shift+I),
+  including coplanar, tangent and pole cases.
+- Push/pull extrusion of planar faces (E) with live preview.
+- Fillets (Shift+F) and chamfers (Shift+K) on edges between planes, on
+  circular plane/cylinder edges (boss and hole rims), with spherical corner
+  patches where three filleted edges meet.
+- Full revolution of line/arc profiles into exact surfaces (kernel).
+- Move / rotate / scale / mirror, undo/redo, STL and OBJ export.
+
+In progress: sketching and curves, partial revolve, sweep and loft, general
+rolling-ball NURBS fillets, STEP import/export.
+
 ## Layout
 
 | Crate | What it is |

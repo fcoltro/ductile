@@ -742,3 +742,127 @@ impl Tool for ExtrudeTool {
         true
     }
 }
+
+/// Fillet or chamfer of the selected edges of one solid, with the radius
+/// dragged along the edge's bisector.
+pub struct FilletTool {
+    target: ObjectId,
+    body: std::sync::Arc<Body>,
+    edges: Vec<ductile_brep::EdgeId>,
+    base: DVec3,
+    dir: DVec3,
+    start_t: Option<f64>,
+    pub radius: f64,
+    pub chamfer: bool,
+    typed: Option<f64>,
+    cache: std::cell::RefCell<Option<(f64, bool, Option<Body>, Option<String>)>>,
+}
+
+impl FilletTool {
+    /// Starts on the selected edges of the first object that has any.
+    pub fn new(doc: &Document, chamfer: bool) -> Option<Self> {
+        let sel = doc.selected_edges();
+        let target = sel.first()?.0;
+        let edges: Vec<_> = sel.iter().filter(|(o, _)| *o == target).map(|(_, e)| *e).collect();
+        let o = doc.object(target)?;
+        let b = &o.body;
+        let ed = b.edge(edges[0]);
+        let base = ed.mid();
+        // Drag handle: into the material, between the two faces.
+        let n: DVec3 = b
+            .edge_faces(edges[0])
+            .iter()
+            .map(|(f, _)| {
+                let uv = b.face(*f).surface.project(base, None);
+                b.face_normal(*f, uv.x, uv.y)
+            })
+            .sum();
+        let dir = (-n).try_normalize().unwrap_or(DVec3::Z);
+        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, chamfer, typed: None, cache: std::cell::RefCell::new(None) })
+    }
+
+    fn value(&self) -> f64 {
+        self.typed.unwrap_or(self.radius)
+    }
+
+    fn result(&self) -> (Option<Body>, Option<String>) {
+        use ductile_brep::ops::fillet::{blend_edges, Blend};
+        let r = self.value();
+        if let Some((cr, cc, b, e)) = &*self.cache.borrow() {
+            if *cr == r && *cc == self.chamfer {
+                return (b.clone(), e.clone());
+            }
+        }
+        let out = if r <= 1e-9 {
+            (None, None)
+        } else {
+            let blend = if self.chamfer { Blend::Chamfer(r) } else { Blend::Fillet(r) };
+            match blend_edges(&self.body, &self.edges, blend) {
+                Ok(b) => (Some(b), None),
+                Err(e) => (None, Some(e.to_string())),
+            }
+        };
+        *self.cache.borrow_mut() = Some((r, self.chamfer, out.0.clone(), out.1.clone()));
+        out
+    }
+}
+
+impl Tool for FilletTool {
+    fn name(&self) -> &'static str {
+        if self.chamfer {
+            "Chamfer"
+        } else {
+            "Fillet"
+        }
+    }
+    fn hint(&self) -> String {
+        match self.cache.borrow().as_ref().and_then(|c| c.3.clone()) {
+            Some(e) => format!("{} failed: {e}", self.name()),
+            None => format!("{}: drag or type a {} ({:.4}), click or Enter to finish", self.name(), if self.chamfer { "distance" } else { "radius" }, self.value()),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        let t = height_from_ray(self.base, self.dir, &p.ray);
+        let t0 = *self.start_t.get_or_insert(t);
+        if self.typed.is_none() {
+            self.radius = snap_len((t - t0).max(0.0), p.world_per_px);
+        }
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        self.result().0
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        let tip = self.base + self.dir * self.value();
+        out.push(LineInstance::new(self.base, tip, [1.0, 0.85, 0.3, 1.0], 2.0));
+        out.push(LineInstance::point(tip, [1.0, 0.85, 0.3, 1.0], 7.0));
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut r = self.value();
+        let mut ch = drag_value(ui, if self.chamfer { "Distance" } else { "Radius" }, &mut r, 0.01);
+        if ch {
+            self.typed = Some(r.max(0.0));
+        }
+        ch |= ui.checkbox(&mut self.chamfer, "Chamfer").changed();
+        ch
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        if self.result().0.is_some() {
+            vec![self.target]
+        } else {
+            vec![]
+        }
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v.map(|x| x.abs());
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let Some(b) = self.result().0 else { return false };
+        doc.replace_body(self.target, b);
+        doc.selection.clear();
+        true
+    }
+}

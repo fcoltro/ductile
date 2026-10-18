@@ -429,4 +429,17 @@ mod tests {
         let expect = vol(&b) - area * 2.0 * PI * (1.0 + xbar);
         assert!((vol(&f) - expect).abs() < 2e-3, "{} vs {expect}", vol(&f));
     }
+
+    #[test]
+    fn rounded_box_all_edges() {
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let all: Vec<EdgeId> = b.edge_ids().collect();
+        let r = 0.4;
+        let f = blend_edges(&b, &all, Blend::Fillet(r)).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        // Minkowski sum of the inner box with a ball of radius r.
+        let (a, c, d) = (4.0 - 2.0 * r, 3.0 - 2.0 * r, 2.0 - 2.0 * r);
+        let expect = a * c * d + 2.0 * r * (a * c + c * d + a * d) + PI * r * r * (a + c + d) + 4.0 / 3.0 * PI * r * r * r;
+        assert!((vol(&f) - expect).abs() < 5e-3, "{} vs {expect}", vol(&f));
+    }
 }

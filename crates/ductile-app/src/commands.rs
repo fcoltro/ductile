@@ -3,7 +3,7 @@
 
 use crate::app::DuctileApp;
 use crate::document::{Document, Pick, SelectMode};
-use crate::tools::{BoxTool, ExtrudeTool, RoundKind, RoundTool, TransformKind, TransformTool};
+use crate::tools::{BoxTool, ExtrudeTool, FilletTool, RoundKind, RoundTool, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
 use ductile_geom::{DMat4, DVec3, Frame};
@@ -35,6 +35,8 @@ pub enum Command {
     Sphere,
     Torus,
     Extrude,
+    Fillet,
+    Chamfer,
     Union,
     Subtract,
     Intersect,
@@ -84,6 +86,8 @@ impl Command {
         Command::Sphere,
         Command::Torus,
         Command::Extrude,
+        Command::Fillet,
+        Command::Chamfer,
         Command::Union,
         Command::Subtract,
         Command::Intersect,
@@ -134,6 +138,8 @@ impl Command {
             Sphere => "Sphere",
             Torus => "Torus",
             Extrude => "Extrude / push-pull face",
+            Fillet => "Fillet edges",
+            Chamfer => "Chamfer edges",
             Union => "Boolean union",
             Subtract => "Boolean subtract",
             Intersect => "Boolean intersect",
@@ -183,6 +189,8 @@ impl Command {
             Sphere => "Shift+S",
             Torus => "Shift+T",
             Extrude => "E",
+            Fillet => "Shift+F",
+            Chamfer => "Shift+K",
             Union => "Shift+U",
             Subtract => "Shift+D",
             Intersect => "Shift+I",
@@ -230,6 +238,8 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::S, false, true, false) => Sphere,
         (Key::T, false, true, false) => Torus,
         (Key::E, false, false, false) => Extrude,
+        (Key::F, false, true, false) => Fillet,
+        (Key::K, false, true, false) => Chamfer,
         (Key::U, false, true, false) => Union,
         (Key::D, false, true, false) => Subtract,
         (Key::I, false, true, false) => Intersect,
@@ -369,6 +379,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Extrude => match ExtrudeTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Select a planar face to extrude (face mode: 3)".into(),
+        },
+        Fillet | Chamfer => match FilletTool::new(&app.doc, cmd == Chamfer) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select edges to blend (edge mode: 2)".into(),
         },
         Union => boolean_selected(app, BoolOp::Union),
         Subtract => boolean_selected(app, BoolOp::Difference),
@@ -529,6 +543,7 @@ fn export_mesh(doc: &Document, path: &std::path::Path, stl: bool) -> Result<(), 
 
 /// A small scene used for screenshots and first launch demos.
 pub fn demo_scene(doc: &mut Document) {
+    use ductile_brep::ops::fillet::{blend_edges, Blend};
     let at = |x: f64, y: f64, z: f64| Frame { origin: DVec3::new(x, y, z), ..Frame::WORLD };
     let op = |a: ductile_brep::Body, b: ductile_brep::Body, o: BoolOp| boolean(&a, &b, o).unwrap_or(a);
     // A machined block: boss, through hole, flush pocket and a spherical notch.
@@ -537,7 +552,18 @@ pub fn demo_scene(doc: &mut Document) {
     part = op(part, make_cylinder(&at(2.2, 3.0, -1.0), 0.8, 6.0), BoolOp::Difference);
     part = op(part, make_box(&at(4.5, 1.0, 2.0), DVec3::new(2.5, 4.0, 1.0)), BoolOp::Difference);
     part = op(part, make_sphere(DVec3::new(8.0, 0.0, 3.0), 1.4), BoolOp::Difference);
+    // Round the boss rim and the block's vertical corners.
+    let pick = |b: &ductile_brep::Body, f: &dyn Fn(&ductile_brep::topo::Edge) -> bool| b.edge_ids().filter(|e| f(b.edge(*e))).collect::<Vec<_>>();
+    let rim = pick(&part, &|e| matches!(e.curve, ductile_geom::Curve3::Circle { .. }) && e.start().z > 4.0);
+    part = blend_edges(&part, &rim, Blend::Fillet(0.3)).unwrap_or(part);
+    let verticals = pick(&part, &|e| e.curve.is_linear() && (e.start() - e.end()).normalize().z.abs() > 0.999 && [0.0, 8.0].contains(&e.start().x) && [0.0, 6.0].contains(&e.start().y) && e.start().distance(e.end()) > 2.9);
+    part = blend_edges(&part, &verticals, Blend::Fillet(0.6)).unwrap_or(part);
     doc.add_body("Block", part);
+    // A fully rounded box.
+    let all = |b: &ductile_brep::Body| b.edge_ids().collect::<Vec<_>>();
+    let rb = make_box(&at(-7.0, 11.0, 0.0), DVec3::new(5.0, 3.5, 2.5));
+    let rb = blend_edges(&rb, &all(&rb), Blend::Fillet(0.6)).unwrap_or(rb);
+    doc.add_body("Rounded box", rb);
     // Capsule end: cylinder with a hemispherical cap.
     let cap = op(make_cylinder(&at(13.0, 3.0, 0.0), 2.5, 4.0), make_sphere(DVec3::new(13.0, 3.0, 4.0), 2.5), BoolOp::Union);
     doc.add_body("Capsule", cap);

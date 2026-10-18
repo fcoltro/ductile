@@ -40,7 +40,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 }
             });
             ui.menu_button("Solid", |ui| {
-                for c in [Command::Extrude, Command::Union, Command::Subtract, Command::Intersect] {
+                for c in [Command::Extrude, Command::Fillet, Command::Chamfer, Command::Union, Command::Subtract, Command::Intersect] {
                     menu_item(app, ui, c);
                 }
             });
@@ -137,6 +137,8 @@ pub fn toolbar(app: &mut DuctileApp, ui: &mut egui::Ui) {
             cmd_button(app, ui, Command::Torus, "Tor");
             section(ui, "Model");
             cmd_button(app, ui, Command::Extrude, "Extr");
+            cmd_button(app, ui, Command::Fillet, "Fill");
+            cmd_button(app, ui, Command::Chamfer, "Chmf");
             cmd_button(app, ui, Command::Union, "Union");
             cmd_button(app, ui, Command::Subtract, "Sub");
             cmd_button(app, ui, Command::Intersect, "Inter");
