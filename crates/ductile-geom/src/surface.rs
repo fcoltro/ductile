@@ -383,6 +383,24 @@ fn reparam(s: &mut NurbsSurface, u0: f64, u1: f64, v0: f64, v1: f64) {
 /// Closest point projection on a NURBS surface by grid search + Newton.
 pub fn project_nurbs(n: &NurbsSurface, p: DVec3, hint: Option<DVec2>) -> DVec2 {
     let ((u0, u1), (v0, v1)) = n.domain();
+    // From a hint (the previous sample along a curve, usually), Newton
+    // alone is enough when it converges without moving away.
+    if let Some(h) = hint {
+        let h = DVec2::new(h.x.clamp(u0, u1), h.y.clamp(v0, v1));
+        let d0 = n.point(h.x, h.y).distance_squared(p);
+        if d0 <= 1e-24 {
+            return h;
+        }
+        let (uv, converged) = newton_project(n, p, h);
+        let d = n.point(uv.x, uv.y).distance_squared(p);
+        // Stopping on a closed surface's seam may just be Newton pushing
+        // against it from the wrong side: only trust that when the point
+        // is on the surface.
+        let border = (n.closed_u() && (uv.x <= u0 || uv.x >= u1)) || (n.closed_v() && (uv.y <= v0 || uv.y >= v1));
+        if converged && d <= d0 * (1.0 + 1e-9) && (!border || d < 1e-12) {
+            return uv;
+        }
+    }
     let mut best = match hint {
         Some(h) => {
             let h = DVec2::new(h.x.clamp(u0, u1), h.y.clamp(v0, v1));
@@ -390,22 +408,26 @@ pub fn project_nurbs(n: &NurbsSurface, p: DVec3, hint: Option<DVec2>) -> DVec2 {
         }
         None => (f64::INFINITY, DVec2::new(u0, v0)),
     };
-    // Grid search unless the hint is already very close.
-    if best.0 > 1e-12 {
-        let gu = (n.nu * 4).clamp(8, 64);
-        let gv = (n.nv * 4).clamp(8, 64);
-        for i in 0..=gu {
-            for j in 0..=gv {
-                let u = u0 + (u1 - u0) * i as f64 / gu as f64;
-                let v = v0 + (v1 - v0) * j as f64 / gv as f64;
-                let d = n.point(u, v).distance_squared(p);
-                if d < best.0 {
-                    best = (d, DVec2::new(u, v));
-                }
+    let gu = (n.nu * 4).clamp(8, 64);
+    let gv = (n.nv * 4).clamp(8, 64);
+    for i in 0..=gu {
+        for j in 0..=gv {
+            let u = u0 + (u1 - u0) * i as f64 / gu as f64;
+            let v = v0 + (v1 - v0) * j as f64 / gv as f64;
+            let d = n.point(u, v).distance_squared(p);
+            if d < best.0 {
+                best = (d, DVec2::new(u, v));
             }
         }
     }
-    let mut uv = best.1;
+    newton_project(n, p, best.1).0
+}
+
+/// Newton iteration for the closest point from `uv`; also says whether it
+/// converged.
+fn newton_project(n: &NurbsSurface, p: DVec3, mut uv: DVec2) -> (DVec2, bool) {
+    let ((u0, u1), (v0, v1)) = n.domain();
+    let scale = (u1 - u0).abs().max((v1 - v0).abs()).max(1e-300);
     for _ in 0..30 {
         let d = n.derivs(uv.x, uv.y, 2);
         let r = d[0][0] - p;
@@ -418,18 +440,18 @@ pub fn project_nurbs(n: &NurbsSurface, p: DVec3, hint: Option<DVec2>) -> DVec2 {
         let c = sv.dot(sv) + r.dot(svv);
         let det = a * c - b * b;
         if det.abs() < 1e-300 {
-            break;
+            return (uv, false);
         }
         let du = (-f * c + g * b) / det;
         let dv = (f * b - g * a) / det;
         let nuv = DVec2::new((uv.x + du).clamp(u0, u1), (uv.y + dv).clamp(v0, v1));
         let step = (nuv - uv).length();
         uv = nuv;
-        if step < 1e-14 {
-            break;
+        if step < 1e-14 * scale.max(1.0) {
+            return (uv, true);
         }
     }
-    uv
+    (uv, false)
 }
 
 #[allow(dead_code)]

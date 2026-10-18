@@ -344,7 +344,6 @@ impl NurbsCurve {
     pub fn interpolate(pts: &[DVec3], degree: usize) -> Self {
         let n = pts.len();
         assert!(n >= 2);
-        let p = degree.min(n - 1);
         let mut d: Vec<f64> = pts.windows(2).map(|w| w[0].distance(w[1]).sqrt()).collect();
         let total: f64 = d.iter().sum();
         if total <= 0.0 {
@@ -358,6 +357,14 @@ impl NurbsCurve {
             params.push(acc);
         }
         *params.last_mut().unwrap() = 1.0;
+        Self::interpolate_with_params(pts, degree, &params)
+    }
+
+    /// Global interpolation through `pts` at the given increasing
+    /// parameters from 0 to 1, with averaged knots.
+    pub fn interpolate_with_params(pts: &[DVec3], degree: usize, params: &[f64]) -> Self {
+        let n = pts.len();
+        let p = degree.min(n - 1);
         let mut knots = vec![0.0; p + 1];
         for j in 1..n - p {
             let s: f64 = params[j..j + p].iter().sum();

@@ -38,6 +38,11 @@ code from them.
   chains of tangent edges: round a box's corners, then fillet its whole
   top rim in one go; or a side edge between a spline face and a plane,
   closed off by the caps it runs into.
+- Shell (Alt+S): hollow a solid into walls of a given thickness, opening
+  the selected faces, or leaving an inner void when none are selected.
+  Offset solid (Alt+O) grows or shrinks a whole solid. Faces move along
+  their normals with exact offset surfaces for analytic faces, sharp edges
+  stay sharp, and tangent faces (fillets) move together.
 - STEP (AP214) export of exact solids, checked against OpenCascade; STL and
   OBJ export. Headless: `ductile --demo --export-step out.step`.
 - STEP import (File > Import STEP, or `ductile part.step`): planes,
@@ -48,7 +53,7 @@ code from them.
 - Move / rotate / scale / mirror, undo/redo.
 
 In progress: rolling-ball corners where filleted chains meet, mitred sweeps
-around sharp path corners, shell, STEP assemblies.
+around sharp path corners, STEP assemblies.
 
 ## Layout
 

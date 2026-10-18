@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-use super::basis::{basis_funs, binomial, ders_basis_funs, find_span, uniform_clamped_knots};
+use super::basis::{basis_funs, binomial, ders_basis_funs, find_span};
 use super::curve::{dehom, hom, solve_dense, NurbsCurve};
 use crate::{BBox3, Frame};
 use glam::{DMat4, DVec3, DVec4};
@@ -312,22 +312,53 @@ impl NurbsSurface {
         Self::bilinear(p(u0, v0), p(u1, v0), p(u0, v1), p(u1, v1))
     }
 
-    /// Interpolating surface through a grid of points `grid[i][j]`.
+    /// Interpolating surface through a grid of points `grid[i][j]`, with
+    /// centripetal parameters averaged over the rows and columns (A9.4).
     pub fn interpolate_grid(grid: &[Vec<DVec3>], p: usize, q: usize) -> Self {
-        let nu = grid.len();
-        let nv = grid[0].len();
-        // Interpolate along v for every row, then along u for every column.
-        let rows: Vec<NurbsCurve> = grid.iter().map(|r| NurbsCurve::interpolate(r, q)).collect();
-        let rows = make_compatible(&rows);
+        let average = |lines: Vec<Vec<DVec3>>| -> Vec<f64> {
+            let n = lines[0].len();
+            let mut acc = vec![0.0; n];
+            let mut count = 0;
+            for l in &lines {
+                let d: Vec<f64> = l.windows(2).map(|w| w[0].distance(w[1]).sqrt()).collect();
+                let total: f64 = d.iter().sum();
+                if total <= 1e-12 {
+                    continue;
+                }
+                count += 1;
+                let mut s = 0.0;
+                for (i, x) in d.iter().enumerate() {
+                    s += x / total;
+                    acc[i + 1] += s;
+                }
+            }
+            if count == 0 {
+                return (0..n).map(|i| i as f64 / (n - 1) as f64).collect();
+            }
+            let mut out: Vec<f64> = acc.iter().map(|x| x / count as f64).collect();
+            out[n - 1] = 1.0;
+            out
+        };
+        let us = average((0..grid[0].len()).map(|j| grid.iter().map(|r| r[j]).collect()).collect());
+        let vs = average(grid.to_vec());
+        Self::interpolate_grid_with_params(grid, p, q, &us, &vs)
+    }
+
+    /// Interpolating surface through `grid[i][j]` at parameters
+    /// `(us[i], vs[j])`, each increasing from 0 to 1.
+    pub fn interpolate_grid_with_params(grid: &[Vec<DVec3>], p: usize, q: usize, us: &[f64], vs: &[f64]) -> Self {
+        // Interpolate along v for every row, then along u for every column;
+        // shared parameters give every row the same knots.
+        let rows: Vec<NurbsCurve> = grid.iter().map(|r| NurbsCurve::interpolate_with_params(r, q, vs)).collect();
         let q = rows[0].degree;
         let knots_v = rows[0].knots.clone();
         let nvc = rows[0].ctrl.len();
-        let mut cols: Vec<NurbsCurve> = Vec::new();
-        for j in 0..nvc {
-            let pts: Vec<DVec3> = rows.iter().map(|r| dehom(r.ctrl[j])).collect();
-            cols.push(NurbsCurve::interpolate(&pts, p));
-        }
-        let cols = make_compatible(&cols);
+        let cols: Vec<NurbsCurve> = (0..nvc)
+            .map(|j| {
+                let pts: Vec<DVec3> = rows.iter().map(|r| dehom(r.ctrl[j])).collect();
+                NurbsCurve::interpolate_with_params(&pts, p, us)
+            })
+            .collect();
         let p = cols[0].degree;
         let knots_u = cols[0].knots.clone();
         let nuc = cols[0].ctrl.len();
@@ -337,7 +368,6 @@ impl NurbsSurface {
                 ctrl[i * nvc + j] = c.ctrl[i];
             }
         }
-        let _ = (nu, nv, uniform_clamped_knots);
         Self::new(p, q, knots_u, knots_v, nuc, nvc, ctrl)
     }
 }

@@ -479,7 +479,6 @@ mod chain_tests {
     use super::*;
     use crate::ops::boolean::open_edges;
     use crate::ops::heal::compact;
-    use crate::primitives::*;
     use crate::tess::{tessellate, TessOptions};
     use std::f64::consts::PI;
 

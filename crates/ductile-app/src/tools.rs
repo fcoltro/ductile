@@ -1313,6 +1313,132 @@ impl Tool for FilletTool {
     }
 }
 
+// ---------------------------------------------------------------- Shell ----
+
+/// Shell (hollow) a solid with walls of a given thickness, opening the
+/// selected faces; or offset the whole solid by a signed distance.
+pub struct ShellTool {
+    target: ObjectId,
+    body: std::sync::Arc<Body>,
+    open: Vec<ductile_brep::FaceId>,
+    base: DVec3,
+    dir: DVec3,
+    start_t: Option<f64>,
+    pub value: f64,
+    pub offset: bool,
+    typed: Option<f64>,
+    cache: std::cell::RefCell<Option<(f64, bool, Option<Body>, Option<String>)>>,
+}
+
+impl ShellTool {
+    /// Starts on the selected faces' solid, or on the first selected solid.
+    pub fn new(doc: &Document, offset: bool) -> Option<Self> {
+        let faces = doc.selected_faces();
+        let (target, open) = match faces.first() {
+            Some((o, _)) => (*o, faces.iter().filter(|(x, _)| x == o).map(|(_, f)| *f).collect::<Vec<_>>()),
+            None => (*doc.selected_solids().first()?, vec![]),
+        };
+        let o = doc.object(target)?;
+        let b = &o.body;
+        if b.kind == ductile_brep::BodyKind::Wire {
+            return None;
+        }
+        // Drag handle on a face, along its normal: into the material for a
+        // shell, outward for an offset.
+        let f = open.first().copied().unwrap_or(ductile_brep::FaceId(0));
+        let base = b.face_edges(f).first().map(|e| b.edge(*e).mid()).unwrap_or(DVec3::ZERO);
+        let uv = b.face(f).surface.project(base, None);
+        let n = b.face_normal(f, uv.x, uv.y);
+        let dir = if offset { n } else { -n };
+        Some(Self { target, body: o.body.clone(), open: if offset { vec![] } else { open }, base, dir, start_t: None, value: 0.0, offset, typed: None, cache: std::cell::RefCell::new(None) })
+    }
+
+    fn amount(&self) -> f64 {
+        self.typed.unwrap_or(self.value)
+    }
+
+    fn result(&self) -> (Option<Body>, Option<String>) {
+        use ductile_brep::ops::offset::{offset_body, shell};
+        let t = self.amount();
+        if let Some((ct, co, b, e)) = &*self.cache.borrow() {
+            if *ct == t && *co == self.offset {
+                return (b.clone(), e.clone());
+            }
+        }
+        let out = if t.abs() <= 1e-9 || (!self.offset && t < 0.0) {
+            (None, None)
+        } else {
+            let r = if self.offset { offset_body(&self.body, &|_| t) } else { shell(&self.body, &self.open, t) };
+            match r {
+                Ok(b) => (Some(b), None),
+                Err(e) => (None, Some(e.to_string())),
+            }
+        };
+        *self.cache.borrow_mut() = Some((t, self.offset, out.0.clone(), out.1.clone()));
+        out
+    }
+}
+
+impl Tool for ShellTool {
+    fn name(&self) -> &'static str {
+        if self.offset {
+            "Offset solid"
+        } else {
+            "Shell"
+        }
+    }
+    fn hint(&self) -> String {
+        match self.cache.borrow().as_ref().and_then(|c| c.3.clone()) {
+            Some(e) => format!("{} failed: {e}", self.name()),
+            None => format!("{}: drag or type a {} ({:.4}), click or Enter to finish", self.name(), if self.offset { "distance" } else { "thickness" }, self.amount()),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        let t = height_from_ray(self.base, self.dir, &p.ray);
+        let t0 = *self.start_t.get_or_insert(t);
+        if self.typed.is_none() {
+            let d = t - t0;
+            self.value = if self.offset { snap_len(d.abs(), p.world_per_px).copysign(d) } else { snap_len(d.max(0.0), p.world_per_px) };
+        }
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        self.result().0
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        let tip = self.base + self.dir * self.amount();
+        out.push(LineInstance::new(self.base, tip, [1.0, 0.85, 0.3, 1.0], 2.0));
+        out.push(LineInstance::point(tip, [1.0, 0.85, 0.3, 1.0], 7.0));
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut t = self.amount();
+        let ch = drag_value(ui, if self.offset { "Distance" } else { "Thickness" }, &mut t, 0.01);
+        if ch {
+            self.typed = Some(if self.offset { t } else { t.max(0.0) });
+        }
+        ch
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        if self.result().0.is_some() {
+            vec![self.target]
+        } else {
+            vec![]
+        }
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v.map(|x| if self.offset { x } else { x.abs() });
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let Some(b) = self.result().0 else { return false };
+        doc.replace_body(self.target, b);
+        doc.selection.clear();
+        true
+    }
+}
+
 // -------------------------------------------------------------- Revolve ----
 
 /// Revolves the regions of the selected closed curves about an axis in
@@ -1451,6 +1577,25 @@ mod tests {
 
     fn volume(b: &Body) -> f64 {
         ductile_brep::tessellate(b, &ductile_brep::TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume()
+    }
+
+    #[test]
+    fn shell_opens_the_selected_face() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 3.0, 2.0)));
+        let b = doc.object(id).unwrap().body.clone();
+        let top = b.face_ids().find(|f| b.face_edges(*f).iter().all(|e| b.edge(*e).start().z > 1.9 && b.edge(*e).end().z > 1.9)).unwrap();
+        doc.selection.insert(Pick::Face(id, top));
+        let mut t = ShellTool::new(&doc, false).unwrap();
+        t.typed_value(Some(0.25));
+        assert!(t.commit(&mut doc));
+        let v = ductile_brep::tessellate(&doc.object(id).unwrap().body, &ductile_brep::TessOptions::default()).volume();
+        assert!((v - (24.0 - 3.5 * 2.5 * 1.75)).abs() < 1e-6, "{v}");
+        // Offset the result outward.
+        doc.selection.insert(Pick::Object(id));
+        let mut o = ShellTool::new(&doc, true).unwrap();
+        o.typed_value(Some(0.1));
+        assert!(o.commit(&mut doc));
     }
 
     #[test]

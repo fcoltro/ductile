@@ -3,7 +3,7 @@
 
 use crate::app::DuctileApp;
 use crate::document::{Document, Pick, SelectMode};
-use crate::tools::{BoxTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, TransformKind, TransformTool};
+use crate::tools::{BoxTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
 use ductile_geom::{DMat4, DVec3, Frame};
@@ -49,6 +49,8 @@ pub enum Command {
     Sweep,
     Fillet,
     Chamfer,
+    Shell,
+    OffsetSolid,
     Union,
     Subtract,
     Intersect,
@@ -112,6 +114,8 @@ impl Command {
         Command::Sweep,
         Command::Fillet,
         Command::Chamfer,
+        Command::Shell,
+        Command::OffsetSolid,
         Command::Union,
         Command::Subtract,
         Command::Intersect,
@@ -176,6 +180,8 @@ impl Command {
             Sweep => "Sweep",
             Fillet => "Fillet edges",
             Chamfer => "Chamfer edges",
+            Shell => "Shell (hollow, open selected faces)",
+            OffsetSolid => "Offset solid",
             Union => "Boolean union",
             Subtract => "Boolean subtract",
             Intersect => "Boolean intersect",
@@ -235,6 +241,8 @@ impl Command {
             Revolve => "V",
             Fillet => "Shift+F",
             Chamfer => "Shift+K",
+            Shell => "Alt+S",
+            OffsetSolid => "Alt+O",
             Union => "Shift+U",
             Loft => "Alt+L",
             Sweep => "Alt+W",
@@ -296,6 +304,8 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::W, false, false, true) => Sweep,
         (Key::F, false, true, false) => Fillet,
         (Key::K, false, true, false) => Chamfer,
+        (Key::S, false, false, true) => Shell,
+        (Key::O, false, false, true) => OffsetSolid,
         (Key::U, false, true, false) => Union,
         (Key::D, false, true, false) => Subtract,
         (Key::I, false, true, false) => Intersect,
@@ -473,6 +483,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Fillet | Chamfer => match FilletTool::new(&app.doc, cmd == Chamfer) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Select edges to blend (edge mode: 2)".into(),
+        },
+        Shell | OffsetSolid => match ShellTool::new(&app.doc, cmd == OffsetSolid) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select a solid, or the faces to open (face mode: 3)".into(),
         },
         Union => boolean_selected(app, BoolOp::Union),
         Loft | Sweep => {
@@ -757,9 +771,12 @@ pub fn demo_scene(doc: &mut Document) {
             ],
         };
         if let Some(b) = ductile_brep::ops::revolve::revolve_loop(&l, c, DVec3::Z) {
-            // Round the lip: a rolling-ball fillet between the flat top and the spline wall.
-            let lip = b.edge_ids().find(|e| b.edge(*e).is_closed() && b.edge(*e).start().z > c.z + 6.0);
-            let b = lip.and_then(|e| blend_edges(&b, &[e], Blend::Fillet(0.35)).ok()).unwrap_or(b);
+            // Hollow it out through the mouth, walls 0.2 thick, then round
+            // both lip edges with rolling-ball fillets.
+            let mouth = b.face_ids().find(|f| matches!(b.face(*f).surface, ductile_geom::Surface::Plane { .. }) && b.face_edges(*f).iter().all(|e| b.edge(*e).start().z > c.z + 6.0));
+            let b = mouth.and_then(|f| ductile_brep::ops::offset::shell(&b, &[f], 0.2).ok()).unwrap_or(b);
+            let lips: Vec<_> = b.edge_ids().filter(|e| b.edge(*e).is_closed() && b.edge(*e).start().z > c.z + 6.4).collect();
+            let b = blend_edges(&b, &lips, Blend::Fillet(0.08)).unwrap_or(b);
             doc.add_body("Vase", b);
         }
     }
