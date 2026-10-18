@@ -1599,6 +1599,9 @@ pub enum CurveKind {
     CenterArc,
     /// Slot: two centers and a radius.
     Slot,
+    /// Arc leaving the end of a curve tangentially (or a direction clicked
+    /// after the start), to an end point.
+    TangentArc,
 }
 
 impl CurveKind {
@@ -1646,11 +1649,58 @@ pub struct CurveTool {
     /// height, a slot's radius, a center arc's sweep in degrees, a
     /// two-point circle's diameter.
     typed: Option<f64>,
+    /// A tangent arc's start direction, from the curve it leaves.
+    tangent: Option<DVec3>,
+}
+
+/// The end of a curve or edge nearest `q` within `tol`, with the
+/// direction leaving the curve there.
+fn curve_end_near(doc: &Document, q: DVec3, tol: f64) -> Option<(DVec3, DVec3)> {
+    let mut best: Option<(f64, DVec3, DVec3)> = None;
+    for o in doc.objects.iter().filter(|o| o.visible) {
+        for e in &o.body.edges {
+            for (t, sign) in [(e.t0, -1.0), (e.t1, 1.0)] {
+                let p = e.curve.point(t);
+                let d = p.distance(q);
+                if d < tol && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, p, e.curve.tangent(t) * sign));
+                }
+            }
+        }
+    }
+    best.map(|b| (b.1, b.2))
+}
+
+/// The arc from `p` leaving along `t` to `q` in the plane with normal `z`,
+/// or a line when `q` lies straight ahead.
+fn tangent_arc(p: DVec3, t: DVec3, q: DVec3, z: DVec3) -> Option<ductile_brep::profile::Segment> {
+    use ductile_brep::profile::Segment;
+    let t = (t - z * t.dot(z)).try_normalize()?;
+    let d = q - p;
+    let n = z.cross(t);
+    let h = d.dot(n);
+    if d.length() < 1e-9 {
+        return None;
+    }
+    if h.abs() < 1e-9 * d.length() {
+        return Some(Segment::line(p, q));
+    }
+    let r = d.length_squared() / (2.0 * h);
+    let c = p + n * r;
+    let axis = if h > 0.0 { z } else { -z };
+    let x = (p - c).normalize();
+    let y = axis.cross(x);
+    let w = q - c;
+    let mut sweep = w.dot(y).atan2(w.dot(x));
+    if sweep <= 0.0 {
+        sweep += std::f64::consts::TAU;
+    }
+    Some(Segment::new(ductile_geom::Curve3::Circle { frame: Frame::new(c, axis, x), radius: r.abs() }, 0.0, sweep))
 }
 
 impl CurveTool {
     pub fn new(kind: CurveKind) -> Self {
-        Self { kind, points: vec![], cursor: None, size: DVec3::ZERO, angle: 0.0, sides: 6, closed: false, typed: None }
+        Self { kind, points: vec![], cursor: None, size: DVec3::ZERO, angle: 0.0, sides: 6, closed: false, typed: None, tangent: None }
     }
 
     /// Points the multi-click kinds pass through, with the cursor as the
@@ -1762,6 +1812,15 @@ impl CurveTool {
         let circle = |c: DVec3, x: DVec3, r: f64, sweep: f64| Segment::new(Curve3::Circle { frame: Frame::new(c, f.z, x), radius: r }, 0.0, sweep);
         match (self.kind, pts) {
             (_, [] | [_]) => vec![],
+            (CurveKind::TangentArc, [a, rest @ ..]) => {
+                let (t, end) = match (self.tangent, rest) {
+                    (Some(t), [.., e]) => (t, *e),
+                    (None, [dir, e, ..]) => (*dir - *a, *e),
+                    (None, [e]) => return vec![Segment::line(*a, *e)],
+                    _ => return vec![],
+                };
+                tangent_arc(*a, t, end, f.z).map(|s| vec![s]).unwrap_or_default()
+            }
             (CurveKind::TwoPointCircle, [a, b, ..]) => {
                 let r = self.typed.map(|d| d.abs() * 0.5).unwrap_or(a.distance(*b) * 0.5);
                 let x = (*b - *a).try_normalize().unwrap_or(f.x);
@@ -1843,6 +1902,7 @@ impl Tool for CurveTool {
             CurveKind::TwoPointCircle | CurveKind::ThreePointCircle => "Circle",
             CurveKind::CenterArc => "Arc",
             CurveKind::Slot => "Slot",
+            CurveKind::TangentArc => "Tangent arc",
         }
     }
     fn hint(&self) -> String {
@@ -1877,6 +1937,9 @@ impl Tool for CurveTool {
             (CurveKind::Slot, 0) => "Slot: click the first center".into(),
             (CurveKind::Slot, 1) => "Slot: click the second center".into(),
             (CurveKind::Slot, _) => "Slot: click or type the radius".into(),
+            (CurveKind::TangentArc, 0) => "Tangent arc: click the end of a curve to leave it tangentially (or any point, then a direction)".into(),
+            (CurveKind::TangentArc, 1) if self.tangent.is_none() => "Tangent arc: click the direction to leave in".into(),
+            (CurveKind::TangentArc, _) => "Tangent arc: click the end; D flips the direction".into(),
         }
     }
     fn pointer(&mut self, _doc: &Document, cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
@@ -1911,7 +1974,21 @@ impl Tool for CurveTool {
         if !p.clicked {
             return ToolOutcome::Continue;
         }
-        let Some(q) = pt else { return ToolOutcome::Continue };
+        let Some(mut q) = pt else { return ToolOutcome::Continue };
+        if self.kind == CurveKind::TangentArc {
+            if self.points.is_empty() {
+                if let Some((e, t)) = curve_end_near(_doc, q, p.world_per_px * 10.0) {
+                    q = e;
+                    self.tangent = Some(t);
+                }
+            }
+            if self.points.last().is_some_and(|l| l.distance(q) < 1e-9) {
+                return ToolOutcome::Continue;
+            }
+            self.points.push(q);
+            let n = if self.tangent.is_some() { 2 } else { 3 };
+            return if self.points.len() >= n { ToolOutcome::Finished } else { ToolOutcome::Continue };
+        }
         if let Some(n) = self.kind.clicks() {
             if self.points.last().is_some_and(|l| l.distance(q) < 1e-9) {
                 return ToolOutcome::Continue;
@@ -1978,7 +2055,7 @@ impl Tool for CurveTool {
                 ch |= drag_value(ui, "Half width", &mut self.size.x, 0.1);
                 ch |= drag_value(ui, "Half height", &mut self.size.y, 0.1);
             }
-            CurveKind::Polyline | CurveKind::Spline | CurveKind::Arc | CurveKind::ThreePointCircle => {
+            CurveKind::Polyline | CurveKind::Spline | CurveKind::Arc | CurveKind::ThreePointCircle | CurveKind::TangentArc => {
                 ui.label(format!("{} points", self.points.len()));
             }
             CurveKind::ThreePointRectangle | CurveKind::Slot | CurveKind::CenterArc | CurveKind::TwoPointCircle => {
@@ -1998,6 +2075,12 @@ impl Tool for CurveTool {
         ch
     }
     fn command_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
+        if key == egui::Key::D && !m.any() && self.kind == CurveKind::TangentArc {
+            if let Some(t) = &mut self.tangent {
+                *t = -*t;
+                return true;
+            }
+        }
         if key != egui::Key::C || m.any() {
             return false;
         }
@@ -2026,7 +2109,7 @@ impl Tool for CurveTool {
                     self.size.y = v;
                 }
                 CurveKind::ThreePointRectangle | CurveKind::Slot | CurveKind::CenterArc | CurveKind::TwoPointCircle => self.typed = Some(v),
-                CurveKind::Polyline | CurveKind::Spline | CurveKind::Arc | CurveKind::ThreePointCircle => {}
+                CurveKind::Polyline | CurveKind::Spline | CurveKind::Arc | CurveKind::ThreePointCircle | CurveKind::TangentArc => {}
             }
         } else {
             self.typed = None;
@@ -4603,6 +4686,24 @@ mod tests {
         let area: f64 = (0..n).map(|i| poly[i].truncate().perp_dot(poly[(i + 1) % n].truncate()) / 2.0).sum::<f64>().abs();
         let v = extrude_selected(&mut doc);
         assert!((v - area).abs() < 1e-3 * area, "{v} vs {area}");
+    }
+
+    #[test]
+    fn tangent_arc_leaves_a_line_smoothly() {
+        let mut doc = Document::default();
+        doc.add_body("Line", ductile_brep::profile::wire_from_segments(&[ductile_brep::profile::Segment::line(DVec3::ZERO, DVec3::X * 2.0)]));
+        let mut t = CurveTool::new(CurveKind::TangentArc);
+        // Click near the line's end: the arc starts there, leaving along +X.
+        assert!(!click(&mut t, &doc, DVec3::new(2.02, 0.01, 0.0), true));
+        assert!(click(&mut t, &doc, DVec3::new(3.0, 1.0, 0.0), true));
+        let segs = t.segments();
+        assert_eq!(segs.len(), 1);
+        let s = &segs[0];
+        assert!(s.start().distance(DVec3::X * 2.0) < 1e-9 && s.end().distance(DVec3::new(3.0, 1.0, 0.0)) < 1e-9);
+        assert!(s.tangent_at(s.t0).normalize().distance(DVec3::X) < 1e-9, "{}", s.tangent_at(s.t0));
+        // A quarter circle of radius 1.
+        let ductile_geom::Curve3::Circle { radius, .. } = s.curve else { panic!() };
+        assert!((radius - 1.0).abs() < 1e-9 && (s.t1 - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
     }
 
     #[test]
