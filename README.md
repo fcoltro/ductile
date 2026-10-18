@@ -26,6 +26,8 @@ code from them.
   through their base, by a dragged or typed angle. Intersection curves
   (Alt+N) adds the curves where selected solids cross; Project (Alt+J)
   traces curves onto solids along the construction plane's normal.
+- Move faces: G in face mode pushes or tilts planar faces and re-trims the
+  faces around them (curved neighbours follow a straight push).
 - Delete faces (Delete in face mode) heals the solid where it can: holes
   and bosses close up, and fillets or chamfers between planes grow back to
   a sharp edge. Otherwise the solid becomes an open sheet. Duplicate

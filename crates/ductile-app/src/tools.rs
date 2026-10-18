@@ -416,6 +416,9 @@ pub struct TransformTool {
     /// Selected curve control points; when any, only these move.
     controls: Vec<(ObjectId, ductile_brep::EdgeId, u32)>,
     surface_controls: Vec<(ObjectId, ductile_brep::FaceId, u32)>,
+    /// Selected faces of solids; when any, these move and the faces
+    /// around them are re-trimmed to follow.
+    faces: Vec<(ObjectId, FaceId)>,
     pivot: DVec3,
     start: Option<DVec3>,
     current: Option<DVec3>,
@@ -430,7 +433,14 @@ impl TransformTool {
         let controls: Vec<_> = doc.selection.iter().filter_map(|p| if let Pick::Control(o, e, i) = p { Some((*o, *e, *i)) } else { None }).collect();
         let surface_controls: Vec<_> = doc.selection.iter().filter_map(|p| if let Pick::SurfaceControl(o, f, i) = p { Some((*o, *f, *i)) } else { None }).collect();
         let targets = doc.selected_objects();
+        let faces: Vec<(ObjectId, FaceId)> = if controls.is_empty() && surface_controls.is_empty() { doc.selected_faces() } else { Vec::new() };
         let mut bb = ductile_geom::BBox3::EMPTY;
+        for (o, f) in &faces {
+            if let Some(ob) = doc.object(*o) {
+                let b = &ob.body;
+                bb = bb.union(&ductile_geom::BBox3::from_points(b.face_loops(*f).flat_map(|l| l.coedges.iter()).map(|c| b.vertex(b.coedge_vertices(*c).0))));
+            }
+        }
         for (o, f, i) in &surface_controls {
             if let Some(ductile_geom::Surface::Nurbs(s)) = doc.object(*o).map(|ob| ob.body.face(*f).surface.clone()) {
                 if let Some(h) = s.ctrl.get(*i as usize) {
@@ -438,13 +448,13 @@ impl TransformTool {
                 }
             }
         }
-        if controls.is_empty() && surface_controls.is_empty() {
+        if controls.is_empty() && surface_controls.is_empty() && faces.is_empty() {
             for id in &targets {
                 if let Some(o) = doc.object(*id) {
                     bb = bb.union(&o.body.bbox());
                 }
             }
-        } else {
+        } else if faces.is_empty() {
             for (o, e, i) in &controls {
                 if let Some(ductile_geom::Curve3::Nurbs(n)) = doc.object(*o).map(|ob| ob.body.edge(*e).curve.clone()) {
                     if let Some(p) = n.control_points().get(*i as usize) {
@@ -454,12 +464,40 @@ impl TransformTool {
             }
         }
         let pivot = if bb.is_empty() { DVec3::ZERO } else { bb.center() };
-        Self { kind, targets, controls, surface_controls, pivot, start: None, current: None, axis: None, typed: None, value: 0.0 }
+        Self { kind, targets, controls, surface_controls, faces, pivot, start: None, current: None, axis: None, typed: None, value: 0.0 }
     }
 
     /// The object's body after applying `m` to it, or to its selected
     /// control points.
     fn moved(&self, id: ObjectId, body: &Body, m: &DMat4) -> Body {
+        if !self.faces.is_empty() {
+            // Moving faces: the planes go where `m` takes them, the faces
+            // around follow; the body stays put when they cannot.
+            let mine: Vec<FaceId> = self.faces.iter().filter(|f| f.0 == id).map(|f| f.1).collect();
+            let planes: std::collections::HashMap<FaceId, ductile_geom::Surface> = mine.iter().map(|f| (*f, body.face(*f).surface.transformed(m))).collect();
+            if let Some(b) = ductile_brep::ops::draft::replace_planes(body, &planes) {
+                return b;
+            }
+            // A push straight out along the faces' normals: offset them, which
+            // also re-trims curved faces around them.
+            let shift = m.transform_point3(DVec3::ZERO);
+            let along: Option<Vec<f64>> = mine
+                .iter()
+                .map(|f| {
+                    let ductile_geom::Surface::Plane { frame } = &body.face(*f).surface else { return None };
+                    let n = if body.face(*f).reversed { -frame.z } else { frame.z };
+                    let moved_n = m.transform_vector3(n);
+                    ((moved_n - n).length() < 1e-9 && (shift - n * shift.dot(n)).length() < 1e-9 * (1.0 + shift.length())).then_some(shift.dot(n))
+                })
+                .collect();
+            if let Some(d) = along {
+                let dist: std::collections::HashMap<FaceId, f64> = mine.iter().copied().zip(d).collect();
+                if let Ok(b) = ductile_brep::ops::offset::offset_body(body, &|f| dist.get(&f).copied().unwrap_or(0.0)) {
+                    return b;
+                }
+            }
+            return body.clone();
+        }
         if self.controls.is_empty() && self.surface_controls.is_empty() {
             return body.transformed(m);
         }
@@ -3049,6 +3087,35 @@ mod tests {
         // The rectangle lies on the face, at x = 0.
         assert!(w.vertices.iter().all(|v| v.point.x.abs() < 1e-9), "{:?}", w.vertices);
         set_current_cplane(CPlane::default());
+    }
+
+    #[test]
+    fn move_tool_pushes_a_face() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(2.0, 2.0, 1.0)));
+        let b = doc.object(id).unwrap().body.clone();
+        let top = b.face_ids().find(|f| b.face_normal(*f, 0.5, 0.5).z > 0.9).unwrap();
+        doc.mode = SelectMode::Face;
+        doc.selection.insert(Pick::Face(id, top));
+        let mut t = TransformTool::new(TransformKind::Move, &doc);
+        t.axis = Some(2);
+        t.typed = Some(0.5);
+        assert!(t.commit(&mut doc));
+        let v = volume(&doc.object(id).unwrap().body);
+        assert!((v - 6.0).abs() < 1e-9, "{v}");
+        // The top of a cylinder rides up its curved side.
+        let mut doc = Document::default();
+        let id = doc.add_body("Cyl", ductile_brep::primitives::make_cylinder(&ductile_geom::Frame::WORLD, 1.0, 2.0));
+        let b = doc.object(id).unwrap().body.clone();
+        let top = b.face_ids().find(|f| matches!(b.face(*f).surface, ductile_geom::Surface::Plane { .. }) && b.face_normal(*f, 0.0, 0.0).z > 0.9).unwrap();
+        doc.mode = SelectMode::Face;
+        doc.selection.insert(Pick::Face(id, top));
+        let mut t = TransformTool::new(TransformKind::Move, &doc);
+        t.axis = Some(2);
+        t.typed = Some(1.0);
+        assert!(t.commit(&mut doc));
+        let v = volume(&doc.object(id).unwrap().body);
+        assert!((v - 3.0 * std::f64::consts::PI).abs() < 5e-3, "{v}");
     }
 
     #[test]
