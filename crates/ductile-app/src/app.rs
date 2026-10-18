@@ -8,7 +8,7 @@ use crate::document::{mesh_body, Document, ObjectId, Pick, SelectMode};
 use crate::picking;
 use crate::render::{LineInstance, ObjectStyle, ViewportRenderer};
 use crate::theme;
-use crate::tools::{self, CPlane, PointerInfo, Tool, ToolOutcome};
+use crate::tools::{self, CPlane, PointerInfo, Tool, ToolOutcome, TransformKind, TransformTool};
 use ductile_brep::BodyMesh;
 use glam::{DVec2, DVec3};
 use std::collections::HashMap;
@@ -23,6 +23,8 @@ pub struct Options {
     pub zebra: bool,
     /// Camera override: target x, y, z, distance, yaw and pitch in degrees.
     pub camera: Option<[f64; 6]>,
+    /// Index of an object to select at start (for screenshots).
+    pub select: Option<usize>,
 }
 
 struct BoxSelect {
@@ -57,6 +59,30 @@ pub struct DuctileApp {
     screenshot_done: Arc<std::sync::atomic::AtomicBool>,
     pub pending_finish: bool,
     pub pending_cancel: bool,
+    /// The transform-gizmo handle under the cursor.
+    gizmo_hover: Option<(TransformKind, usize)>,
+    /// A transform started by dragging a gizmo handle; it ends on release.
+    gizmo_drag: bool,
+}
+
+/// One draggable handle of the transform gizmo, as a screen polyline.
+struct GizmoHandle {
+    kind: TransformKind,
+    axis: usize,
+    pts: Vec<egui::Pos2>,
+}
+
+const AXIS_COLORS: [egui::Color32; 3] = [egui::Color32::from_rgb(220, 80, 80), egui::Color32::from_rgb(110, 200, 80), egui::Color32::from_rgb(80, 130, 230)];
+
+fn dist_to_polyline(p: egui::Pos2, pts: &[egui::Pos2]) -> f32 {
+    pts.windows(2)
+        .map(|w| {
+            let (a, b) = (w[0], w[1]);
+            let ab = b - a;
+            let t = ((p - a).dot(ab) / ab.length_sq().max(1e-6)).clamp(0.0, 1.0);
+            p.distance(a + ab * t)
+        })
+        .fold(f32::INFINITY, f32::min)
 }
 
 impl DuctileApp {
@@ -72,6 +98,8 @@ impl DuctileApp {
             style_key: 0,
             tool: None,
             tool_from_key: false,
+            gizmo_hover: None,
+            gizmo_drag: false,
             preview_shown: false,
             status: "Welcome to Ductile. Press Space for the command palette, F1 for help.".into(),
             box_select: None,
@@ -100,6 +128,9 @@ impl DuctileApp {
         }
         if opts.zebra {
             app.toggle_zebra();
+        }
+        if let Some(id) = opts.select.and_then(|i| app.doc.objects.get(i)).map(|o| o.id) {
+            app.doc.selection.insert(Pick::Object(id));
         }
         if let Some(c) = opts.camera {
             app.camera.target = DVec3::new(c[0], c[1], c[2]);
@@ -341,6 +372,14 @@ impl DuctileApp {
         }
 
         // Tool / selection interaction.
+        let gizmo = if self.tool.is_none() { self.gizmo_handles(rect) } else { None };
+        if self.gizmo_drag && (self.tool.is_none() || !pointer.primary_down()) {
+            // Released (or the tool was cancelled): a gizmo drag confirms on release.
+            self.gizmo_drag = false;
+            if self.tool.is_some() {
+                self.finish_tool();
+            }
+        }
         if let Some(c) = cursor {
             let ndc = DVec2::new(c.x / size.x * 2.0 - 1.0, 1.0 - c.y / size.y * 2.0);
             let ray = self.camera.ray(ndc);
@@ -381,13 +420,33 @@ impl DuctileApp {
                     self.snap_marker = Some(p);
                 }
             } else {
-                if moved && !nav_drag && self.box_select.is_none() {
+                let cp = egui::pos2(rect.min.x + c.x as f32, rect.min.y + c.y as f32);
+                // Hover picks the handle under the press point while a drag begins.
+                let at = if resp.drag_started_by(egui::PointerButton::Primary) { pointer.press_origin().unwrap_or(cp) } else { cp };
+                self.gizmo_hover = if self.box_select.is_none() && !nav_drag {
+                    gizmo
+                        .iter()
+                        .flatten()
+                        .map(|h| (dist_to_polyline(at, &h.pts), h))
+                        .filter(|(d, _)| *d < 7.0)
+                        .min_by(|a, b| a.0.total_cmp(&b.0))
+                        .map(|(_, h)| (h.kind, h.axis))
+                } else {
+                    None
+                };
+                if moved && !nav_drag && self.box_select.is_none() && self.gizmo_hover.is_none() {
                     self.doc.hover = picking::pick(&self.doc, &self.camera, c, size, self.doc.mode);
                 }
-                if clicked {
+                if clicked && self.gizmo_hover.is_none() {
                     self.click_select(c, size, mods);
                 }
-                if resp.drag_started_by(egui::PointerButton::Primary) {
+                if let (Some((kind, axis)), true) = (self.gizmo_hover, resp.drag_started_by(egui::PointerButton::Primary)) {
+                    let mut t = TransformTool::new(kind, &self.doc);
+                    t.axis = Some(axis);
+                    self.start_tool(Box::new(t));
+                    self.gizmo_drag = true;
+                    self.gizmo_hover = None;
+                } else if resp.drag_started_by(egui::PointerButton::Primary) {
                     if let Some(p) = resp.interact_pointer_pos() {
                         self.box_select = Some(BoxSelect { start: p, current: p });
                     }
@@ -449,6 +508,11 @@ impl DuctileApp {
             ui.painter().rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(120, 150, 255, 25));
             ui.painter().rect_stroke(r, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 150, 255)), egui::StrokeKind::Inside);
         }
+        if let Some(h) = &gizmo {
+            if self.tool.is_none() {
+                self.draw_gizmo(ui, rect, h);
+            }
+        }
         self.view_gizmo(ui, rect);
         if !self.typed.is_empty() {
             ui.painter().text(
@@ -458,6 +522,65 @@ impl DuctileApp {
                 egui::FontId::monospace(16.0),
                 theme::ACCENT,
             );
+        }
+    }
+
+    /// The move arrows and rotate rings drawn at the selection, sized to stay
+    /// the same on screen. None when nothing selected can be transformed.
+    fn gizmo_handles(&self, rect: egui::Rect) -> Option<Vec<GizmoHandle>> {
+        if self.doc.selection.is_empty() {
+            return None;
+        }
+        let t = TransformTool::new(TransformKind::Move, &self.doc);
+        if !t.has_targets() {
+            return None;
+        }
+        let pivot = t.pivot();
+        let to_screen = |p: DVec3| {
+            self.camera.project(p).map(|n| egui::pos2(rect.min.x + ((n.x + 1.0) * 0.5) as f32 * rect.width(), rect.min.y + ((1.0 - n.y) * 0.5) as f32 * rect.height()))
+        };
+        let o = to_screen(pivot)?;
+        let wpp = self.camera.world_per_pixel(pivot, rect.height() as f64);
+        let axes = [DVec3::X, DVec3::Y, DVec3::Z];
+        let mut out = Vec::new();
+        for (i, a) in axes.iter().enumerate() {
+            // Arrows start clear of the rings so the two never overlap.
+            if let (Some(p0), Some(p1)) = (to_screen(pivot + *a * 60.0 * wpp), to_screen(pivot + *a * 110.0 * wpp)) {
+                if p0.distance(p1) > 12.0 && o.distance(p0) > 4.0 {
+                    out.push(GizmoHandle { kind: TransformKind::Move, axis: i, pts: vec![p0, p1] });
+                }
+            }
+            let (u, v) = (axes[(i + 1) % 3], axes[(i + 2) % 3]);
+            let pts: Option<Vec<egui::Pos2>> = (0..=48)
+                .map(|k| {
+                    let t = k as f64 / 48.0 * std::f64::consts::TAU;
+                    to_screen(pivot + (u * t.cos() + v * t.sin()) * 45.0 * wpp)
+                })
+                .collect();
+            if let Some(pts) = pts {
+                out.push(GizmoHandle { kind: TransformKind::Rotate, axis: i, pts });
+            }
+        }
+        Some(out)
+    }
+
+    fn draw_gizmo(&self, ui: &egui::Ui, rect: egui::Rect, handles: &[GizmoHandle]) {
+        let painter = ui.painter_at(rect);
+        for h in handles {
+            let hot = self.gizmo_hover == Some((h.kind, h.axis));
+            let col = if hot { egui::Color32::from_rgb(255, 220, 90) } else { AXIS_COLORS[h.axis] };
+            match h.kind {
+                TransformKind::Move => {
+                    let (a, b) = (h.pts[0], h.pts[1]);
+                    painter.line_segment([a, b], egui::Stroke::new(if hot { 3.5 } else { 2.5 }, col));
+                    let d = (b - a).normalized();
+                    let n = egui::vec2(-d.y, d.x);
+                    painter.add(egui::Shape::convex_polygon(vec![b + d * 12.0, b + n * 6.0, b - n * 6.0], col, egui::Stroke::NONE));
+                }
+                _ => {
+                    painter.add(egui::Shape::line(h.pts.clone(), egui::Stroke::new(if hot { 3.0 } else { 1.8 }, col)));
+                }
+            }
         }
     }
 

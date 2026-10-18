@@ -106,6 +106,9 @@ code from them.
   across curvature-continuous (G2) ones. Headless: `--zebra`.
 - Move / rotate / scale / mirror, linear and radial arrays (Alt+A,
   Alt+Shift+A), undo/redo.
+- Transform gizmo: selecting something shows axis arrows and rotation rings
+  at it; drag an arrow to move along that axis or a ring to turn about it
+  (type a value while dragging for an exact one). Headless: `--select N`.
 
 In progress: more of Plasticity's curve and surface tools.
 

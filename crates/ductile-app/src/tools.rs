@@ -513,6 +513,11 @@ impl TransformTool {
         !self.targets.is_empty()
     }
 
+    /// The point the transform turns and scales about.
+    pub fn pivot(&self) -> DVec3 {
+        self.pivot
+    }
+
     fn axis_dir(&self) -> Option<DVec3> {
         self.axis.map(|a| [DVec3::X, DVec3::Y, DVec3::Z][a])
     }
