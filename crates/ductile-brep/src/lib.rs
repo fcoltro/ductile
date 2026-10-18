@@ -4,6 +4,7 @@
 pub mod ops;
 pub mod primitives;
 pub mod profile;
+pub mod ssi;
 pub mod tess;
 pub mod topo;
 

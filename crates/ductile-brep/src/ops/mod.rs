@@ -2,3 +2,4 @@
 //! Modeling operations.
 
 pub mod extrude;
+pub mod boolean;

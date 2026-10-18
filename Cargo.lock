@@ -551,6 +551,7 @@ version = "0.1.0"
 dependencies = [
  "ductile-geom",
  "glam",
+ "log",
  "serde",
  "serde_json",
  "spade",

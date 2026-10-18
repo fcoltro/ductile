@@ -6,6 +6,7 @@ license.workspace = true
 description = "Topology and modeling operations of the Ductile kernel."
 
 [dependencies]
+log = "0.4"
 ductile-geom.workspace = true
 glam.workspace = true
 serde.workspace = true

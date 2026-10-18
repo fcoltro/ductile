@@ -249,6 +249,9 @@ pub fn face_coedge_uvs(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> V
                 }
             }
         }
+        if let Some(p) = pu {
+            resolve_singular_chains(surf, &mut coedge_uvs, &fixed, flip, out.is_empty(), p);
+        }
         out.push(l.coedges.iter().copied().zip(coedge_uvs).collect::<Vec<_>>());
     }
     // Shift hole loops into the outer loop's period.
@@ -273,8 +276,78 @@ pub fn face_coedge_uvs(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> V
     out
 }
 
+/// A loop passing through a singular point (a pole or apex) has no
+/// continuous u there, so each chain of coedges between singular points is
+/// shifted by whole periods to give the loop its required orientation
+/// (counter-clockwise outer loops, clockwise holes) with the smallest area.
+fn resolve_singular_chains(surf: &Surface, uvs: &mut [Vec<BSample>], fixed: &[bool], flip: bool, outer: bool, period: f64) {
+    let n = uvs.len();
+    let starts: Vec<usize> = (0..n).filter(|&i| is_singular(surf, uvs[(i + n - 1) % n].last().unwrap().uv)).collect();
+    if starts.len() < 2 {
+        return;
+    }
+    // Chains as index lists; a chain holding a fixed seam never moves.
+    let mut chains: Vec<Vec<usize>> = Vec::new();
+    for (k, &s0) in starts.iter().enumerate() {
+        let s1 = starts[(k + 1) % starts.len()];
+        let mut c = vec![];
+        let mut i = s0;
+        loop {
+            c.push(i);
+            i = (i + 1) % n;
+            if i == s1 {
+                break;
+            }
+        }
+        chains.push(c);
+    }
+    let movable: Vec<usize> = (0..chains.len()).filter(|&c| !chains[c].iter().any(|&i| fixed[i])).collect();
+    let anchor_fixed = movable.len() < chains.len();
+    // Keep one chain still when nothing is fixed.
+    let movable: Vec<usize> = if anchor_fixed { movable } else { movable.into_iter().skip(1).collect() };
+    if movable.is_empty() || movable.len() > 6 {
+        return;
+    }
+    let sign = if flip { -1.0 } else { 1.0 };
+    let area_with = |uvs: &[Vec<BSample>], shifts: &[f64]| -> f64 {
+        let mut poly: Vec<DVec2> = Vec::new();
+        for (ci, c) in chains.iter().enumerate() {
+            let du = movable.iter().position(|&m| m == ci).map(|k| shifts[k]).unwrap_or(0.0);
+            for &i in c {
+                poly.extend(uvs[i].iter().map(|x| x.uv + DVec2::new(du, 0.0)));
+            }
+        }
+        ductile_geom::poly2::signed_area(&poly) * sign
+    };
+    let mut best: Option<(f64, Vec<f64>)> = None;
+    let combos = 3usize.pow(movable.len() as u32);
+    for code in 0..combos {
+        let mut c = code;
+        let shifts: Vec<f64> = (0..movable.len())
+            .map(|_| {
+                let k = (c % 3) as f64 - 1.0;
+                c /= 3;
+                k * period
+            })
+            .collect();
+        let a = area_with(uvs, &shifts);
+        if (a > 0.0) == outer && best.as_ref().map(|b| a.abs() < b.0).unwrap_or(true) {
+            best = Some((a.abs(), shifts));
+        }
+    }
+    if let Some((_, shifts)) = best {
+        for (k, &ci) in movable.iter().enumerate() {
+            for &i in &chains[ci] {
+                for x in uvs[i].iter_mut() {
+                    x.uv.x += shifts[k];
+                }
+            }
+        }
+    }
+}
+
 /// Flattened UV polygon of each loop of face `f`.
-fn face_uv_loops(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> Vec<Vec<BSample>> {
+pub fn face_uv_loops(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> Vec<Vec<BSample>> {
     face_coedge_uvs(body, f, edges)
         .into_iter()
         .map(|l| {
@@ -355,7 +428,15 @@ pub fn tessellate_face(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>], opts
         }
     }
     // Metric scale so the triangulation is roughly isotropic in 3D.
-    let (su, sv, step_u, step_v) = surface_metrics(surf, lo, hi, opts);
+    let (su, sv, mut step_u, mut step_v) = surface_metrics(surf, lo, hi, opts);
+    // Straight directions (cylinder rulings) need no subdivision on their
+    // own, but trimmed faces still need interior points there, or long
+    // triangles would join distant boundary samples across the curvature.
+    if step_u.is_finite() && !step_v.is_finite() && sv > 0.0 {
+        step_v = step_u * su / sv;
+    } else if step_v.is_finite() && !step_u.is_finite() && su > 0.0 {
+        step_u = step_v * sv / su;
+    }
     let scale = DVec2::new(su, sv);
 
     let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> = ConstrainedDelaunayTriangulation::new();
@@ -424,11 +505,36 @@ pub fn tessellate_face(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>], opts
         mesh.uvs.push(uv);
         mesh.normals.push(body.face_normal(f, uv.x, uv.y));
     }
+    // Inside/outside by flood fill from the hull, toggling at constraint
+    // edges; this rejects the near-degenerate hull slivers that a centroid
+    // test lets through when a boundary is numerically almost straight.
+    let mut inside: Vec<Option<bool>> = vec![None; cdt.num_all_faces()];
+    let mut queue = std::collections::VecDeque::new();
+    for t in cdt.inner_faces() {
+        for e in t.adjacent_edges() {
+            if e.rev().face().is_outer() && inside[t.fix().index()].is_none() {
+                inside[t.fix().index()] = Some(e.is_constraint_edge());
+                queue.push_back(t.fix());
+            }
+        }
+    }
+    while let Some(ff) = queue.pop_front() {
+        let s = inside[ff.index()].unwrap();
+        for e in cdt.face(ff).adjacent_edges() {
+            if let Some(nb) = e.rev().face().as_inner() {
+                if inside[nb.fix().index()].is_none() {
+                    inside[nb.fix().index()] = Some(s ^ e.is_constraint_edge());
+                    queue.push_back(nb.fix());
+                }
+            }
+        }
+    }
     for t in cdt.inner_faces() {
         let vs = t.vertices();
         let q: Vec<DVec2> = vs.iter().map(|v| DVec2::new(v.position().x, v.position().y)).collect();
         let c = (q[0] + q[1] + q[2]) / 3.0 / scale;
-        if !point_in_loops(c, &uv_loops) {
+        let is_in = inside[t.fix().index()].unwrap_or_else(|| point_in_loops(c, &uv_loops));
+        if !is_in {
             continue;
         }
         let mut idx = [0u32; 3];
