@@ -17,12 +17,15 @@ code from them.
 - Primitives: box, cylinder, cone, sphere, torus (exact analytic surfaces).
 - Exact booleans: union, subtract, intersect (Shift+U / Shift+D / Shift+I),
   including coplanar, tangent and pole cases.
-- Curves on the construction plane: polyline (L), rectangle (Shift+R),
-  circle (Shift+O).
+- Curves on the construction plane: polyline (L), spline through points
+  (Shift+L, open or closed C2), three-point arc (Shift+A), rectangle
+  (Shift+R), circle (Shift+O), ellipse (Shift+E), regular polygon (Shift+P).
+  Curves drawn separately that meet end to end form one profile.
 - Extrude (E): push/pull planar faces, or turn closed planar curves (with
   holes) into solids, with live preview.
 - Revolve (V) closed curves by any angle about a selected edge or the
-  construction plane axes; exact planes, cylinders, cones, spheres, tori.
+  construction plane axes; exact planes, cylinders, cones, spheres, tori,
+  and NURBS surfaces of revolution for splines.
 - Fillets (Shift+F) and chamfers (Shift+K) on edges between planes, on
   circular plane/cylinder edges (boss and hole rims), with spherical corner
   patches where three filleted edges meet.
@@ -35,7 +38,7 @@ code from them.
   (`crates/ductile-io/tests/occ_import.rs`).
 - Move / rotate / scale / mirror, undo/redo.
 
-In progress: arcs and curve editing, sweep and loft, general
+In progress: curve editing, sweep and loft, general
 rolling-ball NURBS fillets, STEP assemblies.
 
 ## Layout

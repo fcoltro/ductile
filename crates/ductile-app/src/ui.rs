@@ -40,7 +40,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 }
             });
             ui.menu_button("Curve", |ui| {
-                for c in [Command::Curve, Command::Rectangle, Command::Circle] {
+                for c in [Command::Curve, Command::Spline, Command::Arc, Command::Rectangle, Command::Circle, Command::Ellipse, Command::Polygon] {
                     menu_item(app, ui, c);
                 }
             });
@@ -142,8 +142,12 @@ pub fn toolbar(app: &mut DuctileApp, ui: &mut egui::Ui) {
             cmd_button(app, ui, Command::Torus, "Tor");
             section(ui, "Curve");
             cmd_button(app, ui, Command::Curve, "Line");
+            cmd_button(app, ui, Command::Spline, "Spln");
+            cmd_button(app, ui, Command::Arc, "Arc");
             cmd_button(app, ui, Command::Rectangle, "Rect");
             cmd_button(app, ui, Command::Circle, "Circ");
+            cmd_button(app, ui, Command::Ellipse, "Elps");
+            cmd_button(app, ui, Command::Polygon, "Poly");
             section(ui, "Model");
             cmd_button(app, ui, Command::Extrude, "Extr");
             cmd_button(app, ui, Command::Revolve, "Rev");

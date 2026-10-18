@@ -371,6 +371,32 @@ impl NurbsCurve {
         Self::from_points(p, knots, &ctrl)
     }
 
+    /// Closed C2 cubic through `pts` (the first point is not repeated),
+    /// uniformly parameterized. Built as the periodic B-spline whose knots
+    /// land on the points, then written out as clamped Bézier pieces so the
+    /// rest of the kernel never sees an unclamped knot vector.
+    pub fn interpolate_closed(pts: &[DVec3]) -> Self {
+        let n = pts.len();
+        assert!(n >= 3);
+        // (P[i-1] + 4 P[i] + P[i+1]) / 6 = Q[i], cyclically.
+        let mut a = vec![vec![0.0; n]; n];
+        for (i, row) in a.iter_mut().enumerate() {
+            row[(i + n - 1) % n] += 1.0 / 6.0;
+            row[i] += 4.0 / 6.0;
+            row[(i + 1) % n] += 1.0 / 6.0;
+        }
+        let p = solve_dense(a, pts.to_vec());
+        let mut ctrl = vec![pts[0]];
+        let mut knots = vec![0.0; 4];
+        for i in 0..n {
+            let (p0, p1) = (p[i], p[(i + 1) % n]);
+            ctrl.extend([(2.0 * p0 + p1) / 3.0, (p0 + 2.0 * p1) / 3.0, pts[(i + 1) % n]]);
+            let k = (i + 1) as f64 / n as f64;
+            knots.extend(if i + 1 == n { vec![k; 4] } else { vec![k; 3] });
+        }
+        Self::from_points(3, knots, &ctrl)
+    }
+
     /// Polyline approximation with chord deviation below `tol`.
     pub fn tessellate(&self, tol: f64) -> Vec<(f64, DVec3)> {
         let (a, b) = self.domain();
@@ -503,6 +529,23 @@ where
 mod tests {
     use super::*;
     use std::f64::consts::PI;
+
+    #[test]
+    fn closed_interpolation_is_c2_through_points() {
+        let q = [DVec3::new(0.0, 0.0, 0.0), DVec3::new(4.0, -1.0, 0.0), DVec3::new(5.0, 3.0, 0.0), DVec3::new(1.0, 4.0, 0.0), DVec3::new(-1.0, 2.0, 0.0)];
+        let c = NurbsCurve::interpolate_closed(&q);
+        for (i, p) in q.iter().enumerate() {
+            assert!(c.point(i as f64 / q.len() as f64).distance(*p) < 1e-12);
+        }
+        // Second derivatives agree across every piece boundary, including the closure.
+        for i in 0..q.len() {
+            let k = i as f64 / q.len() as f64;
+            let before = c.derivs(if i == 0 { 1.0 } else { k - 1e-9 }, 2);
+            let after = c.derivs(k + 1e-9, 2);
+            assert!(before[1].distance(after[1]) < 1e-6, "C1 at {i}");
+            assert!(before[2].distance(after[2]) < 1e-4 * before[2].length().max(1.0), "C2 at {i}");
+        }
+    }
 
     #[test]
     fn circle_is_round() {

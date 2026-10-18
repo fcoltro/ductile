@@ -639,16 +639,18 @@ pub struct ExtrudeTool {
 
 /// Regions bounded by the closed curves of the selected wire objects.
 pub fn selected_curve_regions(doc: &Document) -> Vec<ductile_brep::profile::Region> {
-    use ductile_brep::profile::{loops_plane, wire_chains, Region};
+    use ductile_brep::profile::{loops_plane, wire_chains, wire_from_segments, Region, Segment};
     let mut ids: Vec<ObjectId> = doc.selection.iter().map(|p| p.object()).collect();
     ids.dedup();
-    let loops: Vec<_> = ids
+    // Curves drawn separately but meeting end to end (an arc and the line
+    // closing it) chain into one profile.
+    let segs: Vec<Segment> = ids
         .iter()
         .filter_map(|id| doc.object(*id))
         .filter(|o| o.body.kind == ductile_brep::BodyKind::Wire)
-        .flat_map(|o| wire_chains(&o.body))
-        .filter(|l| l.is_closed())
+        .flat_map(|o| o.body.edges.iter().map(|e| Segment::new(e.curve.clone(), e.t0, e.t1)).collect::<Vec<_>>())
         .collect();
+    let loops: Vec<_> = wire_chains(&wire_from_segments(&segs)).into_iter().filter(|l| l.is_closed()).collect();
     match loops_plane(&loops) {
         Some(plane) => Region::from_loops(plane, loops),
         None => Vec::new(),
@@ -801,8 +803,15 @@ impl Tool for ExtrudeTool {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum CurveKind {
     Polyline,
+    /// Smooth curve through the clicked points.
+    Spline,
+    /// Arc through start, end and a third point.
+    Arc,
     Rectangle,
     Circle,
+    Ellipse,
+    /// Regular polygon from its center and a corner.
+    Polygon,
 }
 
 /// Draws planar curves on the construction plane as wire objects.
@@ -810,14 +819,28 @@ pub struct CurveTool {
     kind: CurveKind,
     points: Vec<DVec3>,
     cursor: Option<DVec3>,
-    /// Typed size: radius for circles, width/height for rectangles.
+    /// Typed size: radius for circles and polygons, width/height for
+    /// rectangles, semi-axes for ellipses.
     size: DVec3,
+    /// In-plane angle of a polygon's first corner.
+    angle: f64,
+    sides: usize,
     closed: bool,
 }
 
 impl CurveTool {
     pub fn new(kind: CurveKind) -> Self {
-        Self { kind, points: vec![], cursor: None, size: DVec3::ZERO, closed: false }
+        Self { kind, points: vec![], cursor: None, size: DVec3::ZERO, angle: 0.0, sides: 6, closed: false }
+    }
+
+    /// Points the multi-click kinds pass through, with the cursor as the
+    /// next one while the curve is open.
+    fn path(&self) -> Vec<DVec3> {
+        let mut pts = self.points.clone();
+        if !self.closed {
+            pts.extend(self.cursor.filter(|c| pts.last().is_none_or(|l| l.distance(*c) > 1e-9)));
+        }
+        pts
     }
 
     fn segments(&self) -> Vec<ductile_brep::profile::Segment> {
@@ -825,6 +848,51 @@ impl CurveTool {
         let f = current_cplane().frame;
         let mut pts = self.points.clone();
         match self.kind {
+            CurveKind::Spline => {
+                let pts = self.path();
+                if self.closed && pts.len() >= 3 {
+                    let c = ductile_geom::NurbsCurve::interpolate_closed(&pts);
+                    let (t0, t1) = c.domain();
+                    return vec![Segment::new(ductile_geom::Curve3::Nurbs(c), t0, t1)];
+                }
+                if pts.len() < 2 {
+                    return vec![];
+                }
+                let c = ductile_geom::NurbsCurve::interpolate(&pts, 3);
+                let (t0, t1) = c.domain();
+                vec![Segment::new(ductile_geom::Curve3::Nurbs(c), t0, t1)]
+            }
+            CurveKind::Arc => {
+                let pts = self.path();
+                match pts.len() {
+                    2 => vec![Segment::line(pts[0], pts[1])],
+                    3.. => arc_through(pts[0], pts[1], pts[2]).map(|s| vec![s]).unwrap_or_else(|| vec![Segment::line(pts[0], pts[1])]),
+                    _ => vec![],
+                }
+            }
+            CurveKind::Ellipse => {
+                let Some(&c) = pts.first() else { return vec![] };
+                let (rx, ry) = (self.size.x.abs(), self.size.y.abs());
+                if rx < 1e-9 || ry < 1e-9 {
+                    return vec![];
+                }
+                let frame = Frame { origin: c, ..f };
+                vec![Segment::new(ductile_geom::Curve3::Ellipse { frame, rx, ry }, 0.0, std::f64::consts::TAU)]
+            }
+            CurveKind::Polygon => {
+                let Some(&c) = pts.first() else { return vec![] };
+                if self.size.x < 1e-9 {
+                    return vec![];
+                }
+                let n = self.sides.max(3);
+                let q: Vec<DVec3> = (0..n)
+                    .map(|i| {
+                        let a = self.angle + std::f64::consts::TAU * i as f64 / n as f64;
+                        c + (f.x * a.cos() + f.y * a.sin()) * self.size.x
+                    })
+                    .collect();
+                (0..n).map(|i| Segment::line(q[i], q[(i + 1) % n])).collect()
+            }
             CurveKind::Polyline => {
                 if !self.closed {
                     pts.extend(self.cursor);
@@ -860,8 +928,12 @@ impl Tool for CurveTool {
     fn name(&self) -> &'static str {
         match self.kind {
             CurveKind::Polyline => "Curve",
+            CurveKind::Spline => "Spline",
+            CurveKind::Arc => "Arc",
             CurveKind::Rectangle => "Rectangle",
             CurveKind::Circle => "Circle",
+            CurveKind::Ellipse => "Ellipse",
+            CurveKind::Polygon => "Polygon",
         }
     }
     fn hint(&self) -> String {
@@ -872,6 +944,15 @@ impl Tool for CurveTool {
             (CurveKind::Rectangle, _) => "Rectangle: click the opposite corner or type the size".into(),
             (CurveKind::Circle, 0) => "Circle: click the center".into(),
             (CurveKind::Circle, _) => "Circle: click to set the radius or type it".into(),
+            (CurveKind::Spline, 0) => "Spline: click the first point".into(),
+            (CurveKind::Spline, _) => "Spline: click points it passes through; click the first point to close, Enter to finish open".into(),
+            (CurveKind::Arc, 0) => "Arc: click the start".into(),
+            (CurveKind::Arc, 1) => "Arc: click the end".into(),
+            (CurveKind::Arc, _) => "Arc: click a point the arc passes through".into(),
+            (CurveKind::Ellipse, 0) => "Ellipse: click the center".into(),
+            (CurveKind::Ellipse, _) => "Ellipse: click a corner of its bounding box or type the radii".into(),
+            (CurveKind::Polygon, 0) => "Polygon: click the center".into(),
+            (CurveKind::Polygon, _) => "Polygon: click a corner or type the radius; set the sides in the panel".into(),
         }
     }
     fn pointer(&mut self, _doc: &Document, cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
@@ -887,7 +968,16 @@ impl Tool for CurveTool {
                     self.size = DVec3::new(d.x, d.y, 0.0);
                 }
                 CurveKind::Circle => self.size.x = snap_len(c.distance(q), p.world_per_px),
-                CurveKind::Polyline => {}
+                CurveKind::Ellipse => {
+                    let d = cplane.frame.dir_to_local(q - c);
+                    self.size = DVec3::new(snap_len(d.x.abs(), p.world_per_px), snap_len(d.y.abs(), p.world_per_px), 0.0);
+                }
+                CurveKind::Polygon => {
+                    let d = cplane.frame.dir_to_local(q - c);
+                    self.size.x = snap_len(d.truncate().length(), p.world_per_px);
+                    self.angle = d.y.atan2(d.x);
+                }
+                CurveKind::Polyline | CurveKind::Spline | CurveKind::Arc => {}
             }
         }
         if !p.clicked {
@@ -895,7 +985,15 @@ impl Tool for CurveTool {
         }
         let Some(q) = pt else { return ToolOutcome::Continue };
         match self.kind {
-            CurveKind::Polyline => {
+            CurveKind::Arc => {
+                self.points.push(q);
+                if self.points.len() == 3 {
+                    ToolOutcome::Finished
+                } else {
+                    ToolOutcome::Continue
+                }
+            }
+            CurveKind::Polyline | CurveKind::Spline => {
                 if self.points.len() > 2 && q.distance(self.points[0]) < p.world_per_px * 8.0 {
                     self.closed = true;
                     return ToolOutcome::Finished;
@@ -935,7 +1033,19 @@ impl Tool for CurveTool {
                 ch |= drag_value(ui, "Height", &mut self.size.y, 0.1);
             }
             CurveKind::Circle => ch |= drag_value(ui, "Radius", &mut self.size.x, 0.05),
-            CurveKind::Polyline => {
+            CurveKind::Ellipse => {
+                ch |= drag_value(ui, "Radius X", &mut self.size.x, 0.05);
+                ch |= drag_value(ui, "Radius Y", &mut self.size.y, 0.05);
+            }
+            CurveKind::Polygon => {
+                ch |= drag_value(ui, "Radius", &mut self.size.x, 0.05);
+                let mut n = self.sides as f64;
+                if drag_value(ui, "Sides", &mut n, 0.1) {
+                    self.sides = (n.round() as usize).clamp(3, 64);
+                    ch = true;
+                }
+            }
+            CurveKind::Polyline | CurveKind::Spline | CurveKind::Arc => {
                 ui.label(format!("{} points", self.points.len()));
             }
         }
@@ -944,24 +1054,28 @@ impl Tool for CurveTool {
     fn typed_value(&mut self, v: Option<f64>) {
         if let Some(v) = v {
             match self.kind {
-                CurveKind::Circle => self.size.x = v.abs(),
+                CurveKind::Circle | CurveKind::Polygon => self.size.x = v.abs(),
+                CurveKind::Ellipse => {
+                    self.size.x = v.abs();
+                    self.size.y = v.abs();
+                }
                 CurveKind::Rectangle => {
                     self.size.x = v;
                     self.size.y = v;
                 }
-                CurveKind::Polyline => {}
+                CurveKind::Polyline | CurveKind::Spline | CurveKind::Arc => {}
             }
         }
     }
     fn accept(&mut self) -> ToolOutcome {
-        if self.kind == CurveKind::Polyline {
+        if matches!(self.kind, CurveKind::Polyline | CurveKind::Spline) {
             // Enter ends the curve at the last clicked point.
             self.cursor = None;
         }
         ToolOutcome::Finished
     }
     fn commit(&mut self, doc: &mut Document) -> bool {
-        if self.kind == CurveKind::Polyline && !self.closed {
+        if matches!(self.kind, CurveKind::Polyline | CurveKind::Spline) && !self.closed {
             self.cursor = None;
         }
         let segs = self.segments();
@@ -973,6 +1087,25 @@ impl Tool for CurveTool {
         doc.selection.insert(Pick::Object(id));
         true
     }
+}
+
+/// Circular arc from `a` to `b` through `m`, or None when they are collinear.
+fn arc_through(a: DVec3, b: DVec3, m: DVec3) -> Option<ductile_brep::profile::Segment> {
+    // Circumcenter of the triangle a, m, b.
+    let (u, v) = (m - a, b - a);
+    let n = u.cross(v);
+    if n.length_squared() < 1e-18 * u.length_squared().max(1e-30) * v.length_squared().max(1e-30) {
+        return None;
+    }
+    let c = a + (n.cross(u) * v.length_squared() + v.cross(n) * u.length_squared()) / (2.0 * n.length_squared());
+    // Counter-clockwise about n goes a -> m -> b.
+    let frame = Frame::new(c, n, a - c);
+    let l = frame.to_local(b);
+    let mut sweep = l.y.atan2(l.x);
+    if sweep <= 0.0 {
+        sweep += std::f64::consts::TAU;
+    }
+    Some(ductile_brep::profile::Segment::new(ductile_geom::Curve3::Circle { frame, radius: c.distance(a) }, 0.0, sweep))
 }
 
 /// Fillet or chamfer of the selected edges of one solid, with the radius
@@ -1277,5 +1410,65 @@ mod tests {
         assert!(r.commit(&mut doc));
         let expect = std::f64::consts::PI / 2.0 * 3.0 * 3.0;
         assert!((volume(&doc.objects.last().unwrap().body) - expect).abs() < 1e-2);
+    }
+
+    /// Extrudes the selected curve objects by 1 and returns the volume.
+    fn extrude_selected(doc: &mut Document) -> f64 {
+        let mut e = ExtrudeTool::new(doc).unwrap();
+        e.typed_value(Some(1.0));
+        assert!(e.commit(doc));
+        volume(&doc.objects.last().unwrap().body).abs()
+    }
+
+    #[test]
+    fn ellipse_polygon_and_arc_profiles_extrude() {
+        use std::f64::consts::PI;
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        let mut el = CurveTool::new(CurveKind::Ellipse);
+        click(&mut el, &doc, DVec3::ZERO, true);
+        assert!(click(&mut el, &doc, DVec3::new(3.0, 1.0, 0.0), true));
+        assert!(el.commit(&mut doc));
+        assert!((extrude_selected(&mut doc) - 3.0 * PI).abs() < 1e-2);
+
+        let mut pg = CurveTool::new(CurveKind::Polygon);
+        click(&mut pg, &doc, DVec3::new(10.0, 0.0, 0.0), true);
+        pg.typed_value(Some(2.0));
+        assert!(pg.commit(&mut doc));
+        assert!((extrude_selected(&mut doc) - 1.5 * 3f64.sqrt() * 4.0).abs() < 1e-6);
+
+        // A half disk from an arc and a line drawn as separate curves.
+        let mut arc = CurveTool::new(CurveKind::Arc);
+        assert!(!click(&mut arc, &doc, DVec3::new(20.0, 0.0, 0.0), true));
+        assert!(!click(&mut arc, &doc, DVec3::new(24.0, 0.0, 0.0), true));
+        assert!(click(&mut arc, &doc, DVec3::new(22.0, 2.0, 0.0), true));
+        assert!(arc.commit(&mut doc));
+        let a = doc.objects.last().unwrap().id;
+        let mut line = CurveTool::new(CurveKind::Polyline);
+        click(&mut line, &doc, DVec3::new(24.0, 0.0, 0.0), true);
+        click(&mut line, &doc, DVec3::new(20.0, 0.0, 0.0), true);
+        line.accept();
+        assert!(line.commit(&mut doc));
+        doc.selection.insert(Pick::Object(a));
+        assert!((extrude_selected(&mut doc) - 2.0 * PI).abs() < 1e-2);
+    }
+
+    #[test]
+    fn closed_spline_extrudes_to_its_area() {
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        let mut sp = CurveTool::new(CurveKind::Spline);
+        let pts = [DVec3::new(0.0, 0.0, 0.0), DVec3::new(4.0, -1.0, 0.0), DVec3::new(5.0, 3.0, 0.0), DVec3::new(1.0, 4.0, 0.0), DVec3::new(-1.0, 2.0, 0.0)];
+        for p in pts {
+            assert!(!click(&mut sp, &doc, p, true));
+        }
+        assert!(click(&mut sp, &doc, pts[0], true));
+        assert!(sp.commit(&mut doc));
+        let c = ductile_geom::NurbsCurve::interpolate_closed(&pts);
+        let n = 20000;
+        let poly: Vec<DVec3> = (0..n).map(|i| c.point(i as f64 / n as f64)).collect();
+        let area: f64 = (0..n).map(|i| poly[i].truncate().perp_dot(poly[(i + 1) % n].truncate()) / 2.0).sum::<f64>().abs();
+        let v = extrude_selected(&mut doc);
+        assert!((v - area).abs() < 1e-3 * area, "{v} vs {area}");
     }
 }

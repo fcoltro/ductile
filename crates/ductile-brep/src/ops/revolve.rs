@@ -3,7 +3,7 @@
 
 use crate::profile::{Loop3, Segment};
 use crate::topo::{Body, BodyKind, Coedge, EdgeId, VertexId};
-use ductile_geom::{Curve3, DMat4, DQuat, DVec3, Frame, Surface};
+use ductile_geom::{Curve3, DMat4, DQuat, DVec3, Frame, NurbsSurface, Surface};
 use std::f64::consts::TAU;
 
 /// Revolves a closed profile a full turn about the axis through `origin`
@@ -86,7 +86,7 @@ pub fn revolve(profile: &Loop3, origin: DVec3, axis: DVec3, angle: f64) -> Optio
         if e0 == e1 && !full {
             continue; // on the axis: bounded by the caps only
         }
-        let Some((surface, flat)) = surface_of(s, origin, a, e, tol) else { return None };
+        let (surface, flat) = surface_of(s, origin, a, e, tol, angle);
         // Outward normal at the segment midpoint (profile is CCW about np).
         let tm = 0.5 * (s.t0 + s.t1);
         let mid = s.curve.point(tm);
@@ -131,7 +131,9 @@ pub fn revolve(profile: &Loop3, origin: DVec3, axis: DVec3, angle: f64) -> Optio
         let cap1: Vec<Coedge> = (0..n).filter_map(|i| end_edges[i].map(|(e, r)| Coedge::new(e, r))).collect();
         b.add_face(Surface::Plane { frame: pf.transformed(&rot) }, false, vec![cap1]);
     }
-    Some(b)
+    // Full-turn disks and annuli are bounded by circles alone; drop their
+    // unused profile edges.
+    Some(if full { crate::ops::heal::compact(&b) } else { b })
 }
 
 fn radial(p: DVec3, o: DVec3, a: DVec3) -> DVec3 {
@@ -139,8 +141,14 @@ fn radial(p: DVec3, o: DVec3, a: DVec3) -> DVec3 {
     d - a * d.dot(a)
 }
 
-/// Surface swept by a profile segment, and whether it is planar.
-fn surface_of(s: &Segment, o: DVec3, a: DVec3, e: DVec3, tol: f64) -> Option<(Surface, bool)> {
+/// Surface swept by a profile segment, and whether it is planar. Lines
+/// and arcs in the axis plane give analytic surfaces; anything else is
+/// swept as an exact NURBS surface of revolution.
+fn surface_of(s: &Segment, o: DVec3, a: DVec3, e: DVec3, tol: f64, angle: f64) -> (Surface, bool) {
+    analytic_surface_of(s, o, a, e, tol).unwrap_or_else(|| (Surface::Nurbs(NurbsSurface::revolution(&s.curve.to_nurbs(s.t0, s.t1), o, a, angle)), false))
+}
+
+fn analytic_surface_of(s: &Segment, o: DVec3, a: DVec3, e: DVec3, tol: f64) -> Option<(Surface, bool)> {
     let (p, q) = (s.start(), s.end());
     let z = |x: DVec3| (x - o).dot(a);
     let rho = |x: DVec3| radial(x, o, a).length();
@@ -247,5 +255,35 @@ mod tests {
         let b = revolve(&t, DVec3::ZERO, DVec3::Z, PI / 2.0).unwrap();
         assert_eq!(crate::ops::boolean::open_edges(&b), 0);
         assert!((vol(&b) - PI * 4.0 * 3.0 / 12.0).abs() < 1e-3, "{}", vol(&b));
+    }
+
+    #[test]
+    fn spline_profile_vase() {
+        let pts = [DVec3::new(1.5, 0.0, 0.0), DVec3::new(2.0, 0.0, 1.0), DVec3::new(1.0, 0.0, 2.5), DVec3::new(1.2, 0.0, 4.0)];
+        let sp = ductile_geom::NurbsCurve::interpolate(&pts, 3);
+        let (t0, t1) = sp.domain();
+        // Volume swept by the spline: integral of pi x^2 dz along it.
+        let n = 4000;
+        let swept: f64 = (0..n)
+            .map(|i| {
+                let t = t0 + (t1 - t0) * (i as f64 + 0.5) / n as f64;
+                let d = sp.derivs(t, 1);
+                PI * d[0].x * d[0].x * d[1].z * (t1 - t0) / n as f64
+            })
+            .sum();
+        let l = Loop3 {
+            segments: vec![
+                Segment::line(DVec3::ZERO, pts[0]),
+                Segment::new(Curve3::Nurbs(sp), t0, t1),
+                Segment::line(pts[3], DVec3::new(0.0, 0.0, 4.0)),
+                Segment::line(DVec3::new(0.0, 0.0, 4.0), DVec3::ZERO),
+            ],
+        };
+        let b = revolve_loop(&l, DVec3::ZERO, DVec3::Z).unwrap();
+        assert_eq!(crate::ops::boolean::open_edges(&b), 0);
+        assert!((vol(&b) - swept).abs() < 1e-3 * swept, "{} vs {swept}", vol(&b));
+        let half = revolve(&l, DVec3::ZERO, DVec3::Z, PI).unwrap();
+        assert_eq!(crate::ops::boolean::open_edges(&half), 0);
+        assert!((vol(&half) - swept / 2.0).abs() < 1e-3 * swept, "{} vs {}", vol(&half), swept / 2.0);
     }
 }

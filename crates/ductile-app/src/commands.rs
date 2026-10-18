@@ -37,8 +37,12 @@ pub enum Command {
     Sphere,
     Torus,
     Curve,
+    Spline,
+    Arc,
     Rectangle,
     Circle,
+    Ellipse,
+    Polygon,
     Extrude,
     Revolve,
     Fillet,
@@ -94,8 +98,12 @@ impl Command {
         Command::Sphere,
         Command::Torus,
         Command::Curve,
+        Command::Spline,
+        Command::Arc,
         Command::Rectangle,
         Command::Circle,
+        Command::Ellipse,
+        Command::Polygon,
         Command::Extrude,
         Command::Revolve,
         Command::Fillet,
@@ -154,6 +162,10 @@ impl Command {
             Curve => "Curve (polyline)",
             Rectangle => "Rectangle",
             Circle => "Circle",
+            Spline => "Spline",
+            Arc => "Arc (3 points)",
+            Ellipse => "Ellipse",
+            Polygon => "Polygon",
             Extrude => "Extrude face or curves",
             Revolve => "Revolve curves",
             Fillet => "Fillet edges",
@@ -209,6 +221,10 @@ impl Command {
             Curve => "L",
             Rectangle => "Shift+R",
             Circle => "Shift+O",
+            Spline => "Shift+L",
+            Arc => "Shift+A",
+            Ellipse => "Shift+E",
+            Polygon => "Shift+P",
             Extrude => "E",
             Revolve => "V",
             Fillet => "Shift+F",
@@ -263,6 +279,10 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::L, false, false, false) => Curve,
         (Key::R, false, true, false) => Rectangle,
         (Key::O, false, true, false) => Circle,
+        (Key::L, false, true, false) => Spline,
+        (Key::A, false, true, false) => Arc,
+        (Key::E, false, true, false) => Ellipse,
+        (Key::P, false, true, false) => Polygon,
         (Key::V, false, false, false) => Revolve,
         (Key::F, false, true, false) => Fillet,
         (Key::K, false, true, false) => Chamfer,
@@ -432,6 +452,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Curve => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::Polyline))),
         Rectangle => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::Rectangle))),
         Circle => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::Circle))),
+        Spline => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::Spline))),
+        Arc => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::Arc))),
+        Ellipse => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::Ellipse))),
+        Polygon => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::Polygon))),
         Revolve => match RevolveTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Select closed planar curves to revolve".into(),
@@ -685,6 +709,26 @@ pub fn demo_scene(doc: &mut Document) {
             }
         }
         doc.add_body("Pulley profile", wire.transformed(&ductile_geom::DMat4::from_translation(DVec3::new(0.0, -0.5, 0.0))));
+    }
+    // A vase revolved from a spline profile: an exact NURBS surface of revolution.
+    {
+        use ductile_brep::profile::{Loop3, Segment};
+        let c = DVec3::new(20.0, -6.0, 0.0);
+        let pts: Vec<DVec3> = [(1.6, 0.0), (2.4, 1.5), (1.2, 4.0), (1.0, 5.2), (1.5, 6.5)].iter().map(|(r, z)| c + DVec3::new(*r, 0.0, *z)).collect();
+        let sp = ductile_geom::NurbsCurve::interpolate(&pts, 3);
+        let (t0, t1) = sp.domain();
+        let top = c + DVec3::Z * 6.5;
+        let l = Loop3 {
+            segments: vec![
+                Segment::line(c, pts[0]),
+                Segment::new(ductile_geom::Curve3::Nurbs(sp), t0, t1),
+                Segment::line(pts[4], top),
+                Segment::line(top, c),
+            ],
+        };
+        if let Some(b) = ductile_brep::ops::revolve::revolve_loop(&l, c, DVec3::Z) {
+            doc.add_body("Vase", b);
+        }
     }
     doc.dirty = false;
 }
