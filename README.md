@@ -43,7 +43,8 @@ code from them.
   (exact planes, cylinders, cones, spheres and tori where the curves allow);
   Patch (Alt+P) fills closed curves, with a trimmed plane when they are
   flat (inner curves become holes) or a Coons patch through any four-sided
-  (or split into four) boundary. Back faces show tinted.
+  (or split into four) boundary. Thicken (Alt+K) turns surfaces into
+  solids of a given thickness on either side. Back faces show tinted.
 - Fillets (Shift+F) and chamfers (Shift+K) on edges between planes, on
   circular plane/cylinder edges (boss and hole rims), with spherical corner
   patches where three filleted edges meet. Closed edges between any two

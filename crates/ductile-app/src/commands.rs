@@ -3,7 +3,7 @@
 
 use crate::app::DuctileApp;
 use crate::document::{Document, Pick, SelectMode};
-use crate::tools::{ArrayTool, BoxTool, CurveEditTool, TrimTool, BridgeTool, ExtendTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
+use crate::tools::{ArrayTool, BoxTool, CurveEditTool, TrimTool, BridgeTool, ExtendTool, ThickenTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
 use ductile_geom::{DMat4, DVec3, Frame};
@@ -47,6 +47,7 @@ pub enum Command {
     Revolve,
     Loft,
     Patch,
+    Thicken,
     Sweep,
     Fillet,
     Chamfer,
@@ -121,6 +122,7 @@ impl Command {
         Command::Revolve,
         Command::Loft,
         Command::Patch,
+        Command::Thicken,
         Command::Sweep,
         Command::Fillet,
         Command::Chamfer,
@@ -196,6 +198,7 @@ impl Command {
             Revolve => "Revolve curves",
             Loft => "Loft",
             Patch => "Patch surface",
+            Thicken => "Thicken surface",
             Sweep => "Sweep",
             Fillet => "Fillet edges",
             Chamfer => "Chamfer edges",
@@ -278,6 +281,7 @@ impl Command {
             Union => "Shift+U",
             Loft => "Alt+L",
             Patch => "Alt+P",
+            Thicken => "Alt+K",
             Sweep => "Alt+W",
             Subtract => "Shift+D",
             Intersect => "Shift+I",
@@ -338,6 +342,7 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::V, false, false, false) => Revolve,
         (Key::L, false, false, true) => Loft,
         (Key::P, false, false, true) => Patch,
+        (Key::K, false, false, true) => Thicken,
         (Key::W, false, false, true) => Sweep,
         (Key::F, false, true, false) => Fillet,
         (Key::K, false, true, false) => Chamfer,
@@ -540,6 +545,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Trim => match TrimTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "There are no curves to trim".into(),
+        },
+        Thicken => match ThickenTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select surfaces to thicken".into(),
         },
         BridgeCurve => match BridgeTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
@@ -864,7 +873,11 @@ pub fn demo_scene(doc: &mut Document) {
         let l1 = spline(&[p(3.0, -23.5, 1.5), p(5.0, -23.0, 2.5), p(7.0, -23.5, 1.5)]);
         let l2 = spline(&[p(3.0, -21.0, 0.5), p(5.0, -21.5, 0.0), p(7.0, -21.0, 0.5)]);
         if let Some(b) = loft_sheet(&[l0, l1, l2]) {
-            doc.add_body("Lofted surface", b);
+            // Thickened into a solid shell.
+            match ductile_brep::ops::sheet::thicken(&b, 0.25) {
+                Ok(s) => doc.add_body("Thick loft", s),
+                Err(_) => doc.add_body("Lofted surface", b),
+            };
         }
         let c = |pts: &[DVec3]| spline(pts).segments.remove(0);
         let boundary = Loop3 {

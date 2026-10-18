@@ -1916,6 +1916,138 @@ impl Tool for ExtendTool {
     }
 }
 
+// -------------------------------------------------------------- Thicken ----
+
+/// Thicken: turn the selected surfaces into solids by giving them a
+/// thickness, along their normals or (negative) against them.
+pub struct ThickenTool {
+    targets: Vec<(ObjectId, std::sync::Arc<Body>)>,
+    base: DVec3,
+    normal: DVec3,
+    pub value: f64,
+    start_t: Option<f64>,
+    typed: Option<f64>,
+    cache: std::cell::RefCell<Option<(f64, Vec<Option<Body>>, Option<String>)>>,
+}
+
+impl ThickenTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let targets: Vec<_> = doc
+            .selected_objects()
+            .into_iter()
+            .filter_map(|id| doc.object(id).filter(|o| o.body.kind == ductile_brep::BodyKind::Sheet).map(|o| (id, o.body.clone())))
+            .collect();
+        let b = &targets.first()?.1;
+        // Drag along the normal of the first face, from its middle.
+        let f = b.face_ids().next()?;
+        let mesh = ductile_brep::tessellate(b, &ductile_brep::TessOptions::for_size(b.bbox().diagonal()));
+        let fm = mesh.faces.first()?;
+        let k = fm.positions.len() / 2;
+        let (base, normal) = (*fm.positions.get(k)?, fm.normals.get(k).copied().unwrap_or_else(|| b.face_normal(f, 0.5, 0.5)));
+        Some(Self { targets, base, normal, value: 0.0, start_t: None, typed: None, cache: std::cell::RefCell::new(None) })
+    }
+
+    fn amount(&self) -> f64 {
+        self.typed.unwrap_or(self.value)
+    }
+
+    fn results(&self) -> (Vec<Option<Body>>, Option<String>) {
+        let t = self.amount();
+        if let Some((ct, r, e)) = &*self.cache.borrow() {
+            if *ct == t {
+                return (r.clone(), e.clone());
+            }
+        }
+        let mut err = None;
+        let res: Vec<Option<Body>> = self
+            .targets
+            .iter()
+            .map(|(_, b)| {
+                if t.abs() < 1e-9 {
+                    return None;
+                }
+                match ductile_brep::ops::sheet::thicken(b, t) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        err = Some(e.to_string());
+                        None
+                    }
+                }
+            })
+            .collect();
+        *self.cache.borrow_mut() = Some((t, res.clone(), err.clone()));
+        (res, err)
+    }
+}
+
+impl Tool for ThickenTool {
+    fn name(&self) -> &'static str {
+        "Thicken"
+    }
+    fn hint(&self) -> String {
+        match self.cache.borrow().as_ref().and_then(|c| c.2.clone()) {
+            Some(e) => format!("Thicken failed: {e}"),
+            None => format!("Thicken: drag or type a thickness ({:.4}), negative for the back side; click or Enter to finish", self.amount()),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if self.typed.is_none() {
+            let t = height_from_ray(self.base, self.normal, &p.ray);
+            let t0 = *self.start_t.get_or_insert(t);
+            let d = t - t0;
+            self.value = snap_len(d.abs(), p.world_per_px).copysign(d);
+        }
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let mut out: Option<Body> = None;
+        for b in self.results().0.into_iter().flatten() {
+            match &mut out {
+                None => out = Some(b),
+                Some(o) => o.append(&b),
+            }
+        }
+        out
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        let tip = self.base + self.normal * self.amount();
+        out.push(LineInstance::new(self.base, tip, [1.0, 0.85, 0.3, 1.0], 2.0));
+        out.push(LineInstance::point(tip, [1.0, 0.85, 0.3, 1.0], 7.0));
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut v = self.amount();
+        let ch = drag_value(ui, "Thickness", &mut v, 0.01);
+        if ch {
+            self.typed = Some(v);
+        }
+        ch
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        if self.amount().abs() < 1e-9 {
+            vec![]
+        } else {
+            self.targets.iter().map(|t| t.0).collect()
+        }
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v;
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let (res, _) = self.results();
+        let mut any = false;
+        for ((id, _), r) in self.targets.clone().into_iter().zip(res) {
+            if let Some(b) = r {
+                doc.replace_body(id, b);
+                any = true;
+            }
+        }
+        any
+    }
+}
+
 // ----------------------------------------------------------------- Trim ----
 
 /// Click pieces of curves, between their crossings with other curves, to
