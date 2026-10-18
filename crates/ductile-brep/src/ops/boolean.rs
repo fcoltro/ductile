@@ -94,6 +94,26 @@ impl Zone {
     }
 }
 
+/// `p` moved onto the intersection of two surfaces it lies close to, by
+/// projecting onto each in turn (which converges where they cross).
+fn onto_both(a: &Surface, b: &Surface, mut p: DVec3) -> DVec3 {
+    let (mut ha, mut hb) = (None, None);
+    for _ in 0..12 {
+        let ua = a.project(p, ha);
+        ha = Some(ua);
+        p = a.point(ua.x, ua.y);
+        let ub = b.project(p, hb);
+        hb = Some(ub);
+        let q = b.point(ub.x, ub.y);
+        let step = q.distance(p);
+        p = q;
+        if step < 1e-13 {
+            break;
+        }
+    }
+    p
+}
+
 fn uv_range<'a>(pts: impl Iterator<Item = &'a DVec2>) -> (DVec2, DVec2) {
     pts.fold((DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)), |(a, b), p| (a.min(*p), b.max(*p)))
 }
@@ -317,9 +337,14 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
                     let verts: Vec<VertexId> = verts.into_iter().collect();
                     for (c, c0, c1) in curves {
                         for (ta, tb, va, vb) in curve_pieces(&mut w, &c, c0, c1, &verts, tol) {
-                            let mid = c.point(0.5 * (ta + tb));
+                            // The traced curve only approximates the section;
+                            // classify a point brought onto both surfaces.
+                            let mid = onto_both(&sa, &sb, c.point(0.5 * (ta + tb)));
                             let pa = zones[fa.idx()].classify(mid, tol);
                             let pb = zones[fb.idx()].classify(mid, tol);
+                            if debug() {
+                                eprintln!("   piece {}x{} v{}->v{} mid {mid:.4}: {pa:?} {pb:?}", fa.idx(), fb.idx(), va.0, vb.0);
+                            }
                             if pa == Pos::Out || pb == Pos::Out || (pa == Pos::On && pb == Pos::On) {
                                 continue;
                             }
@@ -402,9 +427,12 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     }
     if debug() {
         eprintln!("crossings {} coincident {:?}", crossing_points.len(), coincident);
+        for p in &crossing_points {
+            eprintln!("   crossing at {p:.5}");
+        }
         for (f, ex) in extras.iter().enumerate() {
             if !ex.is_empty() {
-                let d: Vec<String> = ex.iter().map(|e| { let ed = w.edge(*e); format!("e{}[v{}->v{}]", e.0, ed.v0.0, ed.v1.0) }).collect();
+                let d: Vec<String> = ex.iter().map(|e| { let ed = w.edge(*e); format!("e{}[v{}{:.4}->v{}{:.4}]", e.0, ed.v0.0, w.vertex(ed.v0), ed.v1.0, w.vertex(ed.v1)) }).collect();
                 eprintln!("face {f} ({:?}) extras {}", std::mem::discriminant(&w.faces[f].surface), d.join(" "));
             }
         }
@@ -1468,6 +1496,17 @@ mod tests {
         let t = make_torus(&Frame::new(DVec3::new(-0.5, 0.5, 0.4), DVec3::Y, DVec3::Y.any_orthonormal_vector()), 1.2, 0.4);
         let c = make_cylinder(&Frame::new(DVec3::new(-0.5, 0.2028, -0.3708), DVec3::X, DVec3::X.any_orthonormal_vector()), 0.75, 1.5);
         identities(&t, &c);
+    }
+
+    #[test]
+    fn cone_grazing_a_box_corner() {
+        // The cone just covers one box corner; its section with the box's
+        // side plane is traced loosely enough to stray off the cone.
+        let z = DVec3::X;
+        let b = make_box(&Frame::new(DVec3::new(-0.42591171230699776, 0.6304555355089796, 0.613134042526325), z, z.any_orthonormal_vector()), DVec3::new(1.5, 1.125, 1.25));
+        let z = DVec3::new(0.5219992156033791, -0.5721212937582825, 0.632608918794073);
+        let c = make_frustum(&Frame::new(DVec3::new(-0.07450286010188134, 0.5060630142844724, 0.0), z, z.any_orthonormal_vector()), 0.75, 0.3, 1.5);
+        identities(&b, &c);
     }
 
     #[test]
