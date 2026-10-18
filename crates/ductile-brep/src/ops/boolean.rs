@@ -506,6 +506,17 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
             }
         }
         let cls = cls.unwrap_or_else(|| {
+            // Close to the other body (a sliver beside a tangent contact)
+            // its mesh is too coarse to tell; its exact faces are not.
+            let near = face_ids.iter().filter(|f| from_a(**f) != fa).filter_map(|&f| {
+                let s = &w.face(f).surface;
+                let uv = s.project(p, None);
+                let q = s.point(uv.x, uv.y);
+                (zones[f.idx()].classify(q, tol) == Pos::In).then(|| (q.distance(p), f, q))
+            });
+            if let Some((_, f, q)) = near.min_by(|a, b| a.0.total_cmp(&b.0)).filter(|n| n.0 < diag * 1e-2 && n.0 > tol * 10.0) {
+                return if (p - q).dot(outward_normal(&w, f, q)) < 0.0 { Class::In } else { Class::Out };
+            }
             let other = if fa { &mesh_b } else { &mesh_a };
             if point_in_mesh(p, other) {
                 Class::In
@@ -1507,6 +1518,15 @@ mod tests {
         let z = DVec3::new(0.5219992156033791, -0.5721212937582825, 0.632608918794073);
         let c = make_frustum(&Frame::new(DVec3::new(-0.07450286010188134, 0.5060630142844724, 0.0), z, z.any_orthonormal_vector()), 0.75, 0.3, 1.5);
         identities(&b, &c);
+    }
+
+    #[test]
+    fn cylinders_touching_tangentially_at_a_point() {
+        // Their outermost lines cross at one point where both surfaces
+        // face -x, leaving slivers too thin for the mesh to classify.
+        let a = make_cylinder(&Frame::new(DVec3::new(-1.0, 0.0, -0.40012521063672857), DVec3::Y, DVec3::Y.any_orthonormal_vector()), 0.75, 1.5);
+        let b = make_cylinder(&Frame::new(DVec3::new(-0.5, 0.5, -0.4522784852919963), DVec3::Z, DVec3::Z.any_orthonormal_vector()), 1.25, 2.5);
+        identities(&a, &b);
     }
 
     #[test]
