@@ -32,7 +32,7 @@ pub enum Blend {
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum FilletError {
-    #[error("an edge is not shared by exactly two faces")]
+    #[error("the edge is a seam or a free edge, with nothing to blend")]
     NotManifold,
     #[error("this kind of edge cannot be blended yet")]
     Unsupported,
@@ -121,10 +121,74 @@ fn vertex_faces(b: &Body, v: VertexId) -> BTreeSet<FaceId> {
 }
 
 /// Blends the given edges. Edges are blended with tools computed on the
-/// original body, then applied in turn.
+/// original body, then applied in turn. Where those tools do not fit
+/// together, the edges are blended one after another instead, each found
+/// again on the body the earlier ones left.
 pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, FilletError> {
+    match blend_together(body, edges, blend) {
+        Err(err @ (FilletError::Boolean(_) | FilletError::Unsupported)) if edges.len() > 1 => {
+            let back: Vec<EdgeId> = edges.iter().rev().copied().collect();
+            blend_in_turn(body, edges, blend).or_else(|_| blend_in_turn(body, &back, blend)).map_err(|_| err)
+        }
+        r => r,
+    }
+}
+
+/// Blends `edges` of `body` one at a time. Each original edge is found on
+/// the current body as the edges lying along it, which are blended
+/// together; edges an earlier blend swallowed are passed over. The order
+/// matters (a rolled blend copes with a tool-cut face at its end better
+/// than the other way round), so each round blends the first remaining
+/// edge that works.
+fn blend_in_turn(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, FilletError> {
+    let tol = 1e-6 * body.bbox().diagonal().max(1.0);
+    let mut b = body.clone();
+    let mut left: Vec<EdgeId> = edges.iter().copied().filter(|e| !matches!(edge_info(body, *e), Err(FilletError::NotManifold | FilletError::Smooth))).collect();
+    while !left.is_empty() {
+        let mut done = None;
+        let mut last_err = FilletError::Unsupported;
+        for (k, e) in left.iter().enumerate() {
+            let orig = body.edge(*e);
+            let on = |p: DVec3| orig.curve.point(orig.curve.closest_param_in(p, orig.t0, orig.t1)).distance(p) < tol;
+            let now: Vec<EdgeId> = b
+                .edge_ids()
+                .filter(|x| {
+                    let ed = b.edge(*x);
+                    on(ed.start()) && on(ed.end()) && on(ed.mid()) && b.edge_faces(*x).len() == 2
+                })
+                .collect();
+            if now.is_empty() {
+                done = Some((k, None));
+                break;
+            }
+            match blend_together(&b, &now, blend) {
+                Ok(r) => {
+                    done = Some((k, Some(r)));
+                    break;
+                }
+                Err(err) => last_err = err,
+            }
+        }
+        let Some((k, r)) = done else { return Err(last_err) };
+        left.remove(k);
+        if let Some(r) = r {
+            b = r;
+        }
+    }
+    Ok(b)
+}
+
+fn blend_together(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, FilletError> {
     let size = body.bbox().diagonal().max(1e-6) * 4.0;
-    let set: BTreeSet<EdgeId> = edges.iter().copied().collect();
+    let mut set: BTreeSet<EdgeId> = edges.iter().copied().collect();
+    // In a selection of several edges, seams and smooth edges have nothing
+    // to blend and are passed over; alone, they report why.
+    if set.len() > 1 {
+        set.retain(|e| !matches!(edge_info(body, *e), Err(FilletError::NotManifold | FilletError::Smooth)));
+        if set.is_empty() {
+            return Err(FilletError::Smooth);
+        }
+    }
     let mut infos: HashMap<EdgeId, EdgeInfo> = HashMap::new();
     let mut tools: Vec<(EdgeId, Body)> = Vec::new();
     // Chains of tangent edges, and edges with no exact tool, are blended
@@ -343,7 +407,8 @@ fn edge_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> R
                 (Surface::Cylinder { .. }, Surface::Plane { .. }) => (info.f2, info.f1),
                 _ => return Err(FilletError::Unsupported),
             };
-            circle_tool(b, frame.origin, pf, cf, info, blend)
+            let arc = (!ed.is_closed()).then(|| ed.mid());
+            circle_tool(b, frame.origin, pf, cf, info, blend, arc)
         }
         _ => Err(FilletError::Unsupported),
     }
@@ -401,7 +466,10 @@ fn line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> R
     Ok(tool)
 }
 
-fn circle_tool(b: &Body, center: DVec3, pf: FaceId, cf: FaceId, info: &EdgeInfo, blend: Blend) -> Result<Body, FilletError> {
+/// The tool along a circular edge between a plane and a cylinder square to
+/// it: the fillet section swept round the circle, or, for an arc through
+/// `arc` (a point midway along it), round just that arc.
+fn circle_tool(b: &Body, center: DVec3, pf: FaceId, cf: FaceId, info: &EdgeInfo, blend: Blend, arc_mid: Option<DVec3>) -> Result<Body, FilletError> {
     let Surface::Cylinder { frame: cyl, radius: big_r } = &b.face(cf).surface else { return Err(FilletError::Unsupported) };
     let pm = 0.5 * (info.p0 + info.p1);
     let pm = if pm.distance(center) < 1e-9 { info.p0 } else { pm };
@@ -432,7 +500,17 @@ fn circle_tool(b: &Body, center: DVec3, pf: FaceId, cf: FaceId, info: &EdgeInfo,
         Blend::Chamfer(_) => Segment::line(qp, qc),
     };
     let lp = Loop3 { segments: vec![Segment::line(corner, qp), mid, Segment::line(qc, corner)] };
-    revolve_loop(&lp, center, a).ok_or(FilletError::Unsupported)
+    let Some(m) = arc_mid else { return revolve_loop(&lp, center, a).ok_or(FilletError::Unsupported) };
+    // Sweep from p0 to p1 the way round that passes the arc's middle.
+    // Angles round `a`, counter-clockwise from `e`.
+    let f = a.cross(e);
+    let turn = |q: DVec3| {
+        let v = q - center;
+        v.dot(f).atan2(v.dot(e)).rem_euclid(std::f64::consts::TAU)
+    };
+    let (end, through) = (turn(info.p1), turn(m));
+    let (axis, angle) = if through < end { (a, end) } else { (-a, std::f64::consts::TAU - end) };
+    super::revolve::revolve(&lp, center, axis, angle).ok_or(FilletError::Unsupported)
 }
 
 /// Spherical corner patches where three filleted convex plane/plane edges
