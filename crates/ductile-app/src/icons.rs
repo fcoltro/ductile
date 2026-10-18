@@ -131,6 +131,12 @@ pub fn paint(cmd: Command, painter: &Painter, rect: Rect, color: Color32) -> boo
             p.arc((0.85, 0.85), 0.7, 0.7, PI, 1.5 * PI);
             p.arc((0.85, 0.85), 0.5, 0.5, PI, 1.5 * PI);
         }
+        Command::Pipe => {
+            p.arc((0.85, 0.85), 0.72, 0.72, PI, 1.5 * PI);
+            p.arc((0.85, 0.85), 0.42, 0.42, PI, 1.5 * PI);
+            p.ellipse((0.28, 0.85), 0.15, 0.06);
+            p.ellipse((0.85, 0.28), 0.06, 0.15);
+        }
         Command::Fillet => {
             p.line(&[(0.15, 0.85), (0.15, 0.55)]);
             p.arc((0.55, 0.55), 0.4, 0.4, PI, 1.5 * PI);

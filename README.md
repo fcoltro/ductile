@@ -61,7 +61,9 @@ code from them.
 - Loft (Alt+L) through two or more closed curves, keeping corners as edges
   when the profiles match; Sweep (Alt+W) a closed curve along an open path
   with a rotation-minimizing frame (exact for straight and circular paths),
-  mitred where the path turns through a sharp corner.
+  mitred where the path turns through a sharp corner. Pipe (Alt+U) runs a
+  round tube of a dragged radius along curves, closing into a ring along a
+  closed curve.
 - Surfaces: Extrude, Revolve and Loft turn open curves into surfaces
   (exact planes, cylinders, cones, spheres and tori where the curves allow);
   Patch (Alt+P) fills closed curves, with a trimmed plane when they are

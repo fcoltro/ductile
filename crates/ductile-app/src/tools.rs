@@ -1832,6 +1832,108 @@ impl Tool for FilletTool {
     }
 }
 
+// ----------------------------------------------------------------- Pipe ----
+
+/// A round tube along each selected curve chain, its radius dragged out
+/// from the start of the first.
+pub struct PipeTool {
+    paths: Vec<ductile_brep::profile::Loop3>,
+    base: DVec3,
+    dir: DVec3,
+    pub radius: f64,
+    typed: Option<f64>,
+    bg: Background<f64, (Option<Body>, Option<String>)>,
+}
+
+impl PipeTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let paths = selected_chains(doc);
+        let s0 = paths.first()?.segments.first()?;
+        let t = s0.tangent_at(if s0.reversed { s0.t1 } else { s0.t0 }).normalize_or_zero();
+        // Handle across the path, in the construction plane where it can be.
+        let z = current_cplane().frame.z;
+        let dir = t.cross(z).try_normalize().unwrap_or_else(|| t.any_orthonormal_vector());
+        let base = s0.start();
+        Some(Self { paths, base, dir, radius: 0.0, typed: None, bg: Background::default() })
+    }
+
+    fn value(&self) -> f64 {
+        self.typed.unwrap_or(self.radius)
+    }
+
+    fn job(&self) -> Box<dyn FnOnce() -> (Option<Body>, Option<String>) + Send> {
+        let (paths, r) = (self.paths.clone(), self.value());
+        Box::new(move || {
+            if r <= 1e-9 {
+                return (None, None);
+            }
+            let mut out: Option<Body> = None;
+            for p in &paths {
+                let Some(b) = ductile_brep::ops::sweep::pipe(p, r) else { return (None, Some("the tube intersects itself or the curve turns too sharply".into())) };
+                match &mut out {
+                    None => out = Some(b),
+                    Some(o) => o.append(&b),
+                }
+            }
+            (out, None)
+        })
+    }
+}
+
+impl Tool for PipeTool {
+    fn name(&self) -> &'static str {
+        "Pipe"
+    }
+    fn hint(&self) -> String {
+        match self.bg.latest().and_then(|c| c.1) {
+            Some(e) => format!("Pipe failed: {e}"),
+            None => format!("Pipe: drag or type a radius ({:.4}), click or Enter to finish", self.value()),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if self.typed.is_none() {
+            self.radius = snap_len(height_from_ray(self.base, self.dir, &p.ray).abs(), p.world_per_px);
+        }
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        self.bg.get(&self.value(), || self.job()).and_then(|r| r.0)
+    }
+    fn busy(&self) -> bool {
+        self.bg.busy()
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        let tip = self.base + self.dir * self.value();
+        out.push(LineInstance::new(self.base, tip, [1.0, 0.85, 0.3, 1.0], 2.0));
+        out.push(LineInstance::point(tip, [1.0, 0.85, 0.3, 1.0], 7.0));
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut v = self.value();
+        let ch = drag_value(ui, "Radius", &mut v, 0.01);
+        if ch {
+            self.typed = Some(v.max(0.0));
+        }
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v.map(|x| x.abs());
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let r = self.value();
+        let mut any = false;
+        for p in self.paths.clone() {
+            if let Some(b) = ductile_brep::ops::sweep::pipe(&p, r) {
+                doc.add_body("Pipe", b);
+                any = true;
+            }
+        }
+        any
+    }
+}
+
 // ---------------------------------------------------------------- Shell ----
 
 /// What the shell tool does with its distance.
@@ -3156,6 +3258,20 @@ mod tests {
         let body = &doc.object(id).unwrap().body;
         assert_eq!((body.edges.len(), body.vertices.len()), (2, 3));
         assert_eq!(wire_chains(body).len(), 1);
+    }
+
+    #[test]
+    fn pipes_a_circle_into_a_ring() {
+        use ductile_brep::profile::{wire_from_segments, Segment};
+        let mut doc = Document::default();
+        let c = doc.add_body("Circle", wire_from_segments(&[Segment::new(circle_at(DVec3::ZERO, 2.0), 0.0, std::f64::consts::TAU)]));
+        doc.selection.insert(Pick::Object(c));
+        let mut t = PipeTool::new(&doc).unwrap();
+        t.typed_value(Some(0.25));
+        assert!(t.commit(&mut doc));
+        let ring = &doc.objects.last().unwrap().body;
+        assert_eq!(ring.kind, ductile_brep::BodyKind::Solid);
+        assert_eq!(ductile_brep::ops::boolean::open_edges(ring), 0);
     }
 
     #[test]

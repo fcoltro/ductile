@@ -111,6 +111,63 @@ fn extrude_loop(profile: &Loop3, v: DVec3) -> Option<Body> {
 
 /// Sweeps along one smooth run, returning the solid and the transform that
 /// carries the start profile onto the end section.
+/// A round tube of `radius` along `path`. A closed path makes a ring: it is
+/// swept as two halves, cut part-way along segments where it is smooth,
+/// whose end caps meet face to face and vanish in their union.
+pub fn pipe(path: &Loop3, radius: f64) -> Option<Body> {
+    let segs = &path.segments;
+    if segs.is_empty() || radius <= 0.0 {
+        return None;
+    }
+    let tube = |segs: &[Segment]| {
+        let s0 = &segs[0];
+        let t = s0.tangent_at(if s0.reversed { s0.t1 } else { s0.t0 }).normalize_or_zero();
+        if t == DVec3::ZERO {
+            return None;
+        }
+        let frame = Frame::new(s0.start(), t, t.any_orthonormal_vector());
+        let circle = Segment::new(Curve3::Circle { frame, radius }, 0.0, std::f64::consts::TAU);
+        sweep(&Loop3 { segments: vec![circle] }, segs)
+    };
+    if !path.is_closed() {
+        return tube(segs);
+    }
+    // Cut points (segment, fraction along it in traversal order).
+    let n = segs.len();
+    let (a, b) = if n == 1 { ((0, 0.25), (0, 0.75)) } else { ((0, 0.5), (n / 2, 0.5)) };
+    let mut first = Vec::new();
+    let mut second = Vec::new();
+    let (a0, a1) = split_segment(&segs[a.0], a.1);
+    if a.0 == b.0 {
+        let (m, b1) = split_segment(&a1, (b.1 - a.1) / (1.0 - a.1));
+        first.push(m);
+        second.push(b1);
+        second.push(a0);
+    } else {
+        let (b0, b1) = split_segment(&segs[b.0], b.1);
+        first.push(a1);
+        first.extend(segs[a.0 + 1..b.0].iter().cloned());
+        first.push(b0);
+        second.push(b1);
+        second.extend(segs[b.0 + 1..].iter().cloned());
+        second.push(a0);
+    }
+    boolean(&tube(&first)?, &tube(&second)?, BoolOp::Union).ok()
+}
+
+/// `s` cut at fraction `f` of its parameter range, in traversal order.
+fn split_segment(s: &Segment, f: f64) -> (Segment, Segment) {
+    let f = if s.reversed { 1.0 - f } else { f };
+    let tm = s.t0 + (s.t1 - s.t0) * f;
+    let lo = Segment { t1: tm, ..s.clone() };
+    let hi = Segment { t0: tm, ..s.clone() };
+    if s.reversed {
+        (hi, lo)
+    } else {
+        (lo, hi)
+    }
+}
+
 fn sweep_run(profile: &Loop3, path: &[Segment]) -> Option<(Body, DMat4)> {
     if let [s] = path {
         match &s.curve {
@@ -203,6 +260,25 @@ mod tests {
 
     fn vol(b: &Body) -> f64 {
         tessellate(b, &TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume()
+    }
+
+    #[test]
+    fn pipes_along_open_and_closed_paths() {
+        let r = 0.2;
+        let a = PI * r * r;
+        let line = Loop3 { segments: vec![Segment::line(DVec3::ZERO, DVec3::new(3.0, 0.0, 0.0))] };
+        let p = pipe(&line, r).unwrap();
+        assert!((vol(&p) - a * 3.0).abs() < 1e-3, "line {}", vol(&p));
+        // A ring: the torus of tube radius r.
+        let ring = pipe(&circle(Frame::WORLD, 1.5), r).unwrap();
+        assert_eq!(open_edges(&ring), 0);
+        assert!((vol(&ring) - a * 2.0 * PI * 1.5).abs() < 2e-3, "ring {}", vol(&ring));
+        // A rectangle: mitred corners keep the volume at area x length.
+        let c = [DVec3::ZERO, DVec3::new(4.0, 0.0, 0.0), DVec3::new(4.0, 2.0, 0.0), DVec3::new(0.0, 2.0, 0.0)];
+        let rect = Loop3 { segments: (0..4).map(|i| Segment::line(c[i], c[(i + 1) % 4])).collect() };
+        let frame = pipe(&rect, r).unwrap();
+        assert_eq!(open_edges(&frame), 0);
+        assert!((vol(&frame) - a * 12.0).abs() < 2e-3, "rectangle {}", vol(&frame));
     }
 
     fn circle(frame: Frame, r: f64) -> Loop3 {

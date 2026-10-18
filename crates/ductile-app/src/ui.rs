@@ -33,7 +33,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 }
             });
             ui.menu_button("Solid", |ui| {
-                for c in [Command::Extrude, Command::Revolve, Command::Loft, Command::Sweep, Command::Patch, Command::Thicken, Command::Cut, Command::Imprint, Command::Draft, Command::Fillet, Command::Chamfer, Command::Shell, Command::OffsetSolid, Command::Union, Command::Subtract, Command::Intersect] {
+                for c in [Command::Extrude, Command::Revolve, Command::Loft, Command::Sweep, Command::Pipe, Command::Patch, Command::Thicken, Command::Cut, Command::Imprint, Command::Draft, Command::Fillet, Command::Chamfer, Command::Shell, Command::OffsetSolid, Command::Union, Command::Subtract, Command::Intersect] {
                     menu_item(app, ui, c);
                 }
             });
@@ -131,7 +131,7 @@ pub fn toolbar(app: &mut DuctileApp, ui: &mut egui::Ui) {
     let groups: [(&str, &[Command]); 4] = [
         ("Solid", &[Box, Cylinder, Cone, Sphere, Torus]),
         ("Curve", &[Curve, Spline, Arc, Rectangle, Circle, Ellipse, Polygon]),
-        ("Model", &[Extrude, Revolve, Loft, Sweep, Fillet, Chamfer, Shell, Union, Subtract, Intersect]),
+        ("Model", &[Extrude, Revolve, Loft, Sweep, Pipe, Fillet, Chamfer, Shell, Union, Subtract, Intersect]),
         ("Edit", &[Move, Rotate, Scale, MirrorX, RadialArray, Duplicate, Delete]),
     ];
     egui::Panel::left("tools").resizable(false).exact_size(64.0).frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(6))).show(ui, |ui| {

@@ -54,6 +54,7 @@ pub enum Command {
     Imprint,
     Draft,
     Sweep,
+    Pipe,
     Fillet,
     Chamfer,
     Shell,
@@ -138,6 +139,7 @@ impl Command {
         Command::Imprint,
         Command::Draft,
         Command::Sweep,
+        Command::Pipe,
         Command::Fillet,
         Command::Chamfer,
         Command::Shell,
@@ -223,6 +225,7 @@ impl Command {
             Imprint => "Imprint curves onto faces",
             Draft => "Draft faces",
             Sweep => "Sweep",
+            Pipe => "Pipe",
             Fillet => "Fillet edges",
             Chamfer => "Chamfer edges",
             Shell => "Shell (hollow, open selected faces)",
@@ -317,6 +320,7 @@ impl Command {
             Imprint => "Alt+I",
             Draft => "Alt+G",
             Sweep => "Alt+W",
+            Pipe => "Alt+U",
             Subtract => "Shift+D",
             Intersect => "Shift+I",
             Move => "G",
@@ -384,6 +388,7 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::I, false, false, true) => Imprint,
         (Key::G, false, false, true) => Draft,
         (Key::W, false, false, true) => Sweep,
+        (Key::U, false, false, true) => Pipe,
         (Key::F, false, true, false) => Fillet,
         (Key::K, false, true, false) => Chamfer,
         (Key::S, false, false, true) => Shell,
@@ -655,6 +660,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 app.status = "Imprinted; the split faces can now be picked on their own".into();
             }
             Err(e) => app.status = e,
+        },
+        Pipe => match crate::tools::PipeTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select curves to run a pipe along".into(),
         },
         Thicken => match ThickenTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
