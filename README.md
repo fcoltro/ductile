@@ -114,6 +114,8 @@ code from them.
   or across a selected planar face; a solid mirrored across its own face is
   joined to its reflection, so half a symmetric part becomes the whole.
 - Hide (H), isolate the selection (Shift+H), show everything (Alt+H).
+  Double-click an edge to add the edges running on tangentially from it
+  (a filleted outline, a spline profile) to the selection.
 - Transform gizmo: selecting something shows axis arrows and rotation rings
   at it; drag an arrow to move along that axis or a ring to turn about it
   (type a value while dragging for an exact one). Headless: `--select N`.

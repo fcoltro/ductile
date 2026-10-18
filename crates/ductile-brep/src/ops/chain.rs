@@ -23,6 +23,45 @@ pub struct Link {
     pub fwd: bool,
 }
 
+/// The edges running on smoothly from `e` through each of its vertices,
+/// for as long as exactly one edge continues tangentially (as picking one
+/// edge of a filleted outline picks the whole outline), `e` included.
+pub fn grow_tangent_chain(body: &Body, e: EdgeId) -> Vec<EdgeId> {
+    let dir_at = |x: EdgeId, v: VertexId| {
+        let ed = body.edge(x);
+        // Pointing away from `v` along the edge.
+        if ed.v0 == v { ed.curve.tangent(ed.t0) } else { -ed.curve.tangent(ed.t1) }.normalize_or_zero()
+    };
+    let mut out = vec![e];
+    if body.edge(e).is_closed() {
+        return out;
+    }
+    let cos = (2.0f64).to_radians().cos();
+    for start_end in [true, false] {
+        let (mut cur, mut v) = {
+            let ed = body.edge(e);
+            (e, if start_end { ed.v1 } else { ed.v0 })
+        };
+        loop {
+            let into = -dir_at(cur, v);
+            let next: Vec<EdgeId> = body
+                .edge_ids()
+                .filter(|x| *x != cur && !body.edge(*x).is_closed() && (body.edge(*x).v0 == v || body.edge(*x).v1 == v))
+                .filter(|x| dir_at(*x, v).dot(into) > cos)
+                .collect();
+            let [x] = next[..] else { break };
+            if out.contains(&x) {
+                break;
+            }
+            out.push(x);
+            let xe = body.edge(x);
+            v = if xe.v0 == v { xe.v1 } else { xe.v0 };
+            cur = x;
+        }
+    }
+    out
+}
+
 /// Groups edges into chains of tangent edges. Each chain is listed in
 /// order with its direction, and flagged when it closes on itself.
 pub fn tangent_chains(body: &Body, edges: &[EdgeId]) -> Vec<(Vec<Link>, bool)> {
@@ -483,6 +522,28 @@ mod tests {
         assert_eq!(chains.len(), 1);
         assert!(chains[0].1);
         assert_eq!(chains[0].0.len(), 8);
+    }
+
+    #[test]
+    fn grows_one_top_edge_into_the_whole_outline() {
+        let b = rounded_slab(3.0, 2.0, 0.8, 1.5);
+        let e = b.edge_ids().find(|e| {
+            let ed = b.edge(*e);
+            ed.start().z > 1.4 && ed.end().z > 1.4
+        }).unwrap();
+        let mut chain = grow_tangent_chain(&b, e);
+        assert_eq!(chain.len(), 8);
+        chain.sort();
+        chain.dedup();
+        assert_eq!(chain.len(), 8);
+        // A vertical edge meets the outlines at right angles: alone.
+        let v = b.edge_ids().find(|e| {
+            let ed = b.edge(*e);
+            (ed.start().z - ed.end().z).abs() > 1.0
+        });
+        if let Some(v) = v {
+            assert_eq!(grow_tangent_chain(&b, v), vec![v]);
+        }
     }
 
     #[test]

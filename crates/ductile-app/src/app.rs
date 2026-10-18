@@ -418,6 +418,9 @@ impl DuctileApp {
                 if wants.is_some() && clicked {
                     self.click_select(c, size, mods);
                 }
+                if wants == Some(SelectMode::Edge) && resp.double_clicked() {
+                    self.chain_select(c, size);
+                }
                 match out {
                     ToolOutcome::Finished => self.finish_tool(),
                     ToolOutcome::Cancelled => self.cancel_tool(),
@@ -446,6 +449,9 @@ impl DuctileApp {
                 }
                 if clicked && self.gizmo_hover.is_none() {
                     self.click_select(c, size, mods);
+                }
+                if resp.double_clicked() && self.gizmo_hover.is_none() {
+                    self.chain_select(c, size);
                 }
                 if let (Some((kind, axis)), true) = (self.gizmo_hover, resp.drag_started_by(egui::PointerButton::Primary)) {
                     let mut t = TransformTool::new(kind, &self.doc);
@@ -616,6 +622,18 @@ impl DuctileApp {
                 if !mods.shift && !mods.ctrl && self.tool.is_none() {
                     self.doc.selection.clear();
                 }
+            }
+        }
+    }
+
+    /// Double-click on an edge: adds the edges running on tangentially from
+    /// it (a filleted outline, a spline profile's edges) to the selection.
+    fn chain_select(&mut self, c: DVec2, size: DVec2) {
+        let mode = self.tool.as_ref().and_then(|t| t.wants_selection()).unwrap_or(self.doc.mode);
+        if let Some(Pick::Edge(o, e)) = picking::pick(&self.doc, &self.camera, c, size, mode) {
+            let Some(ob) = self.doc.object(o) else { return };
+            for x in ductile_brep::ops::chain::grow_tangent_chain(&ob.body, e) {
+                self.doc.selection.insert(Pick::Edge(o, x));
             }
         }
     }
