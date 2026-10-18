@@ -197,7 +197,11 @@ pub fn face_coedge_uvs(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> V
         }
         // Unwrap the remaining coedges by continuity, starting after a fixed one.
         let n = l.coedges.len();
-        let start = fixed.iter().position(|x| *x).unwrap_or(0);
+        // Start after a fixed seam, else right after a singular point (where
+        // the periodic coordinate is undefined), else anywhere.
+        let start = fixed.iter().position(|x| *x).unwrap_or_else(|| {
+            (0..n).find(|&i| is_singular(surf, coedge_uvs[(i + n - 1) % n].last().unwrap().uv)).unwrap_or(0)
+        });
         let mut prev_end: Option<DVec2> = None;
         for k in 0..n {
             let i = (start + k) % n;
@@ -230,7 +234,11 @@ pub fn face_coedge_uvs(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> V
                 continue;
             }
             let s = &mut coedge_uvs[i];
-            let mut hint = prev_end.unwrap_or(s[0].uv);
+            let own = s.iter().map(|x| x.uv).find(|uv| !is_singular(surf, *uv)).unwrap_or(s[0].uv);
+            let mut hint = match prev_end {
+                Some(p) if !is_singular(surf, p) => p,
+                _ => own,
+            };
             for x in s.iter_mut() {
                 x.uv = surf.align_periodic(x.uv, hint);
                 hint = x.uv;

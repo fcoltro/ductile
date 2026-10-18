@@ -3,7 +3,8 @@
 
 use crate::app::DuctileApp;
 use crate::document::{Document, Pick, SelectMode};
-use crate::tools::{BoxTool, RoundKind, RoundTool, TransformKind, TransformTool};
+use crate::tools::{BoxTool, ExtrudeTool, RoundKind, RoundTool, TransformKind, TransformTool};
+use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
 use ductile_geom::{DMat4, DVec3, Frame};
 use egui::{Key, Modifiers};
@@ -33,6 +34,10 @@ pub enum Command {
     Cone,
     Sphere,
     Torus,
+    Extrude,
+    Union,
+    Subtract,
+    Intersect,
     Move,
     Rotate,
     Scale,
@@ -78,6 +83,10 @@ impl Command {
         Command::Cone,
         Command::Sphere,
         Command::Torus,
+        Command::Extrude,
+        Command::Union,
+        Command::Subtract,
+        Command::Intersect,
         Command::Move,
         Command::Rotate,
         Command::Scale,
@@ -124,6 +133,10 @@ impl Command {
             Cone => "Cone",
             Sphere => "Sphere",
             Torus => "Torus",
+            Extrude => "Extrude / push-pull face",
+            Union => "Boolean union",
+            Subtract => "Boolean subtract",
+            Intersect => "Boolean intersect",
             Move => "Move",
             Rotate => "Rotate",
             Scale => "Scale",
@@ -169,6 +182,10 @@ impl Command {
             Cone => "Shift+C",
             Sphere => "Shift+S",
             Torus => "Shift+T",
+            Extrude => "E",
+            Union => "Shift+U",
+            Subtract => "Shift+D",
+            Intersect => "Shift+I",
             Move => "G",
             Rotate => "R",
             Scale => "S",
@@ -212,6 +229,10 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::C, false, false, false) => Cylinder,
         (Key::S, false, true, false) => Sphere,
         (Key::T, false, true, false) => Torus,
+        (Key::E, false, false, false) => Extrude,
+        (Key::U, false, true, false) => Union,
+        (Key::D, false, true, false) => Subtract,
+        (Key::I, false, true, false) => Intersect,
         (Key::G, false, false, false) => Move,
         (Key::R, false, false, false) => Rotate,
         (Key::S, false, false, false) => Scale,
@@ -345,6 +366,13 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Cone => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Cone))),
         Sphere => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Sphere))),
         Torus => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Torus))),
+        Extrude => match ExtrudeTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select a planar face to extrude (face mode: 3)".into(),
+        },
+        Union => boolean_selected(app, BoolOp::Union),
+        Subtract => boolean_selected(app, BoolOp::Difference),
+        Intersect => boolean_selected(app, BoolOp::Intersection),
         Move | Rotate | Scale => {
             let kind = match cmd {
                 Move => TransformKind::Move,
@@ -396,6 +424,45 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         }
         Help => app.show_help = !app.show_help,
     }
+}
+
+/// Combines the selected solids: the oldest one is the target, the others
+/// are tools consumed by the operation.
+fn boolean_selected(app: &mut DuctileApp, op: BoolOp) {
+    let ids = app.doc.selected_objects();
+    if ids.len() < 2 {
+        app.status = "Select a target solid and at least one tool solid".into();
+        return;
+    }
+    let target = ids[0];
+    let Some(mut body) = app.doc.object(target).map(|o| (*o.body).clone()) else { return };
+    let name = match op {
+        BoolOp::Union => "Union",
+        BoolOp::Difference => "Subtract",
+        BoolOp::Intersection => "Intersect",
+    };
+    for id in &ids[1..] {
+        let Some(tool) = app.doc.object(*id).map(|o| o.body.clone()) else { continue };
+        match boolean(&body, &tool, op) {
+            Ok(b) => body = b,
+            Err(BoolError::Empty) => {
+                app.status = format!("{name}: the result is empty");
+                return;
+            }
+            Err(e) => {
+                app.status = format!("{name} failed: {e}");
+                return;
+            }
+        }
+    }
+    app.doc.checkpoint(name);
+    app.doc.replace_body(target, body);
+    for id in &ids[1..] {
+        app.doc.remove(*id);
+    }
+    app.doc.selection.clear();
+    app.doc.selection.insert(Pick::Object(target));
+    app.status = format!("{name} done");
 }
 
 pub fn open_file(app: &mut DuctileApp, path: &std::path::Path) {
@@ -462,13 +529,24 @@ fn export_mesh(doc: &Document, path: &std::path::Path, stl: bool) -> Result<(), 
 
 /// A small scene used for screenshots and first launch demos.
 pub fn demo_scene(doc: &mut Document) {
-    doc.add_body("Box", make_box(&Frame::WORLD, DVec3::new(8.0, 6.0, 3.0)));
-    let f = Frame { origin: DVec3::new(13.0, 3.0, 0.0), ..Frame::WORLD };
-    doc.add_body("Cylinder", make_cylinder(&f, 2.5, 5.0));
-    doc.add_body("Sphere", make_sphere(DVec3::new(4.0, 12.0, 3.0), 3.0));
-    let f = Frame { origin: DVec3::new(14.0, 12.0, 1.0), ..Frame::WORLD };
-    doc.add_body("Torus", make_torus(&f, 3.0, 1.0));
-    let f = Frame { origin: DVec3::new(-6.0, 4.0, 0.0), ..Frame::WORLD };
-    doc.add_body("Cone", make_frustum(&f, 2.5, 0.0, 5.0));
+    let at = |x: f64, y: f64, z: f64| Frame { origin: DVec3::new(x, y, z), ..Frame::WORLD };
+    let op = |a: ductile_brep::Body, b: ductile_brep::Body, o: BoolOp| boolean(&a, &b, o).unwrap_or(a);
+    // A machined block: boss, through hole, flush pocket and a spherical notch.
+    let mut part = make_box(&Frame::WORLD, DVec3::new(8.0, 6.0, 3.0));
+    part = op(part, make_cylinder(&at(2.2, 3.0, 3.0), 1.6, 1.2), BoolOp::Union);
+    part = op(part, make_cylinder(&at(2.2, 3.0, -1.0), 0.8, 6.0), BoolOp::Difference);
+    part = op(part, make_box(&at(4.5, 1.0, 2.0), DVec3::new(2.5, 4.0, 1.0)), BoolOp::Difference);
+    part = op(part, make_sphere(DVec3::new(8.0, 0.0, 3.0), 1.4), BoolOp::Difference);
+    doc.add_body("Block", part);
+    // Capsule end: cylinder with a hemispherical cap.
+    let cap = op(make_cylinder(&at(13.0, 3.0, 0.0), 2.5, 4.0), make_sphere(DVec3::new(13.0, 3.0, 4.0), 2.5), BoolOp::Union);
+    doc.add_body("Capsule", cap);
+    // Sphere with a cylindrical bore and a flat.
+    let mut ball = make_sphere(DVec3::new(4.0, 12.0, 3.0), 3.0);
+    ball = op(ball, make_cylinder(&Frame::new(DVec3::new(0.0, 12.0, 3.0), DVec3::X, DVec3::Y), 1.0, 8.0), BoolOp::Difference);
+    ball = op(ball, make_box(&at(0.0, 8.0, 5.0), DVec3::new(8.0, 8.0, 2.0)), BoolOp::Difference);
+    doc.add_body("Ball", ball);
+    doc.add_body("Torus", make_torus(&at(14.0, 12.0, 1.0), 3.0, 1.0));
+    doc.add_body("Cone", make_frustum(&at(-6.0, 4.0, 0.0), 2.5, 0.0, 5.0));
     doc.dirty = false;
 }

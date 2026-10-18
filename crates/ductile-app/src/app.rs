@@ -20,6 +20,8 @@ pub struct Options {
     pub screenshot: Option<std::path::PathBuf>,
     pub open: Option<std::path::PathBuf>,
     pub demo: bool,
+    /// Camera override: target x, y, z, distance, yaw and pitch in degrees.
+    pub camera: Option<[f64; 6]>,
 }
 
 struct BoxSelect {
@@ -94,6 +96,12 @@ impl DuctileApp {
             commands::demo_scene(&mut app.doc);
             let bb = app.doc.bbox();
             app.camera.frame(bb.center(), bb.diagonal() * 0.5);
+        }
+        if let Some(c) = opts.camera {
+            app.camera.target = DVec3::new(c[0], c[1], c[2]);
+            app.camera.distance = c[3];
+            app.camera.yaw = c[4].to_radians();
+            app.camera.pitch = c[5].to_radians();
         }
         app
     }

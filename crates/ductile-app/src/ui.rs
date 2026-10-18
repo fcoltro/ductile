@@ -39,6 +39,11 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                     menu_item(app, ui, c);
                 }
             });
+            ui.menu_button("Solid", |ui| {
+                for c in [Command::Extrude, Command::Union, Command::Subtract, Command::Intersect] {
+                    menu_item(app, ui, c);
+                }
+            });
             ui.menu_button("Transform", |ui| {
                 for c in [Command::Move, Command::Rotate, Command::Scale, Command::MirrorX, Command::MirrorY, Command::MirrorZ] {
                     menu_item(app, ui, c);
@@ -130,6 +135,11 @@ pub fn toolbar(app: &mut DuctileApp, ui: &mut egui::Ui) {
             cmd_button(app, ui, Command::Cone, "Cone");
             cmd_button(app, ui, Command::Sphere, "Sph");
             cmd_button(app, ui, Command::Torus, "Tor");
+            section(ui, "Model");
+            cmd_button(app, ui, Command::Extrude, "Extr");
+            cmd_button(app, ui, Command::Union, "Union");
+            cmd_button(app, ui, Command::Subtract, "Sub");
+            cmd_button(app, ui, Command::Intersect, "Inter");
             section(ui, "Edit");
             cmd_button(app, ui, Command::Move, "Move");
             cmd_button(app, ui, Command::Rotate, "Rot");

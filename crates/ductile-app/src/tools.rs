@@ -618,3 +618,127 @@ impl Tool for TransformTool {
     }
 }
 
+
+// -------------------------------------------------------------- Extrude ----
+
+/// Push/pull of a planar face: pulling out adds material, pushing in cuts.
+pub struct ExtrudeTool {
+    target: ObjectId,
+    body: std::sync::Arc<Body>,
+    region: ductile_brep::profile::Region,
+    normal: DVec3,
+    base: DVec3,
+    start_t: Option<f64>,
+    pub distance: f64,
+    typed: Option<f64>,
+    cache: std::cell::RefCell<Option<(f64, Option<Body>, Option<String>)>>,
+}
+
+impl ExtrudeTool {
+    /// Starts on the first selected planar face, if any.
+    pub fn new(doc: &Document) -> Option<Self> {
+        let (id, f) = doc.selection.iter().find_map(|p| match p {
+            Pick::Face(o, f) => Some((*o, *f)),
+            _ => None,
+        })?;
+        let o = doc.object(id)?;
+        let region = ductile_brep::profile::Region::from_face(&o.body, f)?;
+        let poly = region.outer.polygon(1e-3);
+        let base = poly.iter().copied().sum::<DVec3>() / poly.len().max(1) as f64;
+        Some(Self {
+            target: id,
+            body: o.body.clone(),
+            normal: region.plane.z,
+            region,
+            base,
+            start_t: None,
+            distance: 0.0,
+            typed: None,
+            cache: std::cell::RefCell::new(None),
+        })
+    }
+
+    fn value(&self) -> f64 {
+        self.typed.unwrap_or(self.distance)
+    }
+
+    fn result(&self) -> (Option<Body>, Option<String>) {
+        let d = self.value();
+        if let Some((cd, b, e)) = &*self.cache.borrow() {
+            if *cd == d {
+                return (b.clone(), e.clone());
+            }
+        }
+        let out = if d.abs() < 1e-9 {
+            (None, None)
+        } else {
+            match ductile_brep::ops::extrude::extrude_region(&self.region, self.normal * d) {
+                None => (None, Some("could not build the extrusion".into())),
+                Some(prism) => {
+                    let op = if d > 0.0 { ductile_brep::ops::boolean::BoolOp::Union } else { ductile_brep::ops::boolean::BoolOp::Difference };
+                    match ductile_brep::ops::boolean::boolean(&self.body, &prism, op) {
+                        Ok(b) => (Some(b), None),
+                        Err(e) => (None, Some(e.to_string())),
+                    }
+                }
+            }
+        };
+        *self.cache.borrow_mut() = Some((d, out.0.clone(), out.1.clone()));
+        out
+    }
+}
+
+impl Tool for ExtrudeTool {
+    fn name(&self) -> &'static str {
+        "Extrude"
+    }
+    fn hint(&self) -> String {
+        match self.cache.borrow().as_ref().and_then(|c| c.2.clone()) {
+            Some(e) => format!("Extrude failed: {e}"),
+            None => format!("Extrude: move along the normal or type a distance ({:.4}), click or Enter to finish", self.value()),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        let t = height_from_ray(self.base, self.normal, &p.ray);
+        let t0 = *self.start_t.get_or_insert(t);
+        if self.typed.is_none() {
+            self.distance = snap_len(t - t0, p.world_per_px);
+        }
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        self.result().0
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        let tip = self.base + self.normal * self.value();
+        out.push(LineInstance::new(self.base, tip, [1.0, 0.85, 0.3, 1.0], 2.0));
+        out.push(LineInstance::point(tip, [1.0, 0.85, 0.3, 1.0], 7.0));
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut d = self.value();
+        let ch = drag_value(ui, "Distance", &mut d, 0.05);
+        if ch {
+            self.typed = Some(d);
+        }
+        ch
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        if self.result().0.is_some() {
+            vec![self.target]
+        } else {
+            vec![]
+        }
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v;
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let Some(b) = self.result().0 else { return false };
+        doc.replace_body(self.target, b);
+        doc.selection.clear();
+        true
+    }
+}

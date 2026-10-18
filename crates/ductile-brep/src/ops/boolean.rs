@@ -1127,4 +1127,14 @@ mod tests {
         assert!((u - (vc + vs - i)).abs() < 2e-2, "union {u} vs {}", vc + vs - i);
         assert!((d - (vs - i)).abs() < 2e-2, "difference {d} vs {}", vs - i);
     }
+
+    #[test]
+    fn sphere_notch_at_corner() {
+        // Degenerate on purpose: the sphere's pole lies on a box edge.
+        let a = bx(DVec3::ZERO, DVec3::new(8.0, 6.0, 3.0));
+        let s = make_sphere(DVec3::new(8.0, 0.0, 3.0), 1.4);
+        let d = boolean(&a, &s, BoolOp::Difference).unwrap();
+        let expect = 144.0 - 4.0 / 3.0 * PI * 1.4f64.powi(3) / 8.0;
+        assert!((vol(&d) - expect).abs() < 2e-3, "{} vs {expect}", vol(&d));
+    }
 }
