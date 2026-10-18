@@ -891,6 +891,21 @@ pub fn demo_scene(doc: &mut Document) {
         if let Some(b) = patch(&boundary, &[]) {
             doc.add_body("Patch", b);
         }
+        // A tube capped by a patch that meets it tangentially.
+        let rim = Loop3 { segments: vec![Segment::new(Curve3::Circle { frame: at(18.0, -24.0, 0.0), radius: 1.5 }, 0.0, std::f64::consts::TAU)] };
+        if let Some(tube) = extrude_sheet(&[rim], p(0.0, 0.0, 2.5)) {
+            let top = tube.edge_ids().find(|e| tube.edge(*e).mid().z > 2.4 && tube.edge(*e).is_closed());
+            let cap = top.and_then(|e| {
+                let ed = tube.edge(e);
+                let f = tube.edge_faces(e)[0].0;
+                let lp = Loop3 { segments: vec![Segment::new(ed.curve.clone(), ed.t0, ed.t1)] };
+                ductile_brep::ops::sheet::patch_g1(&lp, &[Some((tube.face(f).surface.clone(), p(18.0, -22.5, 1.0)))])
+            });
+            doc.add_body("Tube", tube);
+            if let Some(c) = cap {
+                doc.add_body("Tangent cap", c);
+            }
+        }
     }
     // Capsule end: cylinder with a hemispherical cap.
     let cap = op(make_cylinder(&at(13.0, 3.0, 0.0), 2.5, 4.0), make_sphere(DVec3::new(13.0, 3.0, 4.0), 2.5), BoolOp::Union);

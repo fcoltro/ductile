@@ -733,7 +733,7 @@ pub fn loft_selected(doc: &Document) -> Result<Body, String> {
 pub fn patch_selected(doc: &Document) -> Result<Body, String> {
     let closed: Vec<_> = selected_chains(doc).into_iter().filter(|l| l.is_closed()).collect();
     if closed.is_empty() {
-        return Err("Patch: select closed curves to fill".into());
+        return patch_edges(doc);
     }
     let mut out: Option<Body> = None;
     let mut add = |b: Body| match &mut out {
@@ -751,6 +751,42 @@ pub fn patch_selected(doc: &Document) -> Result<Body, String> {
         }
     }
     out.ok_or_else(|| "Patch failed".into())
+}
+
+/// Fills the loop of selected edges with a surface that meets the faces
+/// beyond them tangentially.
+fn patch_edges(doc: &Document) -> Result<Body, String> {
+    use ductile_brep::profile::{wire_chains, wire_from_segments, Segment};
+    let edges = doc.selected_edges();
+    if edges.is_empty() {
+        return Err("Patch: select closed curves, or edges around a hole (edge mode: 2)".into());
+    }
+    // Each edge with the face beyond it and a point inside that face.
+    let mut info = Vec::new();
+    for (o, e) in &edges {
+        let body = &doc.object(*o).ok_or("Patch: missing object")?.body;
+        let ed = body.edge(*e);
+        let seg = Segment::new(ed.curve.clone(), ed.t0, ed.t1);
+        let nb = body.edge_faces(*e).first().map(|(f, _)| {
+            let mut one = (**body).clone();
+            one.faces = vec![body.face(*f).clone()];
+            let m = ductile_brep::tessellate(&one, &ductile_brep::TessOptions::for_size(body.bbox().diagonal()));
+            let pts: Vec<DVec3> = m.faces.iter().flat_map(|f| f.positions.iter().copied()).collect();
+            let inside = pts.iter().copied().sum::<DVec3>() / pts.len().max(1) as f64;
+            (body.face(*f).surface.clone(), inside)
+        });
+        info.push((seg, nb));
+    }
+    let segs: Vec<Segment> = info.iter().map(|i| i.0.clone()).collect();
+    let chain = wire_chains(&wire_from_segments(&segs)).into_iter().find(|c| c.is_closed()).ok_or("Patch: the selected edges must form a closed loop")?;
+    // The neighbour of each chained segment, matched by midpoint.
+    let mid = |s: &Segment| s.curve.point(0.5 * (s.t0 + s.t1));
+    let neighbours: Vec<ductile_brep::ops::sheet::Neighbour> = chain
+        .segments
+        .iter()
+        .map(|s| info.iter().min_by(|a, b| mid(&a.0).distance(mid(s)).total_cmp(&mid(&b.0).distance(mid(s)))).and_then(|i| i.1.clone()))
+        .collect();
+    ductile_brep::ops::sheet::patch_g1(&chain, &neighbours).ok_or_else(|| "Patch failed".into())
 }
 
 /// Sweeps the selected closed curve along the selected open one.
@@ -2545,6 +2581,34 @@ mod tests {
         let a = extrude_selected(&mut doc);
         let expect = 12.0 - std::f64::consts::PI / 4.0;
         assert!((a - expect).abs() < 2e-2, "{a} vs {expect}");
+    }
+
+    #[test]
+    fn patch_caps_a_tube_tangentially() {
+        use ductile_brep::profile::{Loop3, Segment};
+        let circle = Loop3 { segments: vec![Segment::new(ductile_geom::Curve3::Circle { frame: ductile_geom::Frame::WORLD, radius: 1.0 }, 0.0, std::f64::consts::TAU)] };
+        let tube = ductile_brep::ops::sheet::extrude_sheet(&[circle], DVec3::new(0.0, 0.0, 2.0)).unwrap();
+        let mut doc = Document::default();
+        let id = doc.add_body("Tube", tube);
+        let b = doc.object(id).unwrap().body.clone();
+        let rim = b.edge_ids().find(|e| b.edge(*e).mid().z > 1.9 && b.edge(*e).is_closed()).unwrap();
+        doc.selection.insert(Pick::Edge(id, rim));
+        let cap = patch_selected(&doc).unwrap();
+        let ductile_geom::Surface::Nurbs(s) = &cap.faces[0].surface else { panic!() };
+        // A dome over the rim, meeting the tube along it.
+        assert!(s.point(0.5, 0.5).z > 2.2, "{}", s.point(0.5, 0.5));
+        // (The four corners split a smooth circle, so the patch's normal is
+        // undefined there.)
+        for k in 1..8 {
+            let t = k as f64 / 8.0;
+            for (u, v) in [(t, 0.0), (1.0, t), (t, 1.0), (0.0, t)] {
+                let d = s.derivs(u, v, 1);
+                let p = d[0][0];
+                let n = d[1][0].cross(d[0][1]).normalize();
+                let radial = DVec3::new(p.x, p.y, 0.0).normalize();
+                assert!((p.z - 2.0).abs() < 1e-6 && n.dot(radial).abs() > 0.9999, "{p} {n}");
+            }
+        }
     }
 
     #[test]

@@ -434,7 +434,9 @@ fn fit_g1(sides: [&NurbsCurve; 4], cross: &dyn Fn(DVec3) -> Option<(DVec3, DVec3
     let (p, q) = (uc[0].degree, vc[0].degree);
     let (ku, kv) = (uc[0].knots.clone(), vc[0].knots.clone());
     let (nu, nv) = (uc[0].ctrl.len(), vc[0].ctrl.len());
-    let cp = |c: &NurbsCurve, i: usize| c.ctrl[i].truncate() / c.ctrl[i].w;
+    // Solved relative to the boundary's centre, for conditioning.
+    let centre = uc.iter().chain(vc.iter()).flat_map(|c| c.ctrl.iter().map(|h| h.truncate() / h.w)).sum::<DVec3>() / (2 * (uc[0].ctrl.len() + vc[0].ctrl.len())) as f64;
+    let cp = |c: &NurbsCurve, i: usize| c.ctrl[i].truncate() / c.ctrl[i].w - centre;
     // Fixed boundary rows, unknown interior.
     #[derive(Clone, Copy)]
     enum S {
@@ -480,8 +482,6 @@ fn fit_g1(sides: [&NurbsCurve; 4], cross: &dyn Fn(DVec3) -> Option<(DVec3, DVec3
             lsq.row(&coef, r, w);
         }
     };
-    let du = cp(&vc[0], nv / 2).distance(cp(&vc[1], nv / 2)).max(1e-9);
-    let dv = cp(&uc[0], nu / 2).distance(cp(&uc[1], nu / 2)).max(1e-9);
     // Cross-boundary rows. side: 0 bottom, 1 right, 2 top, 3 left.
     for side in 0..4 {
         let along_u = side % 2 == 0;
@@ -491,11 +491,25 @@ fn fit_g1(sides: [&NurbsCurve; 4], cross: &dyn Fn(DVec3) -> Option<(DVec3, DVec3
         // Derivative across the side, into the patch: f (P_inner - P_edge).
         let f = if at_end { other_deg as f64 / (other_k[other_n - 1 + other_deg] - other_k[other_n - 1]) } else { other_deg as f64 / (other_k[other_deg + 1] - other_k[1]) };
         let (edge, inner) = if at_end { (other_n - 1, other_n - 2) } else { (0, 1) };
-        let reach = if along_u { dv } else { du };
+        // The side across from this one, sampled at the same parameter.
+        let opposite = if along_u { &uc[1 - side / 2] } else { &vc[if side == 3 { 1 } else { 0 }] };
         let samples = 4 * n;
         for s in 0..samples {
             let t = knots[deg] + (knots[n] - knots[deg]) * (s as f64 + 0.5) / samples as f64;
-            let Some((nrm, d)) = cross(curve.point(t)) else { continue };
+            let at = curve.point(t);
+            let Some((nrm, d)) = cross(at) else { continue };
+            // How far the patch runs across, as the arc leaving here along
+            // d and reaching the opposite side along its own direction (or
+            // symmetrically, if that side is free): chord c turning through
+            // theta has length c (theta / 2) / sin(theta / 2).
+            let o = opposite.point(t);
+            let chord = o - at;
+            let theta = match cross(o) {
+                Some((_, d_o)) => d.angle_between(-d_o),
+                None => 2.0 * d.angle_between(chord),
+            }
+            .min(3.0);
+            let reach = if theta > 1e-6 { chord.length() * (theta / 2.0) / (theta / 2.0).sin() } else { chord.length() };
             let span = find_span(n - 1, deg, t, knots);
             let b = basis_funs(span, t, deg, knots);
             let idx = |k: usize, row: usize| if along_u { (k, row) } else { (row, k) };
@@ -511,11 +525,11 @@ fn fit_g1(sides: [&NurbsCurve; 4], cross: &dyn Fn(DVec3) -> Option<(DVec3, DVec3
                 v
             };
             // In the neighbour's tangent plane (hard), leaning along d (soft).
-            add(&mut lsq, &terms(nrm), 0.0, 30.0);
+            add(&mut lsq, &terms(nrm), 0.0, 300.0);
             for c in 0..3 {
                 let mut e = DVec3::ZERO;
                 e[c] = 1.0;
-                add(&mut lsq, &terms(e), reach * d[c], 0.3);
+                add(&mut lsq, &terms(e), reach * d[c], 1.0);
             }
         }
     }
@@ -552,7 +566,7 @@ fn fit_g1(sides: [&NurbsCurve; 4], cross: &dyn Fn(DVec3) -> Option<(DVec3, DVec3
             let w0 = 1.0 / m as f64;
             for e in unit {
                 for (r, s, w) in [(3, 0, 1.0), (2, 1, 3.0), (1, 2, 3.0), (0, 3, 1.0)] {
-                    add(&mut lsq, &term(r, s, e), 0.0, w0 * f64::sqrt(w) * du.min(dv));
+                    add(&mut lsq, &term(r, s, e), 0.0, w0 * f64::sqrt(w));
                 }
                 for (r, s, w) in [(2, 0, 1.0), (1, 1, 2.0), (0, 2, 1.0)] {
                     add(&mut lsq, &term(r, s, e), 0.0, w0 * f64::sqrt(w) * 0.05);
@@ -568,7 +582,7 @@ fn fit_g1(sides: [&NurbsCurve; 4], cross: &dyn Fn(DVec3) -> Option<(DVec3, DVec3
                 S::F(p) => p,
                 S::V(k) => DVec3::new(x[3 * k], x[3 * k + 1], x[3 * k + 2]),
             };
-            ctrl.push(pt.extend(1.0));
+            ctrl.push((pt + centre).extend(1.0));
         }
     }
     Some(NurbsSurface::new(p, q, ku, kv, nu, nv, ctrl))
@@ -762,5 +776,21 @@ mod tests {
         assert!(ang_c > 1.0, "{ang_c}");
         assert!(ang_g < 0.05, "{ang_g}");
         assert!(dev_g < 1.5e-3 && dev_g < dev_c / 5.0, "{dev_g} vs {dev_c}");
+    }
+
+    #[test]
+    fn tangent_cap_away_from_the_origin() {
+        for (c, r, h) in [(DVec3::ZERO, 1.0, 2.0), (DVec3::new(18.0, -24.0, 0.0), 1.5, 2.5)] {
+            let rim = chain(vec![Segment::new(Curve3::Circle { frame: Frame { origin: c, ..Frame::WORLD }, radius: r }, 0.0, 2.0 * PI)]);
+            let tube = extrude_sheet(&[rim], DVec3::new(0.0, 0.0, h)).unwrap();
+            let e = tube.edge_ids().find(|e| tube.edge(*e).mid().z > h - 0.1 && tube.edge(*e).is_closed()).unwrap();
+            let ed = tube.edge(e);
+            let lp = chain(vec![Segment::new(ed.curve.clone(), ed.t0, ed.t1)]);
+            let inside = c + DVec3::new(0.0, r, 1.0);
+            let cap = patch_g1(&lp, &[Some((tube.faces[0].surface.clone(), inside))]).unwrap();
+            let Surface::Nurbs(s) = &cap.faces[0].surface else { panic!() };
+            let top = s.point(0.5, 0.5);
+            assert!(top.z > h + 0.3 * r, "{c}: {top}");
+        }
     }
 }
