@@ -308,7 +308,7 @@ impl Command {
             Help => "Help",
             Repeat => "Repeat last command",
             InvertSelection => "Invert selection",
-            Boolean => "Boolean (subtract the others from the first)",
+            Boolean => "Boolean (union, subtract, intersect or slice)",
             Offset => "Offset (curves, faces or solid)",
             Mirror => "Mirror across the construction plane's YZ",
         }
@@ -347,7 +347,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             Some(c) => run(app, c),
             None => app.status = "Nothing to repeat yet".into(),
         },
-        Boolean => run(app, Subtract),
+        Boolean => match crate::tools::BooleanTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select a target solid and at least one tool solid".into(),
+        },
         Mirror => run(app, MirrorX),
         Offset => {
             let curves = app.doc.selected_objects().iter().any(|id| app.doc.object(*id).is_some_and(|o| o.body.kind == ductile_brep::BodyKind::Wire));

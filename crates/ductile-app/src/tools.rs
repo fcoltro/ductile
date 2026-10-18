@@ -2881,6 +2881,146 @@ impl Tool for ExtendSheetTool {
     }
 }
 
+/// The boolean the Boolean command applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BooleanKind {
+    Union,
+    Difference,
+    Intersection,
+    /// Both the difference and the intersection, as separate solids.
+    Slice,
+}
+
+/// Boolean (Q): combines the first selected solid with the others, with
+/// Plasticity's keys to pick the operation while the result previews.
+pub struct BooleanTool {
+    target: (ObjectId, std::sync::Arc<Body>),
+    tools: Vec<(ObjectId, std::sync::Arc<Body>)>,
+    pub kind: BooleanKind,
+    pub keep_tools: bool,
+    cache: std::cell::RefCell<Option<(BooleanKind, Result<Vec<Body>, String>)>>,
+}
+
+impl BooleanTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let ids = doc.selected_solids();
+        let mut it = ids.iter().filter_map(|id| doc.object(*id).map(|o| (*id, o.body.clone())));
+        let target = it.next()?;
+        let tools: Vec<_> = it.collect();
+        if tools.is_empty() {
+            return None;
+        }
+        Some(Self { target, tools, kind: BooleanKind::Difference, keep_tools: false, cache: Default::default() })
+    }
+
+    fn result(&self) -> Result<Vec<Body>, String> {
+        use ductile_brep::ops::boolean::{boolean, BoolOp};
+        if let Some((k, r)) = &*self.cache.borrow() {
+            if *k == self.kind {
+                return r.clone();
+            }
+        }
+        let run = |op: BoolOp| -> Result<Body, String> {
+            let mut body = (*self.target.1).clone();
+            for (_, t) in &self.tools {
+                body = boolean(&body, t, op).map_err(|e| e.to_string())?;
+            }
+            Ok(body)
+        };
+        let r = match self.kind {
+            BooleanKind::Union => run(BoolOp::Union).map(|b| vec![b]),
+            BooleanKind::Difference => run(BoolOp::Difference).map(|b| vec![b]),
+            BooleanKind::Intersection => run(BoolOp::Intersection).map(|b| vec![b]),
+            BooleanKind::Slice => run(BoolOp::Difference).and_then(|a| Ok(vec![a, run(BoolOp::Intersection)?])),
+        };
+        *self.cache.borrow_mut() = Some((self.kind, r.clone()));
+        r
+    }
+}
+
+impl Tool for BooleanTool {
+    fn name(&self) -> &'static str {
+        match self.kind {
+            BooleanKind::Union => "Union",
+            BooleanKind::Difference => "Subtract",
+            BooleanKind::Intersection => "Intersect",
+            BooleanKind::Slice => "Slice",
+        }
+    }
+    fn hint(&self) -> String {
+        match self.result() {
+            Err(e) => format!("{} failed: {e}", self.name()),
+            Ok(_) => format!(
+                "Boolean ({}): Q union, W subtract, Shift+E intersect, Shift+Q slice, T keep tools ({}); Enter to finish",
+                self.name().to_lowercase(),
+                if self.keep_tools { "on" } else { "off" }
+            ),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if p.clicked { ToolOutcome::Finished } else { ToolOutcome::Continue }
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let mut r = self.result().ok()?.into_iter();
+        let mut out = r.next()?;
+        for b in r {
+            out.append(&b);
+        }
+        Some(out)
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut ch = false;
+        ui.horizontal(|ui| {
+            for (k, name) in [(BooleanKind::Union, "Union"), (BooleanKind::Difference, "Subtract"), (BooleanKind::Intersection, "Intersect"), (BooleanKind::Slice, "Slice")] {
+                ch |= ui.selectable_value(&mut self.kind, k, name).changed();
+            }
+        });
+        ch |= ui.checkbox(&mut self.keep_tools, "Keep tools").changed();
+        ch
+    }
+    fn command_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
+        if m.ctrl || m.alt {
+            return false;
+        }
+        match (key, m.shift) {
+            (egui::Key::Q, false) => self.kind = BooleanKind::Union,
+            (egui::Key::W, false) => self.kind = BooleanKind::Difference,
+            (egui::Key::E, true) => self.kind = BooleanKind::Intersection,
+            (egui::Key::Q, true) => self.kind = BooleanKind::Slice,
+            (egui::Key::T, false) => self.keep_tools = !self.keep_tools,
+            _ => return false,
+        }
+        true
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        if self.result().is_err() {
+            return vec![];
+        }
+        let mut v = vec![self.target.0];
+        if !self.keep_tools {
+            v.extend(self.tools.iter().map(|t| t.0));
+        }
+        v
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let Ok(mut r) = self.result() else { return false };
+        let first = r.remove(0);
+        doc.replace_body(self.target.0, first);
+        doc.selection.clear();
+        doc.selection.insert(Pick::Object(self.target.0));
+        for b in r {
+            let id = doc.add_body("Slice", b);
+            doc.selection.insert(Pick::Object(id));
+        }
+        if !self.keep_tools {
+            for (id, _) in &self.tools {
+                doc.remove(*id);
+            }
+        }
+        true
+    }
+}
+
 /// Match surface: reshapes a surface along its open edge to land on
 /// another edge and continue the face beyond it.
 pub struct MatchSurfaceTool {
@@ -4147,6 +4287,22 @@ mod tests {
         let j = &doc.object(id).unwrap().body;
         assert_eq!(j.faces.len(), 3);
         assert_eq!(j.edge_ids().filter(|e| j.edge_faces(*e).len() == 2).count(), 2, "sewn along both bridged edges");
+    }
+
+    #[test]
+    fn boolean_command_keys_and_slice() {
+        let mut doc = Document::default();
+        let a = doc.add_body("A", ductile_brep::primitives::make_box(&Frame::WORLD, DVec3::new(2.0, 2.0, 2.0)));
+        let b = doc.add_body("B", ductile_brep::primitives::make_box(&Frame { origin: DVec3::new(1.0, 0.5, 0.5), ..Frame::WORLD }, DVec3::new(2.0, 1.0, 1.0)));
+        doc.selection.insert(Pick::Object(a));
+        doc.selection.insert(Pick::Object(b));
+        let mut t = BooleanTool::new(&doc).unwrap();
+        assert!(t.command_key(egui::Key::Q, egui::Modifiers::SHIFT));
+        assert!(t.commit(&mut doc));
+        assert!(doc.object(b).is_none(), "tool consumed");
+        let vols: Vec<f64> = doc.objects.iter().map(|o| volume(&o.body)).collect();
+        assert_eq!(vols.len(), 2);
+        assert!((vols[0] - 7.0).abs() < 1e-6 && (vols[1] - 1.0).abs() < 1e-6, "{vols:?}");
     }
 
     #[test]
