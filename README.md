@@ -45,7 +45,8 @@ code from them.
   closed off by the caps it runs into. Blends can be round, smooth (G2:
   curvature-continuous sections that leave the faces with zero curvature,
   for class-A reflections) or chamfered. Smooth blends on a box get
-  curvature-continuous corner patches where three of them meet, and meet
+  curvature-continuous corner patches where three of them meet (faces at
+  any angle, e.g. a hexagonal prism), and meet
   in clean mitres where a corner's third edge stays sharp.
 - Shell (Alt+S): hollow a solid into walls of a given thickness, opening
   the selected faces, or leaving an inner void when none are selected.
@@ -69,7 +70,7 @@ code from them.
 - Move / rotate / scale / mirror, linear and radial arrays (Alt+A,
   Alt+Shift+A), undo/redo.
 
-In progress: smooth corners between non-perpendicular faces.
+In progress: variable-radius fillets; bridge and extend curves.
 
 ## Layout
 

@@ -403,9 +403,8 @@ fn corner_tools(b: &Body, set: &BTreeSet<EdgeId>, infos: &HashMap<EdgeId, EdgeIn
             continue;
         }
         if let Blend::Smooth(_) = blend {
-            // Smooth corners exist for perpendicular faces only; elsewhere
-            // the edge blends simply run into each other.
-            if let Some(t) = super::corner::smooth_corner_tool(pv, [ns[0], ns[1], ns[2]], r) {
+            let ds = [rows[0].1 .0, rows[1].1 .0, rows[2].1 .0];
+            if let Some(t) = super::corner::smooth_corner_tool(pv, [ns[0], ns[1], ns[2]], ds, r) {
                 out.push((t, caps));
             }
             continue;
@@ -632,6 +631,7 @@ mod smooth_tests {
         assert_eq!(open_edges(&f), 0);
         // Six faces, twelve edge blends, eight corners of three patches.
         assert_eq!(f.faces.len(), 6 + 12 + 24);
+        assert!(worst_crease(&f) < 1e-3);
         let edges = 4.0 * ((w - 2.0 * r) + (d - 2.0 * r) + (h - 2.0 * r));
         let removed = smooth_corner_area(r) * edges + 8.0 * r * r * r * crate::ops::corner::removed_fraction(80);
         let expect = w * d * h - removed;
@@ -713,5 +713,50 @@ mod smooth_tests {
         let f = blend_edges(&b, &rims, Blend::Smooth(0.4)).unwrap();
         assert_eq!(open_edges(&f), 0);
         assert!(vol(&f) < vol(&b));
+    }
+
+    /// Largest angle between the two faces' normals across any edge.
+    fn worst_crease(b: &Body) -> f64 {
+        let mut worst: f64 = 0.0;
+        for e in b.edge_ids() {
+            let uses = b.edge_faces(e);
+            if uses.len() != 2 {
+                continue;
+            }
+            let ed = b.edge(e);
+            for k in 1..4 {
+                let p = ed.curve.point(ed.t0 + (ed.t1 - ed.t0) * k as f64 / 4.0);
+                let (n1, n2) = (outward(b, uses[0].0, p), outward(b, uses[1].0, p));
+                worst = worst.max(n1.angle_between(n2));
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn smooth_hexagonal_prism() {
+        // Faces meeting at 120 and 90 degrees: oblique G2 corners.
+        let (r0, h, r) = (3.0, 2.0, 0.4);
+        let mut pts = Vec::new();
+        for z in [0.0, h] {
+            for k in 0..6 {
+                let a = k as f64 * PI / 3.0;
+                pts.push(DVec3::new(r0 * a.cos(), r0 * a.sin(), z));
+            }
+        }
+        let mut faces = vec![(0..6).rev().collect::<Vec<_>>(), (6..12).collect()];
+        for k in 0..6 {
+            faces.push(vec![k, (k + 1) % 6, 6 + (k + 1) % 6, 6 + k]);
+        }
+        let b = polyhedron(&pts, &faces, BodyKind::Solid);
+        assert!(vol(&b) > 0.0);
+        let all: Vec<EdgeId> = b.edge_ids().collect();
+        let f = blend_edges(&b, &all, Blend::Smooth(r)).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        assert_eq!(f.faces.len(), 8 + 18 + 12 * 3);
+        let crease = worst_crease(&f);
+        assert!(crease < 2e-3, "crease {crease}");
+        let (vf, vb) = (vol(&f), vol(&b));
+        assert!(vf < vb && vf > vb - 1.5, "{vf} vs {vb}");
     }
 }

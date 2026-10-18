@@ -708,8 +708,19 @@ fn surface_metrics(surf: &Surface, lo: DVec2, hi: DVec2, opts: &TessOptions) -> 
                     let d = surf.derivs(u, v);
                     su = su.max(d.du.length());
                     sv = sv.max(d.dv.length());
-                    cu = cu.max(d.duu.length());
-                    cv = cv.max(d.dvv.length());
+                    // Only the normal part of the acceleration bends the
+                    // surface away from its chords; the tangential part
+                    // just moves samples along it.
+                    match d.du.cross(d.dv).try_normalize() {
+                        Some(n) => {
+                            cu = cu.max(n.dot(d.duu).abs());
+                            cv = cv.max(n.dot(d.dvv).abs());
+                        }
+                        None => {
+                            cu = cu.max(d.duu.length());
+                            cv = cv.max(d.dvv.length());
+                        }
+                    }
                 }
             }
             let step = |c: f64, s: f64| {
