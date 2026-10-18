@@ -64,13 +64,18 @@ impl Frame {
     }
 
     /// Applies a rigid (or uniformly scaled) transform. Axes are renormalized.
+    /// Under a mirror transform the result is left-handed, so that every
+    /// point expressed in the frame maps exactly to the mirrored point.
     pub fn transformed(&self, m: &DMat4) -> Frame {
         let o = m.transform_point3(self.origin);
         let x = m.transform_vector3(self.x).normalize();
+        let y = m.transform_vector3(self.y).normalize();
         let z = m.transform_vector3(self.z).normalize();
-        // Handle mirror transforms: keep the frame right-handed but let z follow.
-        let y = z.cross(x);
         Frame { origin: o, x, y, z }
+    }
+
+    pub fn is_right_handed(&self) -> bool {
+        self.x.cross(self.y).dot(self.z) > 0.0
     }
 
     pub fn rotation(&self) -> DMat3 {
