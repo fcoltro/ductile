@@ -287,7 +287,7 @@ fn coaxial(a: &Surface, b: &Surface, tol: f64) -> Option<Ssi> {
 /// approximate intersection points (from tessellations) used by the
 /// marching fallback.
 pub fn intersect(a: &Surface, b: &Surface, roi: &BBox3, seeds: &[DVec3], tol: f64) -> Ssi {
-    intersect_analytic(a, b, roi, tol).unwrap_or_else(|| march(a, b, roi, seeds, tol))
+    intersect_analytic(a, b, roi, tol).unwrap_or_else(|| march(a, b, roi, seeds, &[], tol))
 }
 
 /// Closed-form intersection, or `None` if the pair needs marching.
@@ -297,6 +297,13 @@ pub fn intersect_analytic(a: &Surface, b: &Surface, roi: &BBox3, tol: f64) -> Op
 
 /// Marching intersection from approximate seed points.
 pub fn intersect_marching(a: &Surface, b: &Surface, roi: &BBox3, seeds: &[DVec3], tol: f64) -> Ssi {
+    intersect_marching_to(a, b, roi, seeds, &[], tol)
+}
+
+/// Marching intersection whose open ends are carried on to any of the
+/// points `ends` (vertices on both surfaces) lying just beyond them, as
+/// where the surfaces become tangent and the march cannot reach.
+pub fn intersect_marching_to(a: &Surface, b: &Surface, roi: &BBox3, seeds: &[DVec3], ends: &[DVec3], tol: f64) -> Ssi {
     // A spline surface whose control points all lie on one side of a plane
     // can only touch it: there is nothing to cross (the touching itself,
     // as along a blend's contact line, is an edge already).
@@ -308,7 +315,7 @@ pub fn intersect_marching(a: &Surface, b: &Surface, roi: &BBox3, seeds: &[DVec3]
             }
         }
     }
-    march(a, b, roi, seeds, tol)
+    march(a, b, roi, seeds, ends, tol)
 }
 
 fn analytic(a: &Surface, b: &Surface, roi: &BBox3, tol: f64) -> Option<Ssi> {
@@ -410,7 +417,7 @@ fn analytic(a: &Surface, b: &Surface, roi: &BBox3, tol: f64) -> Option<Ssi> {
 }
 
 /// Marching intersection for general surface pairs.
-fn march(a: &Surface, b: &Surface, roi: &BBox3, seeds: &[DVec3], tol: f64) -> Ssi {
+fn march(a: &Surface, b: &Surface, roi: &BBox3, seeds: &[DVec3], ends: &[DVec3], tol: f64) -> Ssi {
     let diag = roi.diagonal().max(tol * 10.0);
     let roi_x = roi.expanded(diag * 1e-3);
     let mut traces: Vec<Vec<DVec3>> = Vec::new();
@@ -446,6 +453,10 @@ fn march(a: &Surface, b: &Surface, roi: &BBox3, seeds: &[DVec3], tol: f64) -> Ss
         };
         if closed {
             pts.push(pts[0]);
+        } else {
+            for front in [false, true] {
+                extend_to_end(a, b, &mut pts, front, ends, max_step, tol);
+            }
         }
         if pts.len() >= 2 {
             traces.push(pts);
@@ -465,6 +476,43 @@ fn march(a: &Surface, b: &Surface, roi: &BBox3, seeds: &[DVec3], tol: f64) -> Ss
         Ssi::None
     } else {
         Ssi::Curves(curves)
+    }
+}
+
+/// Carries an open trace's end (its first point if `front`) on to the
+/// nearest of `ends` lying ahead of it within a few steps, filling the gap
+/// with points pulled onto both surfaces.
+fn extend_to_end(a: &Surface, b: &Surface, pts: &mut Vec<DVec3>, front: bool, ends: &[DVec3], max_step: f64, tol: f64) {
+    if pts.len() < 2 {
+        return;
+    }
+    let (p, q) = if front { (pts[0], pts[1]) } else { (pts[pts.len() - 1], pts[pts.len() - 2]) };
+    let ahead = (p - q).normalize_or_zero();
+    let Some(&e) = ends
+        .iter()
+        .filter(|e| {
+            let d = **e - p;
+            d.length() > tol * 10.0 && d.length() < max_step * 2.0 && d.normalize().dot(ahead) > 0.5 && distance(a, **e) < tol * 10.0 && distance(b, **e) < tol * 10.0
+        })
+        .min_by(|x, y| x.distance(p).total_cmp(&y.distance(p)))
+    else {
+        return;
+    };
+    let mut fill = Vec::new();
+    let mut hints = (None, None);
+    for k in 1..4 {
+        let guess = p.lerp(e, k as f64 / 4.0);
+        if let Some(r) = refine_point_hinted(a, b, guess, tol, &mut hints) {
+            fill.push(r);
+        }
+    }
+    fill.push(e);
+    if front {
+        fill.reverse();
+        fill.extend(pts.iter().copied());
+        *pts = fill;
+    } else {
+        pts.extend(fill);
     }
 }
 

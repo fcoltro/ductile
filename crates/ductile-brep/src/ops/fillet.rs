@@ -639,6 +639,54 @@ mod smooth_tests {
     }
 
     #[test]
+    fn smooth_top_rim_with_sharp_corners() {
+        // The four top edges: neighbouring blends run into each other in
+        // mitres over the sharp vertical edges.
+        let (w, d, h, r) = (4.0, 3.0, 2.0, 0.5);
+        let b = make_box(&Frame::WORLD, DVec3::new(w, d, h));
+        let top: Vec<EdgeId> = b.edge_ids().filter(|e| { let ed = b.edge(*e); ed.start().z > 1.9 && ed.end().z > 1.9 }).collect();
+        let f = blend_edges(&b, &top, Blend::Smooth(r)).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        // Over each corner square the two blends overlap in a mitre.
+        let a = smooth_corner_area(r);
+        let removed = a * 2.0 * ((w - 2.0 * r) + (d - 2.0 * r)) + 4.0 * mitre_corner(r);
+        let expect = w * d * h - removed;
+        assert!((vol(&f) - expect).abs() < 2e-3 * removed, "{} vs {expect}", vol(&f));
+    }
+
+    /// Material removed over an r-by-r corner square where two smooth blends
+    /// meet in a mitre: there the deeper of the two sections governs.
+    fn mitre_corner(r: f64) -> f64 {
+        let ctrl = crate::ops::roll::section_ctrl(Blend::Smooth(r), DVec3::new(r, r, 0.0), DVec3::new(r, 0.0, 0.0), DVec3::new(0.0, r, 0.0));
+        let c = ductile_geom::NurbsCurve::new(5, vec![0.0; 6].into_iter().chain(vec![1.0; 6]).collect(), ctrl);
+        // depth(x): how deep the section cuts at distance x from the side
+        // face (the section runs from (r, 0) on the top to (0, r) on the
+        // side, about the corner at the origin).
+        let n = 4000;
+        let pts: Vec<DVec3> = (0..=n).map(|i| c.point(i as f64 / n as f64)).collect();
+        let depth = |x: f64| -> f64 {
+            let mut best = (f64::INFINITY, 0.0);
+            for p in &pts {
+                let e = (p.x - x).abs();
+                if e < best.0 {
+                    best = (e, p.y);
+                }
+            }
+            best.1
+        };
+        // At (x, y) over the square the deeper cut is depth(min(x, y)).
+        let m = 400;
+        let mut v = 0.0;
+        for i in 0..m {
+            for j in 0..m {
+                let (x, y) = ((i as f64 + 0.5) * r / m as f64, (j as f64 + 0.5) * r / m as f64);
+                v += depth(x.min(y)) * (r / m as f64).powi(2);
+            }
+        }
+        v
+    }
+
+    #[test]
     fn smooth_blend_on_a_box_edge() {
         let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
         let e = b.edge_ids().find(|e| {

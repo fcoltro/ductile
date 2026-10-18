@@ -205,6 +205,17 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
             }
         }
     }
+    // Edges of the two operands crossing each other (as where boundaries
+    // imprint on a shared plane): computed on the curves themselves, since
+    // the same point found as an edge touching a tangent face is not.
+    for ea in (0..na_edges).map(|i| EdgeId(i as u32)) {
+        for eb in (na_edges..w.edges.len()).map(|i| EdgeId(i as u32)) {
+            if let Some(p) = edge_edge_crossing(&w, ea, eb, &samples, tol) {
+                crossings.push((ea, p));
+                crossings.push((eb, p));
+            }
+        }
+    }
     let mut splits: HashMap<EdgeId, Vec<(f64, VertexId)>> = HashMap::new();
     let mut crossing_points: Vec<DVec3> = Vec::new();
     for (e, p) in crossings {
@@ -268,7 +279,23 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
                     let mut seeds: Vec<DVec3> = crossing_points.iter().copied().filter(|p| roi.contains(*p)).collect();
                     seeds.extend(mesh_seeds(face_mesh(fa), &sb, &roi, 400));
                     seeds.extend(mesh_seeds(face_mesh(fb), &sa, &roi, 400));
-                    ssi::intersect_marching(&sa, &sb, &roi, &seeds, tol)
+                    let mut ends: Vec<DVec3> = Vec::new();
+                    for e in w.face_edges(fa).into_iter().chain(w.face_edges(fb)) {
+                        ends.push(w.vertex(w.edge(e).v0));
+                        ends.push(w.vertex(w.edge(e).v1));
+                    }
+                    ends.extend(crossing_points.iter().copied().filter(|p| roi.contains(*p)));
+                    let r = ssi::intersect_marching_to(&sa, &sb, &roi, &seeds, &ends, tol);
+                    if debug() {
+                        let n = if let Ssi::Curves(c) = &r { c.len() } else { 0 };
+                        eprintln!("march faces {} x {}: {} seeds -> {} curves", fa.idx(), fb.idx(), seeds.len(), n);
+                        if let Ssi::Curves(cs) = &r {
+                            for (c, c0, c1) in cs {
+                                eprintln!("   curve {:.4} -> {:.4}", c.point(*c0), c.point(*c1));
+                            }
+                        }
+                    }
+                    r
                 }
             };
             match res {
@@ -487,6 +514,101 @@ enum Class {
     Out,
     OnSame,
     OnOpp,
+}
+
+/// Point where two edges cross transversally away from their ends, if
+/// they do: the nearest pair of their sample polylines, refined by Newton
+/// on the curves.
+fn edge_edge_crossing(w: &Body, ea: EdgeId, eb: EdgeId, samples: &[Vec<(f64, DVec3)>], tol: f64) -> Option<DVec3> {
+    let (sa, sb) = (&samples[ea.idx()], &samples[eb.idx()]);
+    let bb = |s: &[(f64, DVec3)]| BBox3::from_points(s.iter().map(|x| x.1)).expanded(tol * 20.0);
+    if !bb(sa).intersects(&bb(sb)) {
+        return None;
+    }
+    let (a, b) = (w.edge(ea), w.edge(eb));
+    // Shared or touching ends are handled as vertices already.
+    for v in [a.v0, a.v1] {
+        if v == b.v0 || v == b.v1 {
+            return None;
+        }
+    }
+    let mut best: Option<(f64, f64, f64)> = None;
+    for i in 0..sa.len().saturating_sub(1) {
+        for j in 0..sb.len().saturating_sub(1) {
+            let (p0, p1, q0, q1) = (sa[i].1, sa[i + 1].1, sb[j].1, sb[j + 1].1);
+            let (s, t) = segment_closest(p0, p1, q0, q1);
+            let d = p0.lerp(p1, s).distance(q0.lerp(q1, t));
+            if best.map_or(true, |x| d < x.0) {
+                best = Some((d, sa[i].0 + (sa[i + 1].0 - sa[i].0) * s, sb[j].0 + (sb[j + 1].0 - sb[j].0) * t));
+            }
+        }
+    }
+    let (d, mut s, mut t) = best?;
+    let span = |e: &crate::topo::Edge| (e.t1 - e.t0).abs();
+    if d > (span(a).max(span(b)) * 1e-2).max(tol * 1e3) {
+        return None;
+    }
+    for _ in 0..30 {
+        let (da, db) = (a.curve.derivs(s), b.curve.derivs(t));
+        let r = da[0] - db[0];
+        // Gauss-Newton on |a(s) - b(t)|².
+        let (aa, ab, bb2) = (da[1].dot(da[1]), -da[1].dot(db[1]), db[1].dot(db[1]));
+        let (ga, gb) = (da[1].dot(r), -db[1].dot(r));
+        let det = aa * bb2 - ab * ab;
+        if det.abs() < 1e-14 * (aa * bb2).max(1e-300) {
+            return None;
+        }
+        let ds = -(ga * bb2 - gb * ab) / det;
+        let dt = -(aa * gb - ab * ga) / det;
+        s = (s + ds).clamp(a.t0.min(a.t1), a.t0.max(a.t1));
+        t = (t + dt).clamp(b.t0.min(b.t1), b.t0.max(b.t1));
+        if ds.abs() + dt.abs() < 1e-14 * (1.0 + s.abs() + t.abs()) {
+            break;
+        }
+    }
+    let (p, q) = (a.curve.point(s), b.curve.point(t));
+    if p.distance(q) > tol {
+        return None;
+    }
+    // Transversal, and inside both edges.
+    let (ta, tb) = (a.curve.tangent(s).normalize(), b.curve.tangent(t).normalize());
+    if ta.cross(tb).length() < 1e-3 {
+        return None;
+    }
+    let p = 0.5 * (p + q);
+    let ends = [a.v0, a.v1, b.v0, b.v1];
+    if ends.iter().any(|v| w.vertex(*v).distance(p) < tol * 10.0) {
+        return None;
+    }
+    Some(p)
+}
+
+/// Parameters of the closest points of segments `p0p1` and `q0q1`.
+fn segment_closest(p0: DVec3, p1: DVec3, q0: DVec3, q1: DVec3) -> (f64, f64) {
+    let (d1, d2, r) = (p1 - p0, q1 - q0, p0 - q0);
+    let (a, e, f) = (d1.dot(d1), d2.dot(d2), d2.dot(r));
+    if a < 1e-300 && e < 1e-300 {
+        return (0.0, 0.0);
+    }
+    if a < 1e-300 {
+        return (0.0, (f / e).clamp(0.0, 1.0));
+    }
+    let c = d1.dot(r);
+    if e < 1e-300 {
+        return ((-c / a).clamp(0.0, 1.0), 0.0);
+    }
+    let b = d1.dot(d2);
+    let den = a * e - b * b;
+    let mut s = if den > 1e-300 { ((b * f - c * e) / den).clamp(0.0, 1.0) } else { 0.0 };
+    let mut t = (b * s + f) / e;
+    if t < 0.0 {
+        t = 0.0;
+        s = (-c / a).clamp(0.0, 1.0);
+    } else if t > 1.0 {
+        t = 1.0;
+        s = ((b - c) / a).clamp(0.0, 1.0);
+    }
+    (s, t)
 }
 
 fn intersect_boxes(a: &BBox3, b: &BBox3) -> BBox3 {

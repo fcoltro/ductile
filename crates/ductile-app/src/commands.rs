@@ -776,10 +776,10 @@ pub fn demo_scene(doc: &mut Document) {
     let verticals = pick(&part, &|e| e.curve.is_linear() && (e.start() - e.end()).normalize().z.abs() > 0.999 && [0.0, 8.0].contains(&e.start().x) && [0.0, 6.0].contains(&e.start().y) && e.start().distance(e.end()) > 2.9);
     part = blend_edges(&part, &verticals, Blend::Fillet(0.6)).unwrap_or(part);
     doc.add_body("Block", part);
-    // A fully rounded box.
+    // A fully rounded box with curvature-continuous (G2) edges and corners.
     let all = |b: &ductile_brep::Body| b.edge_ids().collect::<Vec<_>>();
     let rb = make_box(&at(-7.0, 11.0, 0.0), DVec3::new(5.0, 3.5, 2.5));
-    let rb = blend_edges(&rb, &all(&rb), Blend::Fillet(0.6)).unwrap_or(rb);
+    let rb = blend_edges(&rb, &all(&rb), Blend::Smooth(0.6)).unwrap_or(rb);
     doc.add_body("Rounded box", rb);
     // A soap bar: round the corners, then blend the top and bottom rims as
     // tangent chains in one go, all with curvature-continuous (G2) blends.
