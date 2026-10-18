@@ -7,7 +7,8 @@ struct Camera {
     // x, y: viewport size in pixels; z: 1 if orthographic; w: line depth bias.
     viewport: vec4<f32>,
     // Camera forward direction (from eye into the scene); w: the analysis
-    // shading (0 none, 1 zebra, 2 isophote, 3 draft, 4 face direction).
+    // shading (0 none, 1 zebra, 2 isophote, 3 draft, 4 face direction,
+    // 5 rendered).
     forward: vec4<f32>,
     // Section plane: points with dot(xyz, p) + w > 0 are cut away; off
     // when xyz is zero.
@@ -23,6 +24,8 @@ struct Object {
     select_color: vec4<f32>,
     // x: whole-object state (0 none, 1 hovered, 2 selected); y: x-ray alpha flag; z: 1 for a solid.
     flags: vec4<u32>,
+    // x: metalness, y: roughness.
+    pbr: vec4<f32>,
 };
 @group(1) @binding(0) var<uniform> obj: Object;
 @group(1) @binding(1) var<storage, read> face_state: array<u32>;
@@ -107,6 +110,57 @@ fn cut(world: vec3<f32>) -> bool {
     return on && dot(cam.section.xyz, world) + cam.section.w > 0.0;
 }
 
+// A studio: a soft grey sky brighter overhead, a dark floor, and three
+// soft-box lights, as seen along direction `d` (z up). `blur` (0 sharp
+// to 1 diffuse) widens the boxes and fades them into the sky.
+fn studio(d: vec3<f32>, blur: f32) -> vec3<f32> {
+    let up = d.z;
+    var c = mix(vec3<f32>(0.16, 0.16, 0.17), vec3<f32>(0.50, 0.52, 0.55), smoothstep(-0.25, 0.6, up));
+    c = c + vec3<f32>(0.25) * smoothstep(0.6, 1.0, up);
+    // A bright band along the horizon, so upright faces catch light.
+    c = c + vec3<f32>(0.35) * exp(-(up * up) / mix(0.01, 0.08, blur));
+    // Soft boxes: key above front-left, fill right, rim behind.
+    let boxes = array<vec4<f32>, 3>(
+        vec4<f32>(normalize(vec3<f32>(-0.5, -0.6, 0.65)), 3.2),
+        vec4<f32>(normalize(vec3<f32>(0.85, -0.25, 0.3)), 1.4),
+        vec4<f32>(normalize(vec3<f32>(0.1, 0.9, 0.45)), 2.0),
+    );
+    for (var i = 0; i < 3; i = i + 1) {
+        let b = boxes[i];
+        let w = mix(0.06, 0.5, blur);
+        let k = smoothstep(cos(0.32 + w), cos(0.32 - min(w, 0.3)), dot(d, b.xyz));
+        c = c + vec3<f32>(b.w * k * mix(1.0, 0.25, blur));
+    }
+    return c;
+}
+
+// Physically based look: diffuse from the blurred studio, a Fresnel
+// reflection of it sharpened by low roughness, metals tinting it.
+fn rendered(base: vec3<f32>, n_in: vec3<f32>, world: vec3<f32>, front: bool) -> vec3<f32> {
+    var n = normalize(n_in);
+    if (!front) {
+        n = -n;
+    }
+    var v: vec3<f32>;
+    if (cam.viewport.z > 0.5) {
+        v = -cam.forward.xyz;
+    } else {
+        v = normalize(cam.eye.xyz - world);
+    }
+    let metal = clamp(obj.pbr.x, 0.0, 1.0);
+    let rough = clamp(obj.pbr.y, 0.02, 1.0);
+    let ndv = max(dot(n, v), 1e-3);
+    let f0 = mix(vec3<f32>(0.04), base, metal);
+    let fres = f0 + (max(vec3<f32>(1.0 - rough), f0) - f0) * pow(1.0 - ndv, 5.0);
+    let r = reflect(-v, n);
+    let spec = studio(r, rough) * fres;
+    let diff = studio(n, 1.0) * base * (1.0 - metal) * 0.85;
+    var c = diff * (vec3<f32>(1.0) - fres) + spec;
+    // Filmic tone curve so bright reflections roll off.
+    c = c / (c + vec3<f32>(0.6)) * 1.45;
+    return c;
+}
+
 // Isophotes: lines where the surface meets the view at the same angle,
 // every 10°. They run smoothly over G2 surfaces and kink at G1 joins.
 fn isophote(c: vec3<f32>, n_in: vec3<f32>, world: vec3<f32>, front: bool) -> vec3<f32> {
@@ -171,6 +225,8 @@ fn fs_mesh(o: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
         c = isophote(c, o.nrm, o.world, front);
     } else if (mode == 3u) {
         c = draft(c, o.nrm, front);
+    } else if (mode == 5u) {
+        c = rendered(base, o.nrm, o.world, front);
     } else if (mode == 4u) {
         if (front) {
             c = shade(vec3<f32>(0.25, 0.45, 0.95), o.nrm, o.world, true);

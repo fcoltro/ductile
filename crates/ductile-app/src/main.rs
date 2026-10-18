@@ -40,6 +40,7 @@ fn main() -> eframe::Result {
             "--isophote" => opts.analysis = Some(render::Analysis::Isophote),
             "--draft" => opts.analysis = Some(render::Analysis::Draft),
             "--direction" => opts.analysis = Some(render::Analysis::Direction),
+            "--render" => opts.analysis = Some(render::Analysis::Render),
             "--curvature" => opts.curvature = true,
             "--section" => opts.section = true,
             "--select" => opts.select = args.next().and_then(|x| x.parse().ok()),
@@ -52,7 +53,7 @@ fn main() -> eframe::Result {
                 }
             }
             "--help" | "-h" => {
-                println!("usage: ductile [FILE.ductile|FILE.step] [--demo] [--screenshot OUT.png] [--camera X,Y,Z,DIST,YAW,PITCH] [--zebra|--isophote|--draft|--direction] [--curvature] [--section] [--select N] [--export-step OUT.step]");
+                println!("usage: ductile [FILE.ductile|FILE.step] [--demo] [--screenshot OUT.png] [--camera X,Y,Z,DIST,YAW,PITCH] [--render|--zebra|--isophote|--draft|--direction] [--curvature] [--section] [--select N] [--export-step OUT.step]");
                 return Ok(());
             }
             other => opts.open = Some(other.into()),

@@ -27,6 +27,10 @@ pub struct Object {
     pub body: Arc<Body>,
     pub mesh: Arc<BodyMesh>,
     pub color: [f32; 3],
+    /// Material for the rendered view: 0 dielectric to 1 metal, and how
+    /// rough (blurred) its reflections are.
+    pub metalness: f32,
+    pub roughness: f32,
     pub visible: bool,
     /// Locked objects show but can't be selected.
     pub locked: bool,
@@ -174,7 +178,7 @@ impl Document {
         let rev = self.bump();
         let n = self.objects.iter().filter(|o| o.name.starts_with(name)).count();
         let name = if n == 0 { name.to_string() } else { format!("{name}.{n:03}") };
-        self.objects.push(Object { id, name, body: Arc::new(body), mesh, color: DEFAULT_COLOR, visible: true, locked: false, group: self.active_group, revision: rev });
+        self.objects.push(Object { id, name, body: Arc::new(body), mesh, color: DEFAULT_COLOR, metalness: 0.0, roughness: 0.45, visible: true, locked: false, group: self.active_group, revision: rev });
         self.dirty = true;
         id
     }

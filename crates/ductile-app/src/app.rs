@@ -225,10 +225,12 @@ impl DuctileApp {
             self.doc.hover.hash(&mut h);
             hidden.hash(&mut h);
             self.show_edges.hash(&mut h);
+            (r.analysis == Analysis::Render).hash(&mut h);
             for o in &self.doc.objects {
                 o.visible.hash(&mut h);
                 o.revision.hash(&mut h);
                 o.color.map(|c| c.to_bits()).hash(&mut h);
+                [o.metalness, o.roughness].map(|c| c.to_bits()).hash(&mut h);
             }
             h.finish()
         };
@@ -241,6 +243,7 @@ impl DuctileApp {
             st.color = [o.color[0], o.color[1], o.color[2], 1.0];
             st.visible = o.visible && !hidden.contains(&o.id);
             st.solid = o.body.kind == ductile_brep::BodyKind::Solid;
+            (st.metalness, st.roughness) = (o.metalness, o.roughness);
             if self.doc.selection.contains(&Pick::Object(o.id)) {
                 st.state = 2;
             } else if self.doc.hover == Some(Pick::Object(o.id)) {
@@ -260,7 +263,9 @@ impl DuctileApp {
                 }
             }
             r.set_style(o.id, &st, &faces);
-            let lines = edge_lines(&o.mesh, &o.body, o.id, &self.doc, self.show_edges);
+            // The rendered view shows surfaces only, as a finished part.
+            let edges = self.show_edges && r.analysis != Analysis::Render;
+            let lines = edge_lines(&o.mesh, &o.body, o.id, &self.doc, edges);
             r.set_edges(o.id, &lines);
         }
     }

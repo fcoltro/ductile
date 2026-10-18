@@ -482,6 +482,19 @@ fn properties(app: &mut DuctileApp, ui: &mut egui::Ui) {
         ui.label("Color");
         ui.color_edit_button_rgb(&mut o.color);
     });
+    ui.horizontal(|ui| {
+        ui.label("Metal");
+        ui.add(egui::Slider::new(&mut o.metalness, 0.0..=1.0).show_value(false));
+        ui.label("Rough");
+        ui.add(egui::Slider::new(&mut o.roughness, 0.0..=1.0).show_value(false));
+    });
+    ui.horizontal(|ui| {
+        for (name, c, m, r) in [("Plastic", [0.62, 0.63, 0.65], 0.0, 0.45), ("Steel", [0.78, 0.78, 0.80], 1.0, 0.3), ("Chrome", [0.95, 0.95, 0.96], 1.0, 0.05), ("Gold", [1.0, 0.78, 0.34], 1.0, 0.2), ("Rubber", [0.12, 0.12, 0.13], 0.0, 0.9)] {
+            if ui.small_button(name).clicked() {
+                (o.color, o.metalness, o.roughness) = (c, m, r);
+            }
+        }
+    });
     let b = &o.body;
     ui.label(
         RichText::new(format!("{} faces · {} edges · {} vertices", b.faces.len(), b.edges.len(), b.vertices.len()))

@@ -144,6 +144,10 @@ code from them.
 - Zebra stripes (Alt+R, or the Zebra button) to judge surface continuity:
   stripes stay unbroken across tangent (G1) joins and keep their direction
   across curvature-continuous (G2) ones. Headless: `--zebra`.
+- Rendered view (shading menu, or `--render`): each object's material
+  (colour, metalness, roughness, set in Properties with plastic, steel,
+  chrome, gold and rubber presets) lit by a studio of soft boxes, without
+  edges, for judging a finished part. Materials are saved in `.ductile`.
 - More analysis shading from the shading menu in the top bar: isophotes
   (lines of equal angle to the view every 10°, smooth over G2 surfaces,
   kinked at G1 joins), draft against the construction plane's normal (green

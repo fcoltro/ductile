@@ -1007,6 +1007,9 @@ pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), Strin
             ob.name = o.name;
             ob.visible = o.visible;
             ob.locked = o.locked;
+            if let Some([m, r]) = o.material {
+                (ob.metalness, ob.roughness) = (m, r);
+            }
             ob.group = o.group.and_then(|g| gid.get(&g).copied());
             if let Some(c) = o.color {
                 ob.color = c;
@@ -1041,6 +1044,7 @@ pub fn write_native(doc: &Document, path: &std::path::Path) -> Result<(), String
                 visible: o.visible,
                 locked: o.locked,
                 group: o.group,
+                material: Some([o.metalness, o.roughness]),
             })
             .collect(),
     );
@@ -1321,6 +1325,12 @@ pub fn demo_scene(doc: &mut Document) {
         let legs: Vec<Segment> = bends.windows(2).map(|w| Segment::line(w[0], w[1])).collect();
         if let Some(b) = ductile_brep::ops::sweep::sweep(&pipe, &legs) {
             doc.add_body("Pipe", b);
+        }
+    }
+    // A few materials for the rendered view.
+    for (name, c, m, r) in [("Block", [0.78, 0.78, 0.80], 1.0, 0.3), ("Soap", [0.85, 0.35, 0.30], 0.0, 0.25), ("Rounded box", [1.0, 0.78, 0.34], 1.0, 0.2), ("Tube", [0.95, 0.95, 0.96], 1.0, 0.05)] {
+        if let Some(o) = doc.objects.iter_mut().find(|o| o.name == name) {
+            (o.color, o.metalness, o.roughness) = (c, m, r);
         }
     }
     // The surfaces in a group, as an Outliner example.

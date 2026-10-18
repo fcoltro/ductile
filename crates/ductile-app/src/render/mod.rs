@@ -38,10 +38,12 @@ pub enum Analysis {
     Draft,
     /// Front faces blue, back faces red.
     Direction,
+    /// Materials lit by a studio environment.
+    Render,
 }
 
 impl Analysis {
-    pub const ALL: [Analysis; 5] = [Analysis::None, Analysis::Zebra, Analysis::Isophote, Analysis::Draft, Analysis::Direction];
+    pub const ALL: [Analysis; 6] = [Analysis::None, Analysis::Render, Analysis::Zebra, Analysis::Isophote, Analysis::Draft, Analysis::Direction];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -50,6 +52,7 @@ impl Analysis {
             Analysis::Isophote => "Isophote",
             Analysis::Draft => "Draft",
             Analysis::Direction => "Face direction",
+            Analysis::Render => "Rendered",
         }
     }
 }
@@ -61,6 +64,8 @@ struct ObjectUniform {
     hover_color: [f32; 4],
     select_color: [f32; 4],
     flags: [u32; 4],
+    /// x: metalness, y: roughness.
+    pbr: [f32; 4],
 }
 
 #[repr(C)]
@@ -102,6 +107,8 @@ pub struct ObjectStyle {
     pub visible: bool,
     /// A closed solid: its inside shows as a cap where a section cuts it.
     pub solid: bool,
+    pub metalness: f32,
+    pub roughness: f32,
 }
 
 impl Default for ObjectStyle {
@@ -113,6 +120,8 @@ impl Default for ObjectStyle {
             state: 0,
             visible: true,
             solid: false,
+            metalness: 0.0,
+            roughness: 0.45,
         }
     }
 }
@@ -427,6 +436,7 @@ impl ViewportRenderer {
             hover_color: style.hover_color,
             select_color: style.select_color,
             flags: [style.state, 0, style.solid as u32, 0],
+            pbr: [style.metalness, style.roughness, 0.0, 0.0],
         };
         self.queue.write_buffer(&o.obj_buf, 0, bytemuck::bytes_of(&u));
         let mut fs = vec![0u32; o.face_count];

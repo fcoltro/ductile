@@ -16,6 +16,9 @@ pub struct NativeObject {
     pub visible: bool,
     #[serde(default)]
     pub locked: bool,
+    /// Material: metalness and roughness for the rendered view.
+    #[serde(default)]
+    pub material: Option<[f32; 2]>,
     /// Id of its group in the document's `groups`.
     #[serde(default)]
     pub group: Option<u64>,
