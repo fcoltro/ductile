@@ -131,6 +131,18 @@ cargo run --release -p ductile-app
 
 Requires a Vulkan or OpenGL capable GPU driver (Mesa works).
 
+## Installing on Linux
+
+```sh
+packaging/linux/install.sh                      # into ~/.local
+PREFIX=/usr/local sudo -E packaging/linux/install.sh
+```
+
+This builds a release binary and installs it with a desktop entry, icon,
+AppStream metadata and the `.ductile` file type, so Ductile shows up in the
+application menu and opens `.ductile` and `.step` files. A Debian package
+can be built with [`cargo deb -p ductile-app`](https://github.com/kornelski/cargo-deb).
+
 ## License
 
 GPL-3.0-only. See [LICENSE](LICENSE).

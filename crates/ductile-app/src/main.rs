@@ -64,9 +64,37 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let native = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1440.0, 900.0]).with_min_inner_size([800.0, 500.0]).with_title("Ductile"),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1440.0, 900.0])
+            .with_min_inner_size([800.0, 500.0])
+            .with_title("Ductile")
+            // Matches the desktop entry, so Wayland docks show the right icon.
+            .with_app_id("io.github.fcoltro.Ductile")
+            .with_icon(std::sync::Arc::new(window_icon())),
         renderer: eframe::Renderer::Wgpu,
         ..Default::default()
     };
     eframe::run_native("Ductile", native, Box::new(move |cc| Ok(Box::new(app::DuctileApp::new(cc, opts)))))
+}
+
+/// The application icon, decoded from the PNG shipped with the desktop entry.
+fn window_icon() -> egui::IconData {
+    let bytes: &[u8] = include_bytes!("../../../packaging/linux/ductile.png");
+    let decoded = (|| {
+        let mut r = png::Decoder::new(std::io::Cursor::new(bytes)).read_info().ok()?;
+        let mut buf = vec![0; r.output_buffer_size()?];
+        let info = r.next_frame(&mut buf).ok()?;
+        (info.color_type == png::ColorType::Rgba && info.bit_depth == png::BitDepth::Eight).then(|| egui::IconData { rgba: buf[..info.buffer_size()].to_vec(), width: info.width, height: info.height })
+    })();
+    decoded.unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn window_icon_decodes() {
+        let icon = super::window_icon();
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    }
 }

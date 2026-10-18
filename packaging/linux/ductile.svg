@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only -->
+<!-- Ductile icon: a solid block with its front edge filleted, in the app's accent blue. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="top" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b4c4ff"/>
+      <stop offset="1" stop-color="#8aa3ff"/>
+    </linearGradient>
+    <linearGradient id="round" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4a63c8"/>
+      <stop offset="0.45" stop-color="#c9d5ff"/>
+      <stop offset="1" stop-color="#3a4fa6"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="#1d2130"/>
+  <!-- top face; its front corner is rounded by the fillet -->
+  <path d="M44 96 L128 54 L212 96 L146 129 Q128 138 110 129 Z" fill="url(#top)"/>
+  <!-- side faces -->
+  <path d="M44 96 L110 129 L110 211 L44 178 Z" fill="#4a63c8"/>
+  <path d="M212 96 L212 178 L146 211 L146 129 Z" fill="#3a4fa6"/>
+  <!-- the fillet: a quarter-round band down the front edge -->
+  <path d="M110 129 Q128 138 146 129 L146 211 Q128 220 110 211 Z" fill="url(#round)"/>
+</svg>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.fcoltro.Ductile</id>
+  <name>Ductile</name>
+  <summary>Free NURBS solid and surface modeler</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <description>
+    <p>
+      Ductile is a fast, keyboard-driven CAD modeler for hard-surface and
+      industrial design, with its own NURBS and boundary-representation kernel.
+      It draws curves, builds solids and surfaces from them, fillets and
+      chamfers edges with curvature-continuous corners, and reads and writes STEP.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.fcoltro.Ductile.desktop</launchable>
+  <url type="homepage">https://github.com/fcoltro/ductile</url>
+  <provides>
+    <binary>ductile</binary>
+  </provides>
+  <categories>
+    <category>Graphics</category>
+    <category>Engineering</category>
+  </categories>
+</component>

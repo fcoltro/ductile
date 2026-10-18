@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Ductile
+GenericName=3D CAD Modeler
+Comment=Free NURBS solid and surface modeler
+Exec=ductile %f
+Icon=io.github.fcoltro.Ductile
+Terminal=false
+Categories=Graphics;3DGraphics;Engineering;
+Keywords=CAD;NURBS;3D;modeling;STEP;solid;surface;
+MimeType=model/step;application/x-ductile;
+StartupWMClass=io.github.fcoltro.Ductile

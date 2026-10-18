@@ -5,6 +5,20 @@ edition.workspace = true
 license.workspace = true
 description = "Ductile: a free NURBS solid and surface modeler."
 
+[package.metadata.deb]
+name = "ductile"
+maintainer = "Ductile contributors"
+section = "graphics"
+extended-description = "A keyboard-driven NURBS solid and surface modeler with its own B-rep kernel, curvature-continuous fillets and STEP import/export."
+assets = [
+    ["target/release/ductile", "usr/bin/", "755"],
+    ["../../packaging/linux/io.github.fcoltro.Ductile.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/linux/io.github.fcoltro.Ductile.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../packaging/linux/ductile.svg", "usr/share/icons/hicolor/scalable/apps/io.github.fcoltro.Ductile.svg", "644"],
+    ["../../packaging/linux/ductile.png", "usr/share/icons/hicolor/256x256/apps/io.github.fcoltro.Ductile.png", "644"],
+    ["../../packaging/linux/ductile-mime.xml", "usr/share/mime/packages/io.github.fcoltro.Ductile.xml", "644"],
+]
+
 [[bin]]
 name = "ductile"
 path = "src/main.rs"
