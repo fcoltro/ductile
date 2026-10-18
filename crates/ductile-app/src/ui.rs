@@ -7,18 +7,6 @@ use crate::document::SelectMode;
 use crate::theme;
 use egui::{Color32, RichText};
 
-fn cmd_button(app: &mut DuctileApp, ui: &mut egui::Ui, cmd: Command, text: &str) {
-    let tip = match cmd.shortcut_text() {
-        "" => cmd.label().to_string(),
-        s => format!("{}   ({s})", cmd.label()),
-    };
-    let active = app.tool.as_ref().map(|t| t.name() == cmd.label()).unwrap_or(false);
-    let b = egui::Button::new(RichText::new(text).size(13.0)).selected(active).min_size(egui::vec2(50.0, 28.0));
-    if ui.add(b).on_hover_text(tip).clicked() {
-        app.pending.push(cmd);
-    }
-}
-
 pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
     egui::Panel::top("top").frame(egui::Frame::new().fill(theme::PANEL_DARK).inner_margin(egui::Margin::symmetric(8, 4))).show(ui, |ui| {
         ui.horizontal(|ui| {
@@ -136,43 +124,46 @@ pub fn status_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
 }
 
 pub fn toolbar(app: &mut DuctileApp, ui: &mut egui::Ui) {
+    use Command::*;
+    let groups: [(&str, &[Command]); 4] = [
+        ("Solid", &[Box, Cylinder, Cone, Sphere, Torus]),
+        ("Curve", &[Curve, Spline, Arc, Rectangle, Circle, Ellipse, Polygon]),
+        ("Model", &[Extrude, Revolve, Loft, Sweep, Fillet, Chamfer, Shell, Union, Subtract, Intersect]),
+        ("Edit", &[Move, Rotate, Scale, MirrorX, RadialArray, Duplicate, Delete]),
+    ];
     egui::Panel::left("tools").resizable(false).exact_size(64.0).frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(6))).show(ui, |ui| {
-        ui.vertical_centered(|ui| {
-            section(ui, "Solid");
-            cmd_button(app, ui, Command::Box, "Box");
-            cmd_button(app, ui, Command::Cylinder, "Cyl");
-            cmd_button(app, ui, Command::Cone, "Cone");
-            cmd_button(app, ui, Command::Sphere, "Sph");
-            cmd_button(app, ui, Command::Torus, "Tor");
-            section(ui, "Curve");
-            cmd_button(app, ui, Command::Curve, "Line");
-            cmd_button(app, ui, Command::Spline, "Spln");
-            cmd_button(app, ui, Command::Arc, "Arc");
-            cmd_button(app, ui, Command::Rectangle, "Rect");
-            cmd_button(app, ui, Command::Circle, "Circ");
-            cmd_button(app, ui, Command::Ellipse, "Elps");
-            cmd_button(app, ui, Command::Polygon, "Poly");
-            section(ui, "Model");
-            cmd_button(app, ui, Command::Extrude, "Extr");
-            cmd_button(app, ui, Command::Revolve, "Rev");
-            cmd_button(app, ui, Command::Loft, "Loft");
-            cmd_button(app, ui, Command::Sweep, "Swp");
-            cmd_button(app, ui, Command::Fillet, "Fill");
-            cmd_button(app, ui, Command::Shell, "Shell");
-            cmd_button(app, ui, Command::Chamfer, "Chmf");
-            cmd_button(app, ui, Command::Union, "Union");
-            cmd_button(app, ui, Command::Subtract, "Sub");
-            cmd_button(app, ui, Command::Intersect, "Inter");
-            section(ui, "Edit");
-            cmd_button(app, ui, Command::Move, "Move");
-            cmd_button(app, ui, Command::Rotate, "Rot");
-            cmd_button(app, ui, Command::Scale, "Scl");
-            cmd_button(app, ui, Command::MirrorX, "Mir");
-            cmd_button(app, ui, Command::RadialArray, "Arr");
-            cmd_button(app, ui, Command::Duplicate, "Dup");
-            cmd_button(app, ui, Command::Delete, "Del");
+        egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                for (title, cmds) in groups {
+                    section(ui, title);
+                    for pair in cmds.chunks(2) {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            for c in pair {
+                                icon_button(app, ui, *c);
+                            }
+                        });
+                    }
+                }
+            });
         });
     });
+}
+
+/// A square toolbar button showing the command's icon, its name and
+/// shortcut on hover.
+fn icon_button(app: &mut DuctileApp, ui: &mut egui::Ui, cmd: Command) {
+    let tip = match cmd.shortcut_text() {
+        "" => cmd.label().to_string(),
+        s => format!("{}   ({s})", cmd.label()),
+    };
+    let active = app.tool.as_ref().map(|t| t.name() == cmd.label()).unwrap_or(false);
+    let resp = ui.add(egui::Button::new("").selected(active).min_size(egui::vec2(24.0, 24.0)));
+    let color = if active || resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+    crate::icons::paint(cmd, ui.painter(), resp.rect.shrink(3.0), color);
+    if resp.on_hover_text(tip).clicked() {
+        app.pending.push(cmd);
+    }
 }
 
 fn section(ui: &mut egui::Ui, title: &str) {
