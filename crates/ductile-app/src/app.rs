@@ -474,7 +474,9 @@ impl DuctileApp {
                     if resp.drag_stopped_by(egui::PointerButton::Primary) {
                         let a = DVec2::new((bs.start.x - rect.min.x) as f64, (bs.start.y - rect.min.y) as f64);
                         let b = DVec2::new((bs.current.x - rect.min.x) as f64, (bs.current.y - rect.min.y) as f64);
-                        let picks = picking::pick_box(&self.doc, &self.camera, a, b, size, self.doc.mode);
+                        // Right to left: anything the box touches; left to right: only what it holds.
+                        let crossing = b.x < a.x;
+                        let picks = picking::pick_box(&self.doc, &self.camera, a, b, size, self.doc.mode, crossing);
                         if !mods.shift && !mods.ctrl {
                             self.doc.selection.clear();
                         }
@@ -535,8 +537,10 @@ impl DuctileApp {
         }
         if let Some(bs) = &self.box_select {
             let r = egui::Rect::from_two_pos(bs.start, bs.current);
-            ui.painter().rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(120, 150, 255, 25));
-            ui.painter().rect_stroke(r, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 150, 255)), egui::StrokeKind::Inside);
+            // Crossing boxes green, window boxes purple, as in Plasticity.
+            let (r8, g8, b8) = if bs.current.x < bs.start.x { (110, 210, 130) } else { (160, 120, 255) };
+            ui.painter().rect_filled(r, 0.0, egui::Color32::from_rgba_unmultiplied(r8, g8, b8, 25));
+            ui.painter().rect_stroke(r, 0.0, egui::Stroke::new(1.0, egui::Color32::from_rgb(r8, g8, b8)), egui::StrokeKind::Inside);
         }
         if let Some(h) = &gizmo {
             if self.tool.is_none() {
@@ -622,6 +626,30 @@ impl DuctileApp {
     fn click_select(&mut self, c: DVec2, size: DVec2, mods: egui::Modifiers) {
         let mode = self.tool.as_ref().and_then(|t| t.wants_selection()).unwrap_or(self.doc.mode);
         let hit = picking::pick(&self.doc, &self.camera, c, size, mode);
+        if mods.alt {
+            // Alt: the edge's loop or the face's tangent run; with Ctrl the
+            // edge's ring or the faces parallel to it.
+            let view = (self.camera.eye() - self.camera.target).normalize();
+            let grown: Vec<Pick> = match hit {
+                Some(Pick::Edge(o, e)) => self.doc.object(o).map_or(vec![], |ob| {
+                    let es = if mods.ctrl { crate::select::edge_ring(&ob.body, e) } else { crate::select::edge_loop(&ob.body, e, view) };
+                    es.into_iter().map(|x| Pick::Edge(o, x)).collect()
+                }),
+                Some(Pick::Face(o, f)) => self.doc.object(o).map_or(vec![], |ob| {
+                    let fs = if mods.ctrl { crate::select::parallel_faces(&ob.body, f) } else { crate::select::tangent_faces(&ob.body, f) };
+                    fs.into_iter().map(|x| Pick::Face(o, x)).collect()
+                }),
+                Some(p) => vec![p],
+                None => vec![],
+            };
+            if !grown.is_empty() {
+                if !mods.shift && self.tool.is_none() {
+                    self.doc.selection.clear();
+                }
+                self.doc.selection.extend(grown);
+            }
+            return;
+        }
         match hit {
             Some(p) => {
                 if mods.shift {

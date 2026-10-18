@@ -17,6 +17,7 @@ mod document;
 mod icons;
 mod picking;
 mod recent;
+mod select;
 mod render;
 mod screenshot;
 mod snap;

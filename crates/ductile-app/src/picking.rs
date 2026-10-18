@@ -185,29 +185,42 @@ pub fn pick_control(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, to
 }
 
 /// Picks every entity of the mode whose screen projection lies inside the rectangle.
-pub fn pick_box(doc: &Document, cam: &Camera, a: DVec2, b: DVec2, size: DVec2, mode: SelectMode) -> Vec<Pick> {
+/// What a box drawn from `a` to `b` selects: only what lies wholly inside
+/// it, or with `crossing` anything it touches.
+pub fn pick_box(doc: &Document, cam: &Camera, a: DVec2, b: DVec2, size: DVec2, mode: SelectMode, crossing: bool) -> Vec<Pick> {
     let lo = a.min(b);
     let hi = a.max(b);
     let inside = |p: DVec3| to_screen(cam, p, size).map(|(s, _)| s.cmpge(lo).all() && s.cmple(hi).all()).unwrap_or(false);
+    // A polyline is touched when a point is inside or a piece crosses the box.
+    let touches = |pts: &[DVec3]| {
+        let scr: Vec<DVec2> = pts.iter().filter_map(|p| to_screen(cam, *p, size).map(|s| s.0)).collect();
+        scr.iter().any(|s| s.cmpge(lo).all() && s.cmple(hi).all()) || scr.windows(2).any(|w| segment_hits_box(w[0], w[1], lo, hi))
+    };
+    let chosen = |pts: &[DVec3]| !pts.is_empty() && if crossing { touches(pts) } else { pts.iter().all(|p| inside(*p)) };
     let mut out = Vec::new();
     for o in doc.objects.iter().filter(|o| o.visible) {
         match mode {
             SelectMode::Object => {
                 let bb = o.body.bbox();
-                if !bb.is_empty() && inside(bb.center()) {
+                let hit = if crossing {
+                    o.mesh.edges.iter().any(|p| touches(p)) || o.mesh.faces.iter().any(|f| f.positions.iter().any(|p| inside(*p)))
+                } else {
+                    !bb.is_empty() && o.mesh.faces.iter().all(|f| f.positions.iter().all(|p| inside(*p))) && o.mesh.edges.iter().all(|p| p.iter().all(|q| inside(*q)))
+                };
+                if hit {
                     out.push(Pick::Object(o.id));
                 }
             }
             SelectMode::Face => {
                 for (fi, f) in o.mesh.faces.iter().enumerate() {
-                    if !f.positions.is_empty() && f.positions.iter().all(|p| inside(*p)) {
+                    if chosen(&f.positions) {
                         out.push(Pick::Face(o.id, FaceId(fi as u32)));
                     }
                 }
             }
             SelectMode::Edge => {
                 for (ei, poly) in o.mesh.edges.iter().enumerate() {
-                    if !poly.is_empty() && poly.iter().all(|p| inside(*p)) {
+                    if chosen(poly) {
                         out.push(Pick::Edge(o.id, EdgeId(ei as u32)));
                     }
                 }
@@ -234,4 +247,29 @@ pub fn pick_box(doc: &Document, cam: &Camera, a: DVec2, b: DVec2, size: DVec2, m
         }
     }
     out
+}
+
+/// Whether segment `a`–`b` crosses the box from `lo` to `hi`.
+fn segment_hits_box(a: DVec2, b: DVec2, lo: DVec2, hi: DVec2) -> bool {
+    // Clip the segment's parameter range against each slab.
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for k in 0..2 {
+        let (p, d) = (a[k], b[k] - a[k]);
+        if d.abs() < 1e-12 {
+            if p < lo[k] || p > hi[k] {
+                return false;
+            }
+            continue;
+        }
+        let (mut u, mut v) = ((lo[k] - p) / d, (hi[k] - p) / d);
+        if u > v {
+            std::mem::swap(&mut u, &mut v);
+        }
+        t0 = t0.max(u);
+        t1 = t1.min(v);
+        if t0 > t1 {
+            return false;
+        }
+    }
+    true
 }

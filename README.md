@@ -139,7 +139,12 @@ code from them.
   joined to its reflection, so half a symmetric part becomes the whole.
 - Hide (H), isolate the selection (Shift+H or .), show everything (Alt+H).
   Double-click an edge to add the edges running on tangentially from it
-  (a filleted outline, a spline profile) to the selection.
+  (a filleted outline, a spline profile) to the selection. As in
+  Plasticity, Alt+click an edge picks its loop and Ctrl+Alt+click its ring;
+  Alt+click a face picks the faces running on tangentially from it and
+  Ctrl+Alt+click the faces parallel to it (coaxial for cylinders). A box
+  dragged right to left picks anything it touches, left to right only what
+  it holds.
 - Transform gizmo: selecting something shows axis arrows and rotation rings
   at it; drag an arrow to move along that axis or a ring to turn about it
   (type a value while dragging for an exact one). Headless: `--select N`.
