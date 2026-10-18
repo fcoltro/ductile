@@ -19,7 +19,7 @@ use ductile_geom::{Curve3, DMat3, DVec2, DVec3, DVec4, NurbsSurface, Surface};
 pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, FilletError> {
     let ed = body.edge(e).clone();
     if !ed.is_closed() {
-        return Err(FilletError::Unsupported);
+        return Err(super::fillet::unsupported(line!(), file!()));
     }
     let uses = body.edge_faces(e);
     if uses.len() != 2 || uses[0].0 == uses[1].0 {
@@ -67,7 +67,7 @@ pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, Fi
             }
             let cv = cross.dot(tan * dir1) > 0.0;
             if *convex.get_or_insert(cv) != cv {
-                return Err(FilletError::Unsupported);
+                return Err(super::fillet::unsupported(line!(), file!()));
             }
             let ctrl = match blend {
                 Blend::Fillet(r) | Blend::Smooth(r) => {
@@ -109,7 +109,7 @@ pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, Fi
         })
     };
     let crossing = match (seam_of(f1), seam_of(f2)) {
-        (Some(_), Some(_)) => return Err(FilletError::Unsupported),
+        (Some(_), Some(_)) => return Err(super::fillet::unsupported(line!(), file!())),
         (Some(x), None) => Some((x, 0)),
         (None, Some(x)) => Some((x, section_len(blend) - 1)),
         (None, None) => None,
@@ -214,7 +214,7 @@ pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, Fi
             (out.vertex(b), b)
         } else {
             // A real corner: other faces meet the edge's vertex.
-            return Err(FilletError::Unsupported);
+            return Err(super::fillet::unsupported(line!(), file!()));
         };
         move_end(&mut out, x, v, target, tv, size)?;
     }
@@ -344,7 +344,7 @@ pub(crate) fn move_end(b: &mut Body, x: EdgeId, v: VertexId, p: DVec3, nv: Verte
     let xe = b.edges[x.idx()].clone();
     let t = xe.curve.closest_param_in(p, xe.t0 - (xe.t1 - xe.t0), xe.t1 + (xe.t1 - xe.t0));
     if xe.curve.point(t).distance(p) > 1e-5 * size {
-        return Err(FilletError::Unsupported);
+        return Err(super::fillet::unsupported(line!(), file!()));
     }
     let edge = &mut b.edges[x.idx()];
     if xe.v0 == v {

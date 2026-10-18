@@ -176,11 +176,11 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
     verts.push(end_of(&chain[k - 1]));
     for i in 1..k {
         if start_of(&chain[i]) != end_of(&chain[i - 1]) {
-            return Err(FilletError::Unsupported);
+            return Err(super::fillet::unsupported(line!(), file!()));
         }
     }
     if closed != (verts[0] == verts[k]) {
-        return Err(FilletError::Unsupported);
+        return Err(super::fillet::unsupported(line!(), file!()));
     }
     // Side A runs along the chain, side B against it.
     let mut sides: Vec<(FaceId, FaceId)> = Vec::with_capacity(k);
@@ -215,7 +215,7 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
     let end_at = |j: usize, (fa, fb): (FaceId, FaceId)| -> Result<End, FilletError> {
         let xs = others(verts[j]);
         if xs.len() != 2 {
-            return Err(FilletError::Unsupported);
+            return Err(super::fillet::unsupported(line!(), file!()));
         }
         let faces = |x: EdgeId| body.edge_faces(x).iter().map(|u| u.0).collect::<Vec<_>>();
         let (f0, f1) = (faces(xs[0]), faces(xs[1]));
@@ -224,11 +224,11 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
         } else if f1.contains(&fa) && f0.contains(&fb) {
             (xs[1], xs[0])
         } else {
-            return Err(FilletError::Unsupported);
+            return Err(super::fillet::unsupported(line!(), file!()));
         };
-        let cap = faces(ea).into_iter().find(|f| *f != fa).ok_or(FilletError::Unsupported)?;
+        let cap = faces(ea).into_iter().find(|f| *f != fa).ok_or_else(|| super::fillet::unsupported(line!(), file!()))?;
         if !faces(eb).contains(&cap) || cap == fb {
-            return Err(FilletError::Unsupported);
+            return Err(super::fillet::unsupported(line!(), file!()));
         }
         Ok(End { cap, ea, eb })
     };
@@ -256,7 +256,7 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
         }
         let cv = cross.dot(tan) > 0.0;
         if *convex.get_or_insert(cv) != cv {
-            return Err(FilletError::Unsupported);
+            return Err(super::fillet::unsupported(line!(), file!()));
         }
         let normal = match plane {
             Some(n) if n.dot(tan) < 0.0 => -n,
@@ -333,7 +333,7 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
         let (p1, p2, curve) = (first.p1, first.p2, first.curve.clone());
         let last = rows[k - 1].last_mut().unwrap();
         if last.p1.distance(p1) > 1e-6 * size || last.p2.distance(p2) > 1e-6 * size {
-            return Err(FilletError::Unsupported);
+            return Err(super::fillet::unsupported(line!(), file!()));
         }
         *last = Section { p1, p2, curve };
     }
@@ -384,9 +384,9 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
                 .iter()
                 .copied()
                 .find(|l| out.loops[l.idx()].coedges.iter().any(|c| c.edge == end.ea))
-                .ok_or(FilletError::Unsupported)?;
+                .ok_or_else(|| super::fillet::unsupported(line!(), file!()))?;
             let cs = out.loops[lp.idx()].coedges.clone();
-            let pos = (0..cs.len()).find(|p| out.coedge_vertices(cs[*p]).1 == v).ok_or(FilletError::Unsupported)?;
+            let pos = (0..cs.len()).find(|p| out.coedge_vertices(cs[*p]).1 == v).ok_or_else(|| super::fillet::unsupported(line!(), file!()))?;
             // Coming in along ea means the arc runs from A's side to B's.
             let rev = cs[pos].edge != end.ea;
             out.loops[lp.idx()].coedges.insert(pos + 1, Coedge::new(junction(j), rev));
@@ -413,7 +413,7 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
                     } else if faces.iter().all(|f| side_b.contains(f)) {
                         false
                     } else {
-                        return Err(FilletError::Unsupported);
+                        return Err(super::fillet::unsupported(line!(), file!()));
                     }
                 }
             };

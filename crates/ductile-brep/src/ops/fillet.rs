@@ -15,7 +15,7 @@ use super::revolve::revolve_loop;
 use crate::primitives::{flip_orientation, make_box, make_sphere_in, polyhedron};
 use crate::profile::{Loop3, Region, Segment};
 use crate::topo::{Body, BodyKind, EdgeId, FaceId, VertexId};
-use ductile_geom::{Curve3, DMat3, DVec3, Frame, Surface};
+use ductile_geom::{Curve3, DMat3, DVec2, DVec3, Frame, Surface};
 use std::collections::{BTreeSet, HashMap};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,6 +42,14 @@ pub enum FilletError {
     TooLarge,
     #[error("boolean failed: {0}")]
     Boolean(#[from] BoolError),
+}
+
+/// `FilletError::Unsupported`, noting where with `DUCTILE_DEBUG_FILLET`.
+pub(crate) fn unsupported(line: u32, file: &str) -> FilletError {
+    if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+        eprintln!("unsupported at {file}:{line}");
+    }
+    FilletError::Unsupported
 }
 
 struct EdgeInfo {
@@ -125,6 +133,21 @@ fn vertex_faces(b: &Body, v: VertexId) -> BTreeSet<FaceId> {
 /// together, the edges are blended one after another instead, each found
 /// again on the body the earlier ones left.
 pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, FilletError> {
+    // An edge running on tangentially into others (into an earlier
+    // fillet's arc, say) is blended along the whole run: a blend stopping
+    // part-way along a smooth outline has no sensible end.
+    let mut grown: Vec<EdgeId> = Vec::new();
+    for &e in edges {
+        for x in super::chain::grow_tangent_chain(body, e) {
+            if !grown.contains(&x) && !matches!(edge_info(body, x), Err(FilletError::NotManifold | FilletError::Smooth)) {
+                grown.push(x);
+            }
+        }
+    }
+    if !grown.contains(&edges[0]) {
+        grown = edges.to_vec();
+    }
+    let edges = &grown[..];
     match blend_together(body, edges, blend) {
         Err(err @ (FilletError::Boolean(_) | FilletError::Unsupported)) if edges.len() > 1 => {
             let back: Vec<EdgeId> = edges.iter().rev().copied().collect();
@@ -295,7 +318,7 @@ fn smooth_line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, r: f64, 
     }
     let ctrl = super::roll::section_ctrl(blend, p0 + o, q1, q2);
     let ends = line_ends(b, e, info, caps, r);
-    super::corner::smooth_edge_tool(p0, q1, q2, &ctrl, t, ends).ok_or(FilletError::Unsupported)
+    super::corner::smooth_edge_tool(p0, q1, q2, &ctrl, t, ends).ok_or_else(|| unsupported(line!(), file!()))
 }
 
 /// End planes `(point, normal)` for a tool along the straight edge `e`,
@@ -345,11 +368,11 @@ pub fn blend_edges_variable(body: &Body, edges: &[EdgeId], r0: f64, r1: f64, smo
     for &e in edges {
         let ed = body.edge(e);
         if !seen.insert(ed.v0) || !seen.insert(ed.v1) {
-            return Err(FilletError::Unsupported);
+            return Err(unsupported(line!(), file!()));
         }
         let info = edge_info(body, e)?;
         if !is_line_between_planes(body, e, &info) {
-            return Err(FilletError::Unsupported);
+            return Err(unsupported(line!(), file!()));
         }
         let EdgeInfo { p0, t, n1, n2, convex, .. } = info;
         let (start, len) = (body.vertex(ed.v0), ed.start().distance(ed.end()));
@@ -374,7 +397,7 @@ pub fn blend_edges_variable(body: &Body, edges: &[EdgeId], r0: f64, r1: f64, smo
             Ok(super::corner::Station { t: p, a: q1, c: q2, ctrl: super::roll::section_ctrl(blend, p + o, q1, q2) })
         };
         let ends = line_ends(body, e, &info, &[], r0.max(r1));
-        let tool = super::corner::ruled_edge_tool([station(p0)?, station(info.p1)?], ends).ok_or(FilletError::Unsupported)?;
+        let tool = super::corner::ruled_edge_tool([station(p0)?, station(info.p1)?], ends).ok_or_else(|| unsupported(line!(), file!()))?;
         if convex {
             cut.push(tool);
         } else {
@@ -396,19 +419,18 @@ fn edge_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> R
     // Smooth blends have tools along straight edges between planes only
     // (built by `smooth_line_tool`); elsewhere the ball is rolled for them.
     if matches!(blend, Blend::Smooth(_)) {
-        return Err(FilletError::Unsupported);
+        return Err(unsupported(line!(), file!()));
     }
     let (s1, s2) = (&b.face(info.f1).surface, &b.face(info.f2).surface);
     match (&ed.curve, s1, s2) {
         (Curve3::Line { .. }, Surface::Plane { .. }, Surface::Plane { .. }) => line_tool(b, e, info, blend, size),
         (Curve3::Circle { frame, .. }, _, _) => {
-            let (pf, cf) = match (s1, s2) {
-                (Surface::Plane { .. }, Surface::Cylinder { .. }) => (info.f1, info.f2),
-                (Surface::Cylinder { .. }, Surface::Plane { .. }) => (info.f2, info.f1),
-                _ => return Err(FilletError::Unsupported),
-            };
             let arc = (!ed.is_closed()).then(|| ed.mid());
-            circle_tool(b, frame.origin, pf, cf, info, blend, arc)
+            match (s1, s2) {
+                (Surface::Plane { .. }, Surface::Cylinder { .. }) => circle_tool(b, frame.origin, info.f1, info.f2, info, blend, arc),
+                (Surface::Cylinder { .. }, Surface::Plane { .. }) => circle_tool(b, frame.origin, info.f2, info.f1, info, blend, arc),
+                _ => coaxial_tool(b, frame.origin, frame.z, info, blend, arc),
+            }
         }
         _ => Err(FilletError::Unsupported),
     }
@@ -449,7 +471,7 @@ fn line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> R
     };
     let lp = Loop3 { segments: vec![Segment::line(pp, a), mid, Segment::line(c, pp)] };
     let region = Region { plane: Frame::new(pp, t, a - pp), outer: lp, holes: vec![] };
-    let mut tool = extrude_region(&region, t * (len + 2.0 * margin)).ok_or(FilletError::Unsupported)?;
+    let mut tool = extrude_region(&region, t * (len + 2.0 * margin)).ok_or_else(|| unsupported(line!(), file!()))?;
     // Stop the tool at the faces capping the edge's ends.
     let ed = b.edge(e);
     for (v, p) in [(ed.v0, b.vertex(ed.v0)), (ed.v1, b.vertex(ed.v1))] {
@@ -469,13 +491,84 @@ fn line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> R
 /// The tool along a circular edge between a plane and a cylinder square to
 /// it: the fillet section swept round the circle, or, for an arc through
 /// `arc` (a point midway along it), round just that arc.
+/// Whether `s` is a surface of revolution about the axis through `c` along
+/// `a` whose meridian is a straight line (a plane square to the axis, or a
+/// coaxial cylinder or cone).
+fn straight_meridian_about(s: &Surface, c: DVec3, a: DVec3) -> bool {
+    let on_axis = |o: DVec3| (o - c).cross(a).length() < 1e-9 * (1.0 + (o - c).length());
+    match s {
+        Surface::Plane { frame } => frame.z.cross(a).length() < 1e-9,
+        Surface::Cylinder { frame, .. } | Surface::Cone { frame, .. } => frame.z.cross(a).length() < 1e-9 && on_axis(frame.origin),
+        _ => false,
+    }
+}
+
+/// Exact tool for a blend along a circular edge between two coaxial faces
+/// whose meridians are straight (planes, cylinders, cones): in the plane
+/// through the axis the two faces are lines, the round blend is the circle
+/// tangent to both (revolved: a torus) and the chamfer a chord (a cone).
+fn coaxial_tool(b: &Body, center: DVec3, a: DVec3, info: &EdgeInfo, blend: Blend, arc_mid: Option<DVec3>) -> Result<Body, FilletError> {
+    let (s1, s2) = (&b.face(info.f1).surface, &b.face(info.f2).surface);
+    if !straight_meridian_about(s1, center, a) || !straight_meridian_about(s2, center, a) {
+        return Err(unsupported(line!(), file!()));
+    }
+    let p = info.p0;
+    let e = (p - center - a * (p - center).dot(a)).normalize();
+    let big_r = (p - center).dot(e);
+    // Meridian coordinates (along e, along a) relative to the edge point.
+    let to2 = |v: DVec3| DVec2::new(v.dot(e), v.dot(a));
+    let at = |q: DVec2| p + e * q.x + a * q.y;
+    let (n1, n2) = (to2(outward(b, info.f1, p)).normalize(), to2(outward(b, info.f2, p)).normalize());
+    let det = n1.x * n2.y - n1.y * n2.x;
+    if det.abs() < 1e-9 {
+        return Err(FilletError::Smooth);
+    }
+    let sgn = if info.convex { -1.0 } else { 1.0 };
+    // Along each face, away from the edge.
+    let into = |n: DVec2, other: DVec2| {
+        let d = DVec2::new(-n.y, n.x);
+        if (d.dot(other) < 0.0) == info.convex { d } else { -d }
+    };
+    let (d1, d2) = (into(n1, n2), into(n2, n1));
+    let (q1, q2, mid) = match blend {
+        Blend::Fillet(r) | Blend::Smooth(r) => {
+            // Centre at signed distance sgn r from both face lines.
+            let rhs = DVec2::new(sgn * r, sgn * r);
+            let c = DVec2::new(rhs.x * n2.y - n1.y * rhs.y, n1.x * rhs.y - rhs.x * n2.x) / det;
+            let (q1, q2) = (c - n1 * sgn * r, c - n2 * sgn * r);
+            if q1.dot(d1) <= 0.0 || q2.dot(d2) <= 0.0 {
+                return Err(FilletError::TooLarge);
+            }
+            (q1, q2, Some(c))
+        }
+        Blend::Chamfer(d) => (d1 * d, d2 * d, None),
+    };
+    if [q1, q2].iter().chain(mid.iter()).any(|q| big_r + q.x <= 1e-9) {
+        return Err(FilletError::TooLarge);
+    }
+    let seg = match mid {
+        Some(c) => arc(at(c), at(q1), at(q2), e.cross(a)),
+        None => Segment::line(at(q1), at(q2)),
+    };
+    let lp = Loop3 { segments: vec![Segment::line(p, at(q1)), seg, Segment::line(at(q2), p)] };
+    let Some(m) = arc_mid else { return revolve_loop(&lp, center, a).ok_or_else(|| unsupported(line!(), file!())) };
+    let f = a.cross(e);
+    let turn = |q: DVec3| {
+        let v = q - center;
+        v.dot(f).atan2(v.dot(e)).rem_euclid(std::f64::consts::TAU)
+    };
+    let (end, through) = (turn(info.p1), turn(m));
+    let (axis, angle) = if through < end { (a, end) } else { (-a, std::f64::consts::TAU - end) };
+    super::revolve::revolve(&lp, center, axis, angle).ok_or_else(|| unsupported(line!(), file!()))
+}
+
 fn circle_tool(b: &Body, center: DVec3, pf: FaceId, cf: FaceId, info: &EdgeInfo, blend: Blend, arc_mid: Option<DVec3>) -> Result<Body, FilletError> {
-    let Surface::Cylinder { frame: cyl, radius: big_r } = &b.face(cf).surface else { return Err(FilletError::Unsupported) };
+    let Surface::Cylinder { frame: cyl, radius: big_r } = &b.face(cf).surface else { return Err(unsupported(line!(), file!())) };
     let pm = 0.5 * (info.p0 + info.p1);
     let pm = if pm.distance(center) < 1e-9 { info.p0 } else { pm };
     let a = outward(b, pf, pm);
     if cyl.z.cross(a).length() > 1e-9 {
-        return Err(FilletError::Unsupported);
+        return Err(unsupported(line!(), file!()));
     }
     // Radial direction through a point of the edge (any point works).
     let p = info.p0;
@@ -500,7 +593,7 @@ fn circle_tool(b: &Body, center: DVec3, pf: FaceId, cf: FaceId, info: &EdgeInfo,
         Blend::Chamfer(_) => Segment::line(qp, qc),
     };
     let lp = Loop3 { segments: vec![Segment::line(corner, qp), mid, Segment::line(qc, corner)] };
-    let Some(m) = arc_mid else { return revolve_loop(&lp, center, a).ok_or(FilletError::Unsupported) };
+    let Some(m) = arc_mid else { return revolve_loop(&lp, center, a).ok_or_else(|| unsupported(line!(), file!())) };
     // Sweep from p0 to p1 the way round that passes the arc's middle.
     // Angles round `a`, counter-clockwise from `e`.
     let f = a.cross(e);
@@ -510,7 +603,7 @@ fn circle_tool(b: &Body, center: DVec3, pf: FaceId, cf: FaceId, info: &EdgeInfo,
     };
     let (end, through) = (turn(info.p1), turn(m));
     let (axis, angle) = if through < end { (a, end) } else { (-a, std::f64::consts::TAU - end) };
-    super::revolve::revolve(&lp, center, axis, angle).ok_or(FilletError::Unsupported)
+    super::revolve::revolve(&lp, center, axis, angle).ok_or_else(|| unsupported(line!(), file!()))
 }
 
 /// Spherical corner patches where three filleted convex plane/plane edges
@@ -595,6 +688,29 @@ mod tests {
 
     fn vol(b: &Body) -> f64 {
         tessellate(b, &TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume()
+    }
+
+    #[test]
+    fn fillets_the_edge_between_a_chamfer_and_the_cylinder() {
+        // Chamfer a cylinder's top rim, then round the chamfer's lower
+        // edge: a circle between a cone and a cylinder, blended by a torus.
+        let c = make_cylinder(&Frame::WORLD, 1.0, 2.0);
+        let rim = c.edge_ids().find(|e| c.edge(*e).start().z > 1.9 && matches!(c.edge(*e).curve, Curve3::Circle { .. })).unwrap();
+        let ch = blend_edges(&c, &[rim], Blend::Chamfer(0.2)).unwrap();
+        let low = ch
+            .edge_ids()
+            .find(|e| {
+                let ed = ch.edge(*e);
+                (ed.start().z - 1.8).abs() < 1e-6 && matches!(ed.curve, Curve3::Circle { .. })
+            })
+            .unwrap();
+        let f = blend_edges(&ch, &[low], Blend::Fillet(0.1)).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        // Removed: r^2 (cot(t/2) - (pi - t)/2) about the rim, t = 135 degrees.
+        let t = 0.75 * PI;
+        let expect = 2.0 * PI * 0.01 * (1.0 / (t / 2.0).tan() - (PI - t) / 2.0);
+        let removed = vol(&ch) - vol(&f);
+        assert!((removed - expect).abs() < 0.2 * expect, "{removed} vs {expect}");
     }
 
     fn find_edge(b: &Body, a: DVec3, c: DVec3) -> EdgeId {
