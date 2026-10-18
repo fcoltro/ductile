@@ -46,6 +46,7 @@ pub enum Command {
     Extrude,
     Revolve,
     Loft,
+    Patch,
     Sweep,
     Fillet,
     Chamfer,
@@ -119,6 +120,7 @@ impl Command {
         Command::Extrude,
         Command::Revolve,
         Command::Loft,
+        Command::Patch,
         Command::Sweep,
         Command::Fillet,
         Command::Chamfer,
@@ -193,6 +195,7 @@ impl Command {
             Extrude => "Extrude face or curves",
             Revolve => "Revolve curves",
             Loft => "Loft",
+            Patch => "Patch surface",
             Sweep => "Sweep",
             Fillet => "Fillet edges",
             Chamfer => "Chamfer edges",
@@ -274,6 +277,7 @@ impl Command {
             ExtendCurve => "Alt+X",
             Union => "Shift+U",
             Loft => "Alt+L",
+            Patch => "Alt+P",
             Sweep => "Alt+W",
             Subtract => "Shift+D",
             Intersect => "Shift+I",
@@ -333,6 +337,7 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::P, false, true, false) => Polygon,
         (Key::V, false, false, false) => Revolve,
         (Key::L, false, false, true) => Loft,
+        (Key::P, false, false, true) => Patch,
         (Key::W, false, false, true) => Sweep,
         (Key::F, false, true, false) => Fillet,
         (Key::K, false, true, false) => Chamfer,
@@ -405,7 +410,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                     path.set_extension("step");
                 }
                 app.status = match export_step(&app.doc, &path) {
-                    Ok(n) => format!("Exported {n} solid(s) to {}", path.display()),
+                    Ok(n) => format!("Exported {n} shape(s) to {}", path.display()),
                     Err(e) => format!("STEP export failed: {e}"),
                 };
             }
@@ -565,8 +570,12 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             None => app.status = "Select objects to copy in an array".into(),
         },
         Union => boolean_selected(app, BoolOp::Union),
-        Loft | Sweep => {
-            let (name, res) = if cmd == Loft { ("Loft", crate::tools::loft_selected(&app.doc)) } else { ("Sweep", crate::tools::sweep_selected(&app.doc)) };
+        Loft | Sweep | Patch => {
+            let (name, res) = match cmd {
+                Loft => ("Loft", crate::tools::loft_selected(&app.doc)),
+                Patch => ("Patch", crate::tools::patch_selected(&app.doc)),
+                _ => ("Sweep", crate::tools::sweep_selected(&app.doc)),
+            };
             match res {
                 Ok(b) => {
                     app.doc.checkpoint(name);
@@ -830,6 +839,45 @@ pub fn demo_scene(doc: &mut Document) {
         doc.add_body("Arc", wire_from_segments(&[arc]));
         doc.add_body("Bridge", wire_from_segments(&[Segment::new(Curve3::Nurbs(bridge), b0, b1)]));
         doc.add_body("Spline", wire_from_segments(&extend_segment(&spline, true, 1.2, Extension::Natural)));
+    }
+    // Surfaces: an extruded wave, a revolved bowl, a lofted sheet and a
+    // Coons patch on a curved boundary.
+    {
+        use ductile_brep::ops::sheet::{extrude_sheet, loft_sheet, patch, revolve_sheet};
+        use ductile_brep::profile::{Loop3, Segment};
+        use ductile_geom::{Curve3, NurbsCurve};
+        let spline = |pts: &[DVec3]| {
+            let c = NurbsCurve::interpolate(pts, 3);
+            let (t0, t1) = c.domain();
+            Loop3 { segments: vec![Segment::new(Curve3::Nurbs(c), t0, t1)] }
+        };
+        let p = |x: f64, y: f64, z: f64| DVec3::new(x, y, z);
+        let wave = spline(&[p(-14.0, -24.0, 0.0), p(-12.5, -22.5, 0.0), p(-11.0, -24.0, 0.0), p(-9.5, -22.5, 0.0)]);
+        if let Some(b) = extrude_sheet(&[wave], p(0.0, 0.0, 3.0)) {
+            doc.add_body("Wave surface", b);
+        }
+        let prof = spline(&[p(-4.0, -23.0, 0.2), p(-2.0, -23.0, 0.6), p(-1.0, -23.0, 2.0), p(-0.6, -23.0, 3.2)]);
+        if let Some(b) = revolve_sheet(&[prof], p(-4.0, -23.0, 0.0), DVec3::Z, std::f64::consts::TAU) {
+            doc.add_body("Bowl surface", b);
+        }
+        let l0 = spline(&[p(3.0, -26.0, 0.0), p(5.0, -25.5, 0.5), p(7.0, -26.0, 0.0)]);
+        let l1 = spline(&[p(3.0, -23.5, 1.5), p(5.0, -23.0, 2.5), p(7.0, -23.5, 1.5)]);
+        let l2 = spline(&[p(3.0, -21.0, 0.5), p(5.0, -21.5, 0.0), p(7.0, -21.0, 0.5)]);
+        if let Some(b) = loft_sheet(&[l0, l1, l2]) {
+            doc.add_body("Lofted surface", b);
+        }
+        let c = |pts: &[DVec3]| spline(pts).segments.remove(0);
+        let boundary = Loop3 {
+            segments: vec![
+                c(&[p(10.0, -26.0, 0.0), p(12.0, -26.5, 1.0), p(14.0, -26.0, 0.0)]),
+                c(&[p(14.0, -26.0, 0.0), p(14.5, -24.0, 1.5), p(14.0, -22.0, 0.0)]),
+                c(&[p(14.0, -22.0, 0.0), p(12.0, -21.5, 2.0), p(10.0, -22.0, 0.0)]),
+                c(&[p(10.0, -22.0, 0.0), p(9.5, -24.0, 0.5), p(10.0, -26.0, 0.0)]),
+            ],
+        };
+        if let Some(b) = patch(&boundary, &[]) {
+            doc.add_body("Patch", b);
+        }
     }
     // Capsule end: cylinder with a hemispherical cap.
     let cap = op(make_cylinder(&at(13.0, 3.0, 0.0), 2.5, 4.0), make_sphere(DVec3::new(13.0, 3.0, 4.0), 2.5), BoolOp::Union);

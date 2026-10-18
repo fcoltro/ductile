@@ -39,6 +39,11 @@ code from them.
   when the profiles match; Sweep (Alt+W) a closed curve along an open path
   with a rotation-minimizing frame (exact for straight and circular paths),
   mitred where the path turns through a sharp corner.
+- Surfaces: Extrude, Revolve and Loft turn open curves into surfaces
+  (exact planes, cylinders, cones, spheres and tori where the curves allow);
+  Patch (Alt+P) fills closed curves, with a trimmed plane when they are
+  flat (inner curves become holes) or a Coons patch through any four-sided
+  (or split into four) boundary. Back faces show tinted.
 - Fillets (Shift+F) and chamfers (Shift+K) on edges between planes, on
   circular plane/cylinder edges (boss and hole rims), with spherical corner
   patches where three filleted edges meet. Closed edges between any two
@@ -61,8 +66,8 @@ code from them.
   (Alt+F, or E on a curved face) pushes and pulls any faces. Faces move along
   their normals with exact offset surfaces for analytic faces, sharp edges
   stay sharp, and tangent faces (fillets) move together.
-- STEP (AP214) export of exact solids, checked against OpenCascade; several
-  objects are written as an assembly with one named part each. STL and
+- STEP (AP214) export of exact solids and surfaces, checked against
+  OpenCascade; several objects are written as an assembly with one named part each. STL and
   OBJ export. Headless: `ductile --demo --export-step out.step`.
 - STEP import (File > Import STEP, or `ductile part.step`): planes,
   cylinders, cones, spheres, tori, B-spline and rational surfaces, surfaces

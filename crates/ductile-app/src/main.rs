@@ -53,7 +53,7 @@ fn main() -> eframe::Result {
             }
         }
         match commands::export_step(&doc, &out) {
-            Ok(n) => println!("wrote {n} solid(s) to {}", out.display()),
+            Ok(n) => println!("wrote {n} shape(s) to {}", out.display()),
             Err(e) => {
                 eprintln!("STEP export failed: {e}");
                 std::process::exit(1);

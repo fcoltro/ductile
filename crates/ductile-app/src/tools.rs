@@ -652,6 +652,8 @@ pub struct ExtrudeTool {
     target: Option<ObjectId>,
     body: Option<std::sync::Arc<Body>>,
     regions: Vec<ductile_brep::profile::Region>,
+    /// Open curves, extruded into a sheet when there are no regions.
+    open: Vec<ductile_brep::profile::Loop3>,
     normal: DVec3,
     base: DVec3,
     start_t: Option<f64>,
@@ -697,9 +699,13 @@ fn selected_chains(doc: &Document) -> Vec<ductile_brep::profile::Loop3> {
 /// Lofts a solid through the selected closed curves, ordered along the
 /// line through the two profiles farthest apart.
 pub fn loft_selected(doc: &Document) -> Result<Body, String> {
-    let mut loops: Vec<_> = selected_chains(doc).into_iter().filter(|l| l.is_closed()).collect();
+    let chains = selected_chains(doc);
+    let closed = chains.iter().filter(|l| l.is_closed()).count();
+    // Closed profiles make a solid; open ones a sheet.
+    let sheet = closed < 2;
+    let mut loops: Vec<_> = chains.into_iter().filter(|l| l.is_closed() != sheet).collect();
     if loops.len() < 2 {
-        return Err("Loft: select two or more closed curves".into());
+        return Err("Loft: select two or more closed curves (a solid) or open curves (a surface)".into());
     }
     let centroid = |l: &ductile_brep::profile::Loop3| {
         let p = l.polygon(1e-2);
@@ -716,7 +722,35 @@ pub fn loft_selected(doc: &Document) -> Result<Body, String> {
     }
     let axis = cs[b] - cs[a];
     loops.sort_by(|x, y| centroid(x).dot(axis).total_cmp(&centroid(y).dot(axis)));
+    if sheet {
+        return ductile_brep::ops::sheet::loft_sheet(&loops).ok_or_else(|| "Loft failed".into());
+    }
     ductile_brep::ops::loft::loft(&loops).ok_or_else(|| "Loft failed: the profiles must be planar and apart".into())
+}
+
+/// Fills each selected closed curve with a surface: a trimmed plane when
+/// it is planar (closed curves inside it become holes), else a Coons patch.
+pub fn patch_selected(doc: &Document) -> Result<Body, String> {
+    let closed: Vec<_> = selected_chains(doc).into_iter().filter(|l| l.is_closed()).collect();
+    if closed.is_empty() {
+        return Err("Patch: select closed curves to fill".into());
+    }
+    let mut out: Option<Body> = None;
+    let mut add = |b: Body| match &mut out {
+        None => out = Some(b),
+        Some(o) => o.append(&b),
+    };
+    let regions = ductile_brep::profile::loops_plane(&closed).map(|plane| ductile_brep::profile::Region::from_loops(plane, closed.clone())).unwrap_or_default();
+    if !regions.is_empty() {
+        for r in &regions {
+            add(ductile_brep::ops::sheet::patch(&r.outer, &r.holes).ok_or("Patch failed")?);
+        }
+    } else {
+        for c in &closed {
+            add(ductile_brep::ops::sheet::patch(c, &[]).ok_or("Patch failed")?);
+        }
+    }
+    out.ok_or_else(|| "Patch failed".into())
 }
 
 /// Sweeps the selected closed curve along the selected open one.
@@ -755,7 +789,16 @@ impl ExtrudeTool {
             None => {
                 let regions = selected_curve_regions(doc);
                 if regions.is_empty() {
-                    return None;
+                    let open: Vec<_> = selected_chains(doc).into_iter().filter(|c| !c.is_closed()).collect();
+                    if open.is_empty() {
+                        return None;
+                    }
+                    // Out of the curves' plane when they span one, else
+                    // along the construction plane normal.
+                    let normal = ductile_brep::profile::loops_plane(&open).filter(|_| open.iter().any(|c| c.segments.iter().any(|s| !s.curve.is_linear()) || c.segments.len() > 1)).map(|f| f.z).unwrap_or(current_cplane().frame.z);
+                    let poly: Vec<DVec3> = open.iter().flat_map(|c| c.polygon(1e-3)).collect();
+                    let base = poly.iter().copied().sum::<DVec3>() / poly.len().max(1) as f64;
+                    return Some(Self { target: None, body: None, regions, open, normal, base, start_t: None, distance: 0.0, typed: None, cache: std::cell::RefCell::new(None) });
                 }
                 (None, None, regions)
             }
@@ -765,6 +808,7 @@ impl ExtrudeTool {
         Some(Self {
             target,
             body,
+            open: Vec::new(),
             normal: regions[0].plane.z,
             regions,
             base,
@@ -789,6 +833,11 @@ impl ExtrudeTool {
         }
         let out = if d.abs() < 1e-9 {
             (None, None)
+        } else if self.regions.is_empty() {
+            match ductile_brep::ops::sheet::extrude_sheet(&self.open, self.normal * d) {
+                Some(b) => (Some(b), None),
+                None => (None, Some("could not extrude the curves".into())),
+            }
         } else {
             let mut acc: Result<Option<Body>, String> = Ok(None);
             for r in &self.regions {
@@ -2147,6 +2196,8 @@ impl Tool for ArrayTool {
 /// (or X) axis.
 pub struct RevolveTool {
     regions: Vec<ductile_brep::profile::Region>,
+    /// Open curves, revolved into a sheet when there are no regions.
+    open: Vec<ductile_brep::profile::Loop3>,
     edge_axis: Option<(DVec3, DVec3)>,
     /// 0: selected edge (if any), 1: construction plane X, 2: Y.
     pub axis_choice: usize,
@@ -2157,7 +2208,8 @@ pub struct RevolveTool {
 impl RevolveTool {
     pub fn new(doc: &Document) -> Option<Self> {
         let regions = selected_curve_regions(doc);
-        if regions.is_empty() {
+        let open: Vec<_> = if regions.is_empty() { selected_chains(doc).into_iter().filter(|c| !c.is_closed()).collect() } else { Vec::new() };
+        if regions.is_empty() && open.is_empty() {
             return None;
         }
         let edge_axis = doc.selected_edges().into_iter().find_map(|(o, e)| {
@@ -2165,7 +2217,7 @@ impl RevolveTool {
             ed.curve.is_linear().then(|| (ed.start(), (ed.end() - ed.start()).normalize()))
         });
         let axis_choice = if edge_axis.is_some() { 0 } else { 2 };
-        Some(Self { regions, edge_axis, axis_choice, degrees: 360.0, cache: std::cell::RefCell::new(None) })
+        Some(Self { regions, open, edge_axis, axis_choice, degrees: 360.0, cache: std::cell::RefCell::new(None) })
     }
 
     fn axis(&self) -> (DVec3, DVec3) {
@@ -2188,6 +2240,9 @@ impl RevolveTool {
         let (o, a) = self.axis();
         let ang = self.degrees.to_radians();
         let mut out: Result<Option<Body>, String> = Ok(None);
+        if self.regions.is_empty() {
+            out = ductile_brep::ops::sheet::revolve_sheet(&self.open, o, a, ang).map(Some).ok_or_else(|| "could not revolve the curves".into());
+        }
         'outer: for r in &self.regions {
             let Some(mut solid) = revolve(&r.outer, o, a, ang) else {
                 out = Err("the profile must lie on one side of an axis in its plane".into());
@@ -2239,7 +2294,7 @@ impl Tool for RevolveTool {
     }
     fn guides(&self, out: &mut Vec<LineInstance>) {
         let (o, a) = self.axis();
-        let l = self.regions.iter().flat_map(|r| r.outer.polygon(1e-2)).map(|p| (p - o).length()).fold(1.0, f64::max) * 1.5;
+        let l = self.regions.iter().map(|r| &r.outer).chain(self.open.iter()).flat_map(|c| c.polygon(1e-2)).map(|p| (p - o).length()).fold(1.0, f64::max) * 1.5;
         out.push(LineInstance::new(o - a * l, o + a * l, [0.3, 0.9, 1.0, 1.0], 1.5));
     }
     fn panel(&mut self, ui: &mut egui::Ui) -> bool {

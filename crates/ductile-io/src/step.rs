@@ -180,6 +180,10 @@ impl Writer {
         for f in b.face_ids() {
             faces.push(self.face(b, f, &mut verts, &mut edges));
         }
+        if b.kind == BodyKind::Sheet {
+            let shell = self.add(format!("OPEN_SHELL('',{})", refs(&faces)));
+            return self.add(format!("SHELL_BASED_SURFACE_MODEL({},(#{shell}))", string(name)));
+        }
         let shell = self.add(format!("CLOSED_SHELL('',{})", refs(&faces)));
         self.add(format!("MANIFOLD_SOLID_BREP({},#{shell})", string(name)))
     }
@@ -236,7 +240,7 @@ fn knot_runs(knots: &[f64]) -> (Vec<usize>, Vec<f64>) {
     (mults, vals)
 }
 
-/// Writes the solids among `objects` (name, body) to STEP. A single solid
+/// Writes the solids and surfaces among `objects` (name, body) to STEP. A single solid
 /// is written as one part; several become an assembly of one part per
 /// object, so other systems keep the object names. Returns the number of
 /// solids written.
@@ -263,7 +267,9 @@ pub fn write_step(out: &mut impl std::io::Write, part_name: &str, objects: &[(&s
         let pds = w.add(format!("PRODUCT_DEFINITION_SHAPE('','',#{pd})"));
         (pd, pds)
     };
-    let solids: Vec<(&str, &Body)> = objects.iter().copied().filter(|(_, b)| b.kind == BodyKind::Solid && !b.faces.is_empty()).collect();
+    let solids: Vec<(&str, &Body)> = objects.iter().copied().filter(|(_, b)| b.kind != BodyKind::Wire && !b.faces.is_empty()).collect();
+    // Surfaces go in their own kind of representation.
+    let rep_kind = |b: &Body| if b.kind == BodyKind::Sheet { "MANIFOLD_SURFACE_SHAPE_REPRESENTATION" } else { "ADVANCED_BREP_SHAPE_REPRESENTATION" };
     let name = string(part_name);
     let origin = w.placement(&Frame::WORLD);
     let (pd, pds) = product(&mut w, part_name);
@@ -272,7 +278,8 @@ pub fn write_step(out: &mut impl std::io::Write, part_name: &str, objects: &[(&s
         for (n, b) in &solids {
             items.push(w.solid(n, b));
         }
-        let rep = w.add(format!("ADVANCED_BREP_SHAPE_REPRESENTATION({name},{},#{ctx})", refs(&items)));
+        let kind = solids.first().map_or("ADVANCED_BREP_SHAPE_REPRESENTATION", |s| rep_kind(s.1));
+        let rep = w.add(format!("{kind}({name},{},#{ctx})", refs(&items)));
         w.add(format!("SHAPE_DEFINITION_REPRESENTATION(#{pds},#{rep})"));
     } else {
         // Each part sits at the assembly origin: its geometry is already in
@@ -285,7 +292,7 @@ pub fn write_step(out: &mut impl std::io::Write, part_name: &str, objects: &[(&s
         for (i, ((n, b), place)) in solids.iter().zip(places).enumerate() {
             let (cpd, cpds) = product(&mut w, n);
             let solid = w.solid(n, b);
-            let child = w.add(format!("ADVANCED_BREP_SHAPE_REPRESENTATION({},(#{origin},#{solid}),#{ctx})", string(n)));
+            let child = w.add(format!("{}({},(#{origin},#{solid}),#{ctx})", rep_kind(b), string(n)));
             w.add(format!("SHAPE_DEFINITION_REPRESENTATION(#{cpds},#{child})"));
             let nauo = w.add(format!("NEXT_ASSEMBLY_USAGE_OCCURRENCE('{}',{},'',#{pd},#{cpd},$)", i + 1, string(n)));
             let npds = w.add(format!("PRODUCT_DEFINITION_SHAPE('','',#{nauo})"));
