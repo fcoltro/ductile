@@ -64,7 +64,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 }
             });
             ui.menu_button("Transform", |ui| {
-                for c in [Command::Move, Command::Rotate, Command::Scale, Command::MirrorX, Command::MirrorY, Command::MirrorZ, Command::LinearArray, Command::RadialArray] {
+                for c in [Command::Move, Command::Rotate, Command::Scale, Command::MirrorX, Command::MirrorY, Command::MirrorZ, Command::LinearArray, Command::RadialArray, Command::CurveArray] {
                     menu_item(app, ui, c);
                 }
             });

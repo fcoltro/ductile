@@ -4727,6 +4727,24 @@ mod tests {
     }
 
     #[test]
+    fn curve_array_follows_and_turns_with_a_circle() {
+        let mut doc = Document::default();
+        // A small box at the circle's start (radius 5, starting at +X).
+        let bx = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame { origin: DVec3::new(4.9, -0.1, 0.0), ..ductile_geom::Frame::WORLD }, DVec3::splat(0.2)));
+        let c = doc.add_body("Circle", ductile_brep::profile::wire_from_segments(&[ductile_brep::profile::Segment::new(ductile_geom::Curve3::Circle { frame: ductile_geom::Frame::WORLD, radius: 5.0 }, 0.0, std::f64::consts::TAU)]));
+        doc.selection = [Pick::Object(bx), Pick::Object(c)].into_iter().collect();
+        let mut t = CurveArrayTool::new(&doc).unwrap();
+        t.count = 4;
+        assert!(t.commit(&mut doc));
+        assert_eq!(doc.objects.len(), 5);
+        // Copies a quarter turn apart, at the circle's +Y, -X and -Y.
+        let centers: Vec<DVec3> = doc.objects[2..].iter().map(|o| o.body.bbox().center()).collect();
+        for want in [DVec3::new(0.0, 5.0, 0.1), DVec3::new(-5.0, 0.0, 0.1), DVec3::new(0.0, -5.0, 0.1)] {
+            assert!(centers.iter().any(|c| c.distance(want) < 1e-2), "{centers:?}");
+        }
+    }
+
+    #[test]
     fn isoparam_untrim_unjoin_and_boundary_edges() {
         let mut doc = Document::default();
         let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 2.0, 1.0)));
@@ -5096,6 +5114,131 @@ impl Tool for TextTool {
         let id = doc.add_body("Text", ductile_brep::profile::wire_from_segments(&segs));
         doc.selection.clear();
         doc.selection.insert(Pick::Object(id));
+        true
+    }
+}
+
+// ---------------------------------------------------------- Curve array ----
+
+/// Copies of the selected objects spaced evenly along a selected curve
+/// (the longest selected curve is the path), turning with it.
+pub struct CurveArrayTool {
+    targets: Vec<(ObjectId, std::sync::Arc<Body>)>,
+    /// The path as points by arc length with their tangents.
+    path: Vec<(f64, DVec3, DVec3)>,
+    closed: bool,
+    pub count: usize,
+    pub align: bool,
+}
+
+impl CurveArrayTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let ids = doc.selected_objects();
+        let length = |id: &ObjectId| doc.object(*id).map_or(0.0, |o| o.body.edges.iter().map(|e| e.length()).sum::<f64>());
+        let path_id = ids.iter().filter(|id| doc.object(**id).is_some_and(|o| o.body.kind == ductile_brep::BodyKind::Wire)).max_by(|a, b| length(a).total_cmp(&length(b))).copied()?;
+        let targets: Vec<_> = ids.iter().filter(|id| **id != path_id).filter_map(|id| doc.object(*id).map(|o| (*id, o.body.clone()))).collect();
+        if targets.is_empty() {
+            return None;
+        }
+        let chain = ductile_brep::profile::wire_chains(&doc.object(path_id)?.body).into_iter().next()?;
+        let mut path: Vec<(f64, DVec3, DVec3)> = vec![];
+        for seg in &chain.segments {
+            let n = 64;
+            for i in 0..=n {
+                let f = i as f64 / n as f64;
+                let t = if seg.reversed { seg.t1 + (seg.t0 - seg.t1) * f } else { seg.t0 + (seg.t1 - seg.t0) * f };
+                let p = seg.curve.point(t);
+                let tan = seg.tangent_at(t).normalize_or_zero();
+                let s = path.last().map_or(0.0, |l| l.0 + l.1.distance(p));
+                if path.last().is_some_and(|l| l.1.distance(p) < 1e-12) {
+                    continue;
+                }
+                path.push((s, p, tan));
+            }
+        }
+        if path.len() < 2 {
+            return None;
+        }
+        let closed = chain.is_closed();
+        Some(Self { targets, path, closed, count: 5, align: true })
+    }
+
+    /// Point and tangent at arc length `s`.
+    fn at(&self, s: f64) -> (DVec3, DVec3) {
+        let i = self.path.partition_point(|x| x.0 < s).clamp(1, self.path.len() - 1);
+        let (a, b) = (self.path[i - 1], self.path[i]);
+        let f = if b.0 > a.0 { ((s - a.0) / (b.0 - a.0)).clamp(0.0, 1.0) } else { 0.0 };
+        (a.1.lerp(b.1, f), a.2.lerp(b.2, f).normalize_or(a.2))
+    }
+
+    fn copies(&self) -> Vec<(ObjectId, Body)> {
+        let total = self.path.last().unwrap().0;
+        let n = self.count.max(2);
+        let step = if self.closed { total / n as f64 } else { total / (n - 1) as f64 };
+        let (p0, t0) = self.at(0.0);
+        (1..n)
+            .flat_map(|k| {
+                let (p, t) = self.at(step * k as f64);
+                let r = if self.align { ductile_geom::DQuat::from_rotation_arc(t0, t) } else { ductile_geom::DQuat::IDENTITY };
+                let m = ductile_geom::DMat4::from_translation(p) * ductile_geom::DMat4::from_quat(r) * ductile_geom::DMat4::from_translation(-p0);
+                self.targets.iter().map(move |(id, b)| (*id, b.transformed(&m)))
+            })
+            .collect()
+    }
+}
+
+impl Tool for CurveArrayTool {
+    fn name(&self) -> &'static str {
+        "Curve array"
+    }
+    fn hint(&self) -> String {
+        format!("Curve array: {} copies along the curve; set the count in the panel or type it, Enter to finish", self.count)
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let mut out: Option<Body> = None;
+        for (_, b) in self.copies() {
+            match &mut out {
+                None => out = Some(b),
+                Some(o) => o.append(&b),
+            }
+        }
+        out
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut n = self.count as f64;
+        let mut ch = false;
+        if drag_value(ui, "Count", &mut n, 0.1) {
+            self.count = (n.round() as usize).clamp(2, 500);
+            ch = true;
+        }
+        ch |= ui.checkbox(&mut self.align, "Turn with the curve").changed();
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        if let Some(v) = v {
+            self.count = (v.round() as usize).clamp(2, 500);
+        }
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let copies = self.copies();
+        if copies.is_empty() {
+            return false;
+        }
+        doc.selection.clear();
+        for (id, b) in copies {
+            let (name, group, color) = doc.object(id).map(|o| (o.name.clone(), o.group, o.color)).unwrap_or(("Copy".into(), None, crate::document::DEFAULT_COLOR));
+            let new = doc.add_body(&name, b);
+            if let Some(o) = doc.objects.iter_mut().find(|o| o.id == new) {
+                (o.group, o.color) = (group, color);
+            }
+            doc.selection.insert(Pick::Object(new));
+        }
         true
     }
 }
