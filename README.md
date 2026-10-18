@@ -139,6 +139,10 @@ code from them.
 - Measure (palette or View menu): with two things selected, the shortest
   distance between them drawn as a dimension (the angle too for two
   planes); with one, its length, radius, area or volume.
+- Section analysis (the Section button): cuts the scene away beyond a
+  plane along the construction plane's normal, through the scene's centre;
+  solids show their cut inside as a cap. Drag the offset, or Flip to keep
+  the other side. Headless: `--section`.
 - Move (G) / rotate (R) / scale (S) / mirror (Alt+X), linear and radial
   arrays, undo/redo. Mirror reflects across the construction plane,
   or across a selected planar face; a solid mirrored across its own face is

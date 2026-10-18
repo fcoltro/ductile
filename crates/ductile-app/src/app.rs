@@ -22,6 +22,7 @@ pub struct Options {
     pub demo: bool,
     pub zebra: bool,
     pub curvature: bool,
+    pub section: bool,
     /// Camera override: target x, y, z, distance, yaw and pitch in degrees.
     pub camera: Option<[f64; 6]>,
     /// Index of an object to select at start (for screenshots).
@@ -55,6 +56,9 @@ pub struct DuctileApp {
     pub show_edges: bool,
     /// Curvature combs on the selected curves and edges.
     pub show_curvature: bool,
+    /// Section analysis: a plane through a point, with its normal, and an
+    /// offset along it; the scene beyond it is cut away.
+    pub section: Option<(DVec3, DVec3, f64)>,
     /// Length of the longer comb teeth, as a fraction of the curves' size.
     pub comb_scale: f64,
     /// The last measurement, shown while the selection it measured stays.
@@ -128,6 +132,7 @@ impl DuctileApp {
             show_edges: true,
             show_curvature: false,
             comb_scale: 0.1,
+            section: None,
             measurement: None,
             palette_open: false,
             palette_query: String::new(),
@@ -156,6 +161,9 @@ impl DuctileApp {
             app.toggle_zebra();
         }
         app.show_curvature = opts.curvature;
+        if opts.section {
+            app.toggle_section();
+        }
         if let Some(id) = opts.select.and_then(|i| app.doc.objects.get(i)).map(|o| o.id) {
             app.doc.selection.insert(Pick::Object(id));
         }
@@ -232,6 +240,7 @@ impl DuctileApp {
             let mut st = ObjectStyle::default();
             st.color = [o.color[0], o.color[1], o.color[2], 1.0];
             st.visible = o.visible && !hidden.contains(&o.id);
+            st.solid = o.body.kind == ductile_brep::BodyKind::Solid;
             if self.doc.selection.contains(&Pick::Object(o.id)) {
                 st.state = 2;
             } else if self.doc.hover == Some(Pick::Object(o.id)) {
@@ -539,6 +548,10 @@ impl DuctileApp {
         let px = [(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32];
         if let (Some(r), Some(rs)) = (self.renderer.as_mut(), frame.wgpu_render_state()) {
             let mut egui_renderer = rs.renderer.write();
+            r.section = self.section.map(|(o, n, d)| {
+                let n = n.normalize();
+                [n.x as f32, n.y as f32, n.z as f32, -(n.dot(o) + d) as f32]
+            });
             let tex = r.render(&mut egui_renderer, &self.camera, px, &lines, &overlay);
             drop(egui_renderer);
             ui.painter().image(tex, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
@@ -1142,6 +1155,15 @@ impl DuctileApp {
         if let Some(r) = self.renderer.as_mut() {
             r.zebra = !r.zebra;
         }
+    }
+
+    /// Section analysis on or off: the plane starts through the scene's
+    /// centre, facing along the construction plane's normal.
+    pub fn toggle_section(&mut self) {
+        self.section = match self.section {
+            Some(_) => None,
+            None => Some((self.doc.bbox().center(), self.cplane.frame.z, 0.0)),
+        };
     }
 
     pub fn toggle_xray(&mut self) {

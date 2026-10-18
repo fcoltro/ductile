@@ -8,6 +8,9 @@ struct Camera {
     viewport: vec4<f32>,
     // Camera forward direction (from eye into the scene); w: 1 for zebra stripes.
     forward: vec4<f32>,
+    // Section plane: points with dot(xyz, p) + w > 0 are cut away; off
+    // when xyz is zero.
+    section: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> cam: Camera;
 
@@ -15,7 +18,7 @@ struct Object {
     color: vec4<f32>,
     hover_color: vec4<f32>,
     select_color: vec4<f32>,
-    // x: whole-object state (0 none, 1 hovered, 2 selected); y: x-ray alpha flag.
+    // x: whole-object state (0 none, 1 hovered, 2 selected); y: x-ray alpha flag; z: 1 for a solid.
     flags: vec4<u32>,
 };
 @group(1) @binding(0) var<uniform> obj: Object;
@@ -96,8 +99,20 @@ fn zebra(c: vec3<f32>, n_in: vec3<f32>, world: vec3<f32>, front: bool) -> vec3<f
     return mix(vec3<f32>(0.06), vec3<f32>(0.96), clamp(bar, 0.0, 1.0)) * 0.85 + c * 0.15;
 }
 
+fn cut(world: vec3<f32>) -> bool {
+    let on = dot(cam.section.xyz, cam.section.xyz) > 0.0;
+    return on && dot(cam.section.xyz, world) + cam.section.w > 0.0;
+}
+
 @fragment
 fn fs_mesh(o: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    if (cut(o.world)) {
+        discard;
+    }
+    // Looking into a cut solid shows its inside: paint it as a flat cap.
+    if (!front && obj.flags.z == 1u && dot(cam.section.xyz, cam.section.xyz) > 0.0) {
+        return vec4<f32>(obj.color.rgb * 0.55 + vec3<f32>(0.25, 0.08, 0.08), obj.color.a);
+    }
     var base = obj.color.rgb;
     let fs = face_state[o.face];
     if (obj.flags.x == 2u || fs == 2u) {
@@ -129,6 +144,7 @@ struct LineOut {
     @location(1) rel: vec2<f32>,
     @location(2) @interpolate(flat) seg: vec2<f32>,
     @location(3) @interpolate(flat) halfw: f32,
+    @location(4) world: vec3<f32>,
 };
 
 fn clip_near(a: vec4<f32>, b: vec4<f32>) -> vec4<f32> {
@@ -187,11 +203,27 @@ fn vs_line(@builtin(vertex_index) vi: u32, l: LineIn) -> LineOut {
     o.rel = px - s0;
     o.seg = d;
     o.halfw = halfw;
+    o.world = l.p0;
+    if (use_end) {
+        o.world = l.p1;
+    }
     return o;
 }
 
 @fragment
 fn fs_line(o: LineOut) -> @location(0) vec4<f32> {
+    if (cut(o.world)) {
+        discard;
+    }
+    return line_color(o);
+}
+
+@fragment
+fn fs_overlay(o: LineOut) -> @location(0) vec4<f32> {
+    return line_color(o);
+}
+
+fn line_color(o: LineOut) -> vec4<f32> {
     let l2 = dot(o.seg, o.seg);
     var t = 0.0;
     if (l2 > 1e-8) {

@@ -80,6 +80,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                     Command::ToggleXray,
                     Command::ToggleZebra,
                     Command::ToggleCurvature,
+                    Command::ToggleSection,
                     Command::Measure,
                     Command::ToggleSnap,
                 ] {
@@ -123,6 +124,16 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 }
                 if ui.add(egui::Button::new("Curvature").selected(app.show_curvature)).on_hover_text("Curvature combs on the selected curves and edges").clicked() {
                     app.pending.push(Command::ToggleCurvature);
+                }
+                if let Some((_, n, d)) = app.section.as_mut() {
+                    if ui.small_button("Flip").on_hover_text("Cut away the other side").clicked() {
+                        *n = -*n;
+                        *d = -*d;
+                    }
+                    ui.add(egui::DragValue::new(d).speed(0.01).max_decimals(3)).on_hover_text("Section offset");
+                }
+                if ui.add(egui::Button::new("Section").selected(app.section.is_some())).on_hover_text("Cut the scene away beyond a plane along the construction plane's normal").clicked() {
+                    app.pending.push(Command::ToggleSection);
                 }
                 if ui.add(egui::Button::new("Zebra").selected(app.zebra())).clicked() {
                     app.pending.push(Command::ToggleZebra);

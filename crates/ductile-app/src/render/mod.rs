@@ -20,6 +20,7 @@ struct CameraUniform {
     eye: [f32; 4],
     viewport: [f32; 4],
     forward: [f32; 4],
+    section: [f32; 4],
 }
 
 #[repr(C)]
@@ -68,6 +69,8 @@ pub struct ObjectStyle {
     /// 0 = normal, 1 = hovered, 2 = selected (whole object).
     pub state: u32,
     pub visible: bool,
+    /// A closed solid: its inside shows as a cap where a section cuts it.
+    pub solid: bool,
 }
 
 impl Default for ObjectStyle {
@@ -78,6 +81,7 @@ impl Default for ObjectStyle {
             select_color: [0.95, 0.70, 0.25, 1.0],
             state: 0,
             visible: true,
+            solid: false,
         }
     }
 }
@@ -119,6 +123,9 @@ pub struct ViewportRenderer {
     /// Zebra stripes (reflections of a striped room) for judging surface
     /// continuity.
     pub zebra: bool,
+    /// Section analysis: the plane (normal, offset) beyond which the
+    /// scene is cut away.
+    pub section: Option<[f32; 4]>,
 }
 
 impl ViewportRenderer {
@@ -237,7 +244,7 @@ impl ViewportRenderer {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &line_attrs,
         };
-        let make_line = |label: &str, compare: wgpu::CompareFunction| {
+        let make_line = |label: &str, compare: wgpu::CompareFunction, fs: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&line_layout),
@@ -249,7 +256,7 @@ impl ViewportRenderer {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fs_line"),
+                    entry_point: Some(fs),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: COLOR_FORMAT,
                         blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -264,8 +271,8 @@ impl ViewportRenderer {
                 cache: None,
             })
         };
-        let line_pipeline = make_line("lines", wgpu::CompareFunction::LessEqual);
-        let overlay_pipeline = make_line("overlay lines", wgpu::CompareFunction::Always);
+        let line_pipeline = make_line("lines", wgpu::CompareFunction::LessEqual, "fs_line");
+        let overlay_pipeline = make_line("overlay lines", wgpu::CompareFunction::Always, "fs_overlay");
         let bg_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("bg layout"),
             bind_group_layouts: &[],
@@ -307,6 +314,7 @@ impl ViewportRenderer {
             objects: HashMap::new(),
             xray: false,
             zebra: false,
+            section: None,
         }
     }
 
@@ -385,7 +393,7 @@ impl ViewportRenderer {
             color: style.color,
             hover_color: style.hover_color,
             select_color: style.select_color,
-            flags: [style.state, 0, 0, 0],
+            flags: [style.state, 0, style.solid as u32, 0],
         };
         self.queue.write_buffer(&o.obj_buf, 0, bytemuck::bytes_of(&u));
         let mut fs = vec![0u32; o.face_count];
@@ -480,6 +488,7 @@ impl ViewportRenderer {
                 0.0008,
             ],
             forward: fwd.as_vec3().extend(if self.zebra { 1.0 } else { 0.0 }).into(),
+            section: self.section.unwrap_or([0.0; 4]),
         };
         self.queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(&cu));
         let line_buf = (!lines.is_empty()).then(|| {
