@@ -114,6 +114,9 @@ pub fn status_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
     egui::Panel::bottom("status").frame(egui::Frame::new().fill(theme::PANEL_DARK).inner_margin(egui::Margin::symmetric(10, 4))).show(ui, |ui| {
         ui.horizontal(|ui| {
             let hint = app.tool.as_ref().map(|t| t.hint()).unwrap_or_else(|| app.status.clone());
+            if app.tool.as_ref().is_some_and(|t| t.busy()) {
+                ui.add(egui::Spinner::new().size(12.0).color(theme::TEXT_DIM));
+            }
             ui.label(RichText::new(hint).color(theme::TEXT));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let n = app.doc.selection.len();

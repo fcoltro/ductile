@@ -9,7 +9,7 @@ use crate::picking;
 use crate::render::{LineInstance, ObjectStyle, ViewportRenderer};
 use crate::theme;
 use crate::tools::{self, CPlane, PointerInfo, Tool, ToolOutcome, TransformKind, TransformTool};
-use ductile_brep::BodyMesh;
+use ductile_brep::{Body, BodyMesh};
 use glam::{DVec2, DVec3};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +42,8 @@ pub struct DuctileApp {
     pub tool: Option<Box<dyn Tool>>,
     tool_from_key: bool,
     preview_shown: bool,
+    /// The body last uploaded as the preview, to skip re-meshing it.
+    preview_body: Option<Body>,
     pub status: String,
     box_select: Option<BoxSelect>,
     typed: String,
@@ -101,6 +103,7 @@ impl DuctileApp {
             gizmo_hover: None,
             gizmo_drag: false,
             preview_shown: false,
+            preview_body: None,
             status: "Welcome to Ductile. Press Space for the command palette, F1 for help.".into(),
             box_select: None,
             typed: String::new(),
@@ -232,6 +235,10 @@ impl DuctileApp {
     fn update_preview(&mut self) {
         let Some(r) = self.renderer.as_mut() else { return };
         let body = self.tool.as_ref().and_then(|t| t.preview(&self.doc));
+        if body.is_some() && body == self.preview_body {
+            return;
+        }
+        self.preview_body = body.clone();
         match body {
             Some(b) => {
                 let mesh = mesh_body(&b);

@@ -6,6 +6,7 @@
 //! under the terms of the GNU General Public License version 3.
 
 mod app;
+mod background;
 mod camera;
 mod commands;
 mod document;

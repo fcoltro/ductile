@@ -5,6 +5,7 @@
 //! show a live preview, accept typed values in the command panel, and commit
 //! a single undoable change to the document when finished.
 
+use crate::background::Background;
 use crate::camera::Ray;
 use crate::document::{Document, ObjectId, Pick, SelectMode};
 use crate::render::LineInstance;
@@ -70,6 +71,10 @@ pub trait Tool {
     fn typed_value(&mut self, _v: Option<f64>) {}
     /// Axis constraint keys.
     fn constrain_axis(&mut self, _axis: usize) {}
+    /// Whether a preview is still computing in the background.
+    fn busy(&self) -> bool {
+        false
+    }
 }
 
 fn drag_value(ui: &mut egui::Ui, label: &str, v: &mut f64, speed: f64) -> bool {
@@ -732,7 +737,7 @@ pub struct ExtrudeTool {
     /// face's outward normal.
     onto: Option<(ObjectId, std::sync::Arc<Body>, DVec3)>,
     pub op: ExtrudeOp,
-    cache: std::cell::RefCell<Option<(f64, ExtrudeOp, Option<Body>, Option<String>)>>,
+    bg: Background<(f64, ExtrudeOp), (Option<Body>, Option<String>)>,
 }
 
 /// What an extrusion of curves drawn on a solid does to that solid.
@@ -1187,7 +1192,7 @@ impl ExtrudeTool {
                     let normal = ductile_brep::profile::loops_plane(&open).filter(|_| open.iter().any(|c| c.segments.iter().any(|s| !s.curve.is_linear()) || c.segments.len() > 1)).map(|f| f.z).unwrap_or(current_cplane().frame.z);
                     let poly: Vec<DVec3> = open.iter().flat_map(|c| c.polygon(1e-3)).collect();
                     let base = poly.iter().copied().sum::<DVec3>() / poly.len().max(1) as f64;
-                    return Some(Self { target: None, body: None, regions, open, normal, base, start_t: None, distance: 0.0, typed: None, onto: None, op: ExtrudeOp::Auto, cache: std::cell::RefCell::new(None) });
+                    return Some(Self { target: None, body: None, regions, open, normal, base, start_t: None, distance: 0.0, typed: None, onto: None, op: ExtrudeOp::Auto, bg: Background::default() });
                 }
                 (None, None, regions)
             }
@@ -1207,7 +1212,7 @@ impl ExtrudeTool {
             typed: None,
             onto,
             op: ExtrudeOp::Auto,
-            cache: std::cell::RefCell::new(None),
+            bg: Background::default(),
         })
     }
 
@@ -1215,26 +1220,29 @@ impl ExtrudeTool {
         self.typed.unwrap_or(self.distance)
     }
 
-    fn result(&self) -> (Option<Body>, Option<String>) {
+    fn key(&self) -> (f64, ExtrudeOp) {
+        (self.value(), self.op)
+    }
+
+    fn job(&self) -> Box<dyn FnOnce() -> (Option<Body>, Option<String>) + Send> {
         use ductile_brep::ops::boolean::{boolean, BoolOp};
         let d = self.value();
-        if let Some((cd, cop, b, e)) = &*self.cache.borrow() {
-            if *cd == d && *cop == self.op {
-                return (b.clone(), e.clone());
+        let (regions, open, normal, body) = (self.regions.clone(), self.open.clone(), self.normal, self.body.clone());
+        let onto = self.on_solid_op(d).zip(self.onto.as_ref().map(|o| o.1.clone()));
+        Box::new(move || {
+            if d.abs() < 1e-9 {
+                return (None, None);
             }
-        }
-        let out = if d.abs() < 1e-9 {
-            (None, None)
-        } else if self.regions.is_empty() {
-            match ductile_brep::ops::sheet::extrude_sheet(&self.open, self.normal * d) {
-                Some(b) => (Some(b), None),
-                None => (None, Some("could not extrude the curves".into())),
+            if regions.is_empty() {
+                return match ductile_brep::ops::sheet::extrude_sheet(&open, normal * d) {
+                    Some(b) => (Some(b), None),
+                    None => (None, Some("could not extrude the curves".into())),
+                };
             }
-        } else {
             let mut acc: Result<Option<Body>, String> = Ok(None);
-            for r in &self.regions {
+            for r in &regions {
                 let Ok(prev) = acc else { break };
-                acc = match ductile_brep::ops::extrude::extrude_region(r, self.normal * d) {
+                acc = match ductile_brep::ops::extrude::extrude_region(r, normal * d) {
                     None => Err("could not build the extrusion".into()),
                     Some(prism) => match prev {
                         None => Ok(Some(prism)),
@@ -1242,15 +1250,15 @@ impl ExtrudeTool {
                     },
                 };
             }
-            match (acc, &self.body) {
+            match (acc, &body) {
                 (Err(e), _) => (None, Some(e)),
                 (Ok(None), _) => (None, None),
-                (Ok(Some(prism)), None) => match (self.on_solid_op(d), &self.onto) {
-                    (Some(op), Some((_, solid, _))) => match boolean(solid, &prism, op) {
+                (Ok(Some(prism)), None) => match &onto {
+                    Some((op, solid)) => match boolean(solid, &prism, *op) {
                         Ok(b) => (Some(b), None),
                         Err(e) => (None, Some(e.to_string())),
                     },
-                    _ => (Some(prism), None),
+                    None => (Some(prism), None),
                 },
                 (Ok(Some(prism)), Some(body)) => {
                     let op = if d > 0.0 { BoolOp::Union } else { BoolOp::Difference };
@@ -1260,9 +1268,7 @@ impl ExtrudeTool {
                     }
                 }
             }
-        };
-        *self.cache.borrow_mut() = Some((d, self.op, out.0.clone(), out.1.clone()));
-        out
+        })
     }
 
     /// The boolean an extrusion of curves applies to the solid they were
@@ -1284,7 +1290,7 @@ impl Tool for ExtrudeTool {
         "Extrude"
     }
     fn hint(&self) -> String {
-        match self.cache.borrow().as_ref().and_then(|c| c.3.clone()) {
+        match self.bg.latest().and_then(|c| c.1) {
             Some(e) => format!("Extrude failed: {e}"),
             None => format!("Extrude: move along the normal or type a distance ({:.4}), click or Enter to finish", self.value()),
         }
@@ -1301,7 +1307,10 @@ impl Tool for ExtrudeTool {
         ToolOutcome::Continue
     }
     fn preview(&self, _doc: &Document) -> Option<Body> {
-        self.result().0
+        self.bg.get(&self.key(), || self.job()).and_then(|r| r.0)
+    }
+    fn busy(&self) -> bool {
+        self.bg.busy()
     }
     fn guides(&self, out: &mut Vec<LineInstance>) {
         let tip = self.base + self.normal * self.value();
@@ -1327,7 +1336,7 @@ impl Tool for ExtrudeTool {
     fn hidden_objects(&self) -> Vec<ObjectId> {
         let on = self.onto.as_ref().filter(|_| self.on_solid_op(self.value()).is_some()).map(|o| o.0);
         match self.target.or(on) {
-            Some(t) if self.result().0.is_some() => vec![t],
+            Some(t) if self.bg.latest().and_then(|r| r.0).is_some() => vec![t],
             _ => vec![],
         }
     }
@@ -1335,7 +1344,7 @@ impl Tool for ExtrudeTool {
         self.typed = v;
     }
     fn commit(&mut self, doc: &mut Document) -> bool {
-        let Some(b) = self.result().0 else { return false };
+        let Some(b) = self.bg.wait(&self.key(), || self.job()).0 else { return false };
         doc.selection.clear();
         let on = self.onto.as_ref().filter(|_| self.on_solid_op(self.value()).is_some()).map(|o| o.0);
         match self.target.or(on) {
@@ -1684,7 +1693,7 @@ pub struct FilletTool {
     pub variable: bool,
     pub end_radius: f64,
     typed: Option<f64>,
-    cache: std::cell::RefCell<Option<((f64, BlendShape, bool, f64), Option<Body>, Option<String>)>>,
+    bg: Background<(f64, BlendShape, bool, f64), (Option<Body>, Option<String>)>,
 }
 
 impl FilletTool {
@@ -1708,42 +1717,41 @@ impl FilletTool {
             .sum();
         let dir = (-n).try_normalize().unwrap_or(DVec3::Z);
         let shape = if chamfer { BlendShape::Chamfer } else { BlendShape::Round };
-        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, shape, variable: false, end_radius: 1.0, typed: None, cache: std::cell::RefCell::new(None) })
+        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, shape, variable: false, end_radius: 1.0, typed: None, bg: Background::default() })
     }
 
     fn value(&self) -> f64 {
         self.typed.unwrap_or(self.radius)
     }
 
-    fn result(&self) -> (Option<Body>, Option<String>) {
+    fn key(&self) -> (f64, BlendShape, bool, f64) {
+        (self.value(), self.shape, self.variable, self.end_radius)
+    }
+
+    /// The blend computation for the current values, owning its inputs.
+    fn job(&self) -> Box<dyn FnOnce() -> (Option<Body>, Option<String>) + Send> {
         use ductile_brep::ops::fillet::{blend_edges, blend_edges_variable, Blend};
-        let r = self.value();
-        let key = (r, self.shape, self.variable, self.end_radius);
-        if let Some((k, b, e)) = &*self.cache.borrow() {
-            if *k == key {
-                return (b.clone(), e.clone());
+        let (body, edges, (r, shape, variable, end_radius)) = (self.body.clone(), self.edges.clone(), self.key());
+        Box::new(move || {
+            if r <= 1e-9 {
+                (None, None)
+            } else if variable && shape != BlendShape::Chamfer {
+                match blend_edges_variable(&body, &edges, r, end_radius.max(1e-6), shape == BlendShape::Smooth) {
+                    Ok(b) => (Some(b), None),
+                    Err(e) => (None, Some(e.to_string())),
+                }
+            } else {
+                let blend = match shape {
+                    BlendShape::Round => Blend::Fillet(r),
+                    BlendShape::Smooth => Blend::Smooth(r),
+                    BlendShape::Chamfer => Blend::Chamfer(r),
+                };
+                match blend_edges(&body, &edges, blend) {
+                    Ok(b) => (Some(b), None),
+                    Err(e) => (None, Some(e.to_string())),
+                }
             }
-        }
-        let out = if r <= 1e-9 {
-            (None, None)
-        } else if self.variable && self.shape != BlendShape::Chamfer {
-            match blend_edges_variable(&self.body, &self.edges, r, self.end_radius.max(1e-6), self.shape == BlendShape::Smooth) {
-                Ok(b) => (Some(b), None),
-                Err(e) => (None, Some(e.to_string())),
-            }
-        } else {
-            let blend = match self.shape {
-                BlendShape::Round => Blend::Fillet(r),
-                BlendShape::Smooth => Blend::Smooth(r),
-                BlendShape::Chamfer => Blend::Chamfer(r),
-            };
-            match blend_edges(&self.body, &self.edges, blend) {
-                Ok(b) => (Some(b), None),
-                Err(e) => (None, Some(e.to_string())),
-            }
-        };
-        *self.cache.borrow_mut() = Some((key, out.0.clone(), out.1.clone()));
-        out
+        })
     }
 }
 
@@ -1756,7 +1764,7 @@ impl Tool for FilletTool {
         }
     }
     fn hint(&self) -> String {
-        match self.cache.borrow().as_ref().and_then(|c| c.2.clone()) {
+        match self.bg.latest().and_then(|c| c.1) {
             Some(e) => format!("{} failed: {e}", self.name()),
             None => format!("{}: drag or type a {} ({:.4}), click or Enter to finish", self.name(), if self.shape == BlendShape::Chamfer { "distance" } else { "radius" }, self.value()),
         }
@@ -1773,7 +1781,10 @@ impl Tool for FilletTool {
         ToolOutcome::Continue
     }
     fn preview(&self, _doc: &Document) -> Option<Body> {
-        self.result().0
+        self.bg.get(&self.key(), || self.job()).and_then(|r| r.0)
+    }
+    fn busy(&self) -> bool {
+        self.bg.busy()
     }
     fn guides(&self, out: &mut Vec<LineInstance>) {
         let tip = self.base + self.dir * self.value();
@@ -1804,7 +1815,7 @@ impl Tool for FilletTool {
         ch
     }
     fn hidden_objects(&self) -> Vec<ObjectId> {
-        if self.result().0.is_some() {
+        if self.bg.latest().and_then(|r| r.0).is_some() {
             vec![self.target]
         } else {
             vec![]
@@ -1814,7 +1825,7 @@ impl Tool for FilletTool {
         self.typed = v.map(|x| x.abs());
     }
     fn commit(&mut self, doc: &mut Document) -> bool {
-        let Some(b) = self.result().0 else { return false };
+        let Some(b) = self.bg.wait(&self.key(), || self.job()).0 else { return false };
         doc.replace_body(self.target, b);
         doc.selection.clear();
         true
@@ -1847,7 +1858,7 @@ pub struct ShellTool {
     pub value: f64,
     pub mode: OffsetMode,
     typed: Option<f64>,
-    cache: std::cell::RefCell<Option<(f64, OffsetMode, Option<Body>, Option<String>)>>,
+    bg: Background<(f64, OffsetMode), (Option<Body>, Option<String>)>,
 }
 
 impl ShellTool {
@@ -1874,36 +1885,34 @@ impl ShellTool {
         let uv = b.face(f).surface.project(base, None);
         let n = b.face_normal(f, uv.x, uv.y);
         let dir = if offset { n } else { -n };
-        Some(Self { target, body: o.body.clone(), open: if mode == OffsetMode::Solid { vec![] } else { open }, base, dir, start_t: None, value: 0.0, mode, typed: None, cache: std::cell::RefCell::new(None) })
+        Some(Self { target, body: o.body.clone(), open: if mode == OffsetMode::Solid { vec![] } else { open }, base, dir, start_t: None, value: 0.0, mode, typed: None, bg: Background::default() })
     }
 
     fn amount(&self) -> f64 {
         self.typed.unwrap_or(self.value)
     }
 
-    fn result(&self) -> (Option<Body>, Option<String>) {
+    fn key(&self) -> (f64, OffsetMode) {
+        (self.amount(), self.mode)
+    }
+
+    fn job(&self) -> Box<dyn FnOnce() -> (Option<Body>, Option<String>) + Send> {
         use ductile_brep::ops::offset::{offset_body, shell};
-        let t = self.amount();
-        if let Some((ct, co, b, e)) = &*self.cache.borrow() {
-            if *ct == t && *co == self.mode {
-                return (b.clone(), e.clone());
+        let (body, open, (t, mode)) = (self.body.clone(), self.open.clone(), self.key());
+        Box::new(move || {
+            if t.abs() <= 1e-9 || (mode == OffsetMode::Shell && t < 0.0) {
+                return (None, None);
             }
-        }
-        let out = if t.abs() <= 1e-9 || (self.mode == OffsetMode::Shell && t < 0.0) {
-            (None, None)
-        } else {
-            let r = match self.mode {
-                OffsetMode::Shell => shell(&self.body, &self.open, t),
-                OffsetMode::Solid => offset_body(&self.body, &|_| t),
-                OffsetMode::Faces => offset_body(&self.body, &|f| if self.open.contains(&f) { t } else { 0.0 }),
+            let r = match mode {
+                OffsetMode::Shell => shell(&body, &open, t),
+                OffsetMode::Solid => offset_body(&body, &|_| t),
+                OffsetMode::Faces => offset_body(&body, &|f| if open.contains(&f) { t } else { 0.0 }),
             };
             match r {
                 Ok(b) => (Some(b), None),
                 Err(e) => (None, Some(e.to_string())),
             }
-        };
-        *self.cache.borrow_mut() = Some((t, self.mode, out.0.clone(), out.1.clone()));
-        out
+        })
     }
 }
 
@@ -1916,7 +1925,7 @@ impl Tool for ShellTool {
         }
     }
     fn hint(&self) -> String {
-        match self.cache.borrow().as_ref().and_then(|c| c.3.clone()) {
+        match self.bg.latest().and_then(|c| c.1) {
             Some(e) => format!("{} failed: {e}", self.name()),
             None => format!("{}: drag or type a {} ({:.4}), click or Enter to finish", self.name(), if self.mode != OffsetMode::Shell { "distance" } else { "thickness" }, self.amount()),
         }
@@ -1934,7 +1943,10 @@ impl Tool for ShellTool {
         ToolOutcome::Continue
     }
     fn preview(&self, _doc: &Document) -> Option<Body> {
-        self.result().0
+        self.bg.get(&self.key(), || self.job()).and_then(|r| r.0)
+    }
+    fn busy(&self) -> bool {
+        self.bg.busy()
     }
     fn guides(&self, out: &mut Vec<LineInstance>) {
         let tip = self.base + self.dir * self.amount();
@@ -1950,7 +1962,7 @@ impl Tool for ShellTool {
         ch
     }
     fn hidden_objects(&self) -> Vec<ObjectId> {
-        if self.result().0.is_some() {
+        if self.bg.latest().and_then(|r| r.0).is_some() {
             vec![self.target]
         } else {
             vec![]
@@ -1960,7 +1972,7 @@ impl Tool for ShellTool {
         self.typed = v.map(|x| if self.mode != OffsetMode::Shell { x } else { x.abs() });
     }
     fn commit(&mut self, doc: &mut Document) -> bool {
-        let Some(b) = self.result().0 else { return false };
+        let Some(b) = self.bg.wait(&self.key(), || self.job()).0 else { return false };
         doc.replace_body(self.target, b);
         doc.selection.clear();
         true
