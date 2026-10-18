@@ -3,3 +3,4 @@
 
 pub mod extrude;
 pub mod boolean;
+pub mod heal;

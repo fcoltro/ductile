@@ -346,7 +346,7 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
             }
         })
         .collect();
-    let body = assemble(&w, faces, tol);
+    let body = super::heal::simplify(&assemble(&w, faces, tol));
     let open = open_edges(&body);
     if debug() && open > 0 {
         let mut uses: HashMap<EdgeId, Vec<(usize, bool)>> = HashMap::new();
