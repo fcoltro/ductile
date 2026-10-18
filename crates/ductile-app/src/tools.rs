@@ -4403,6 +4403,26 @@ mod tests {
     }
 
     #[test]
+    fn text_extrudes_into_letters_with_holes() {
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        let mut t = TextTool::new();
+        t.text = "Ob".into();
+        t.height = 2.0;
+        click(&mut t, &doc, DVec3::ZERO, true);
+        assert!(t.commit(&mut doc));
+        // Two letters, each a region with a hole.
+        assert_eq!(selected_curve_regions(&doc).len(), 2);
+        let mut e = ExtrudeTool::new(&doc).unwrap();
+        e.typed_value(Some(0.5));
+        assert!(e.commit(&mut doc));
+        let solids: Vec<_> = doc.objects.iter().filter(|o| o.body.kind == ductile_brep::BodyKind::Solid).collect();
+        assert!(!solids.is_empty());
+        let v: f64 = solids.iter().map(|o| volume(&o.body).abs()).sum();
+        assert!(v > 0.3 && v < 3.0, "{v}");
+    }
+
+    #[test]
     fn rectangle_with_circle_hole_extrudes() {
         set_current_cplane(CPlane::default());
         let mut doc = Document::default();
@@ -4974,4 +4994,108 @@ pub fn reverse_selected_sheets(doc: &mut Document) -> usize {
         doc.replace_body(*id, b);
     }
     ids.len()
+}
+
+// ----------------------------------------------------------------- Text ----
+
+/// Text: click where the baseline starts, type the text in the panel; the
+/// letters become closed curves on the construction plane.
+pub struct TextTool {
+    origin: Option<DVec3>,
+    cursor: Option<DVec3>,
+    pub text: String,
+    pub height: f64,
+    /// A font file, or None for the built-in one.
+    font: Option<std::path::PathBuf>,
+    font_bytes: Option<std::sync::Arc<Vec<u8>>>,
+    fonts: Option<Vec<std::path::PathBuf>>,
+    cache: std::cell::RefCell<Option<(String, f64, DVec3, Vec<ductile_brep::profile::Segment>)>>,
+}
+
+impl TextTool {
+    pub fn new() -> Self {
+        Self { origin: None, cursor: None, text: "Ductile".into(), height: 1.0, font: None, font_bytes: None, fonts: None, cache: std::cell::RefCell::new(None) }
+    }
+
+    fn segments(&self) -> Vec<ductile_brep::profile::Segment> {
+        let Some(o) = self.origin.or(self.cursor) else { return vec![] };
+        if let Some((t, h, at, segs)) = &*self.cache.borrow() {
+            if *t == self.text && *h == self.height && *at == o {
+                return segs.clone();
+            }
+        }
+        let font: &[u8] = match &self.font_bytes {
+            Some(b) => b.as_slice(),
+            None => crate::text::default_font(),
+        };
+        let frame = Frame { origin: o, ..current_cplane().frame };
+        let segs: Vec<_> = crate::text::text_loops(font, &self.text, &frame, self.height.abs().max(1e-6)).unwrap_or_default().into_iter().flatten().collect();
+        *self.cache.borrow_mut() = Some((self.text.clone(), self.height, o, segs.clone()));
+        segs
+    }
+}
+
+impl Tool for TextTool {
+    fn name(&self) -> &'static str {
+        "Text"
+    }
+    fn hint(&self) -> String {
+        match self.origin {
+            None => "Text: click where the text starts".into(),
+            Some(_) => "Text: type the text and its height in the panel; click or Enter to finish".into(),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        self.cursor = p.point;
+        if p.clicked {
+            if self.origin.is_some() {
+                return ToolOutcome::Finished;
+            }
+            self.origin = p.point;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let segs = self.segments();
+        (!segs.is_empty()).then(|| ductile_brep::profile::wire_from_segments(&segs))
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut ch = ui.add(egui::TextEdit::multiline(&mut self.text).desired_rows(2).desired_width(180.0)).changed();
+        ch |= drag_value(ui, "Height", &mut self.height, 0.05);
+        let name = |p: &Option<std::path::PathBuf>| p.as_ref().and_then(|p| p.file_stem()).map_or("Ubuntu Light (built in)".to_string(), |s| s.to_string_lossy().into_owned());
+        let mut pick: Option<Option<std::path::PathBuf>> = None;
+        egui::ComboBox::from_label("Font").selected_text(name(&self.font)).width(160.0).show_ui(ui, |ui| {
+            if ui.selectable_label(self.font.is_none(), name(&None)).clicked() {
+                pick = Some(None);
+            }
+            for f in self.fonts.get_or_insert_with(crate::text::system_fonts).iter() {
+                if ui.selectable_label(self.font.as_ref() == Some(f), name(&Some(f.clone()))).clicked() {
+                    pick = Some(Some(f.clone()));
+                }
+            }
+        });
+        if let Some(f) = pick {
+            self.font_bytes = f.as_ref().and_then(|p| std::fs::read(p).ok()).map(std::sync::Arc::new);
+            self.font = if self.font_bytes.is_some() { f } else { None };
+            *self.cache.borrow_mut() = None;
+            ch = true;
+        }
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        if let Some(v) = v {
+            self.height = v.abs();
+        }
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        self.origin = self.origin.or(self.cursor);
+        let segs = self.segments();
+        if segs.is_empty() {
+            return false;
+        }
+        let id = doc.add_body("Text", ductile_brep::profile::wire_from_segments(&segs));
+        doc.selection.clear();
+        doc.selection.insert(Pick::Object(id));
+        true
+    }
 }

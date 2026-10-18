@@ -50,6 +50,9 @@ code from them.
   helix (radius, height and turns; sweep a circle along it for a spring).
   C inside the rectangle, circle and arc commands switches between their
   variants, as in Plasticity.
+  Tangent arc leaves the end of a curve tangentially (D flips it). Text
+  turns letters into closed curves ready to extrude, in the built-in font or
+  any TrueType/OpenType font installed on the system, with a set height.
   Curves drawn separately that meet end to end form one profile. In vertex
   mode (1) spline control points show and can be selected and moved (G).
   Reverse curve flips a curve's direction, Raise degree lifts it exactly

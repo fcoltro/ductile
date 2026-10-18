@@ -20,6 +20,7 @@ mod picking;
 mod recent;
 mod select;
 mod render;
+mod text;
 mod screenshot;
 mod snap;
 mod theme;
