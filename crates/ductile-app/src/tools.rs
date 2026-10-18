@@ -4781,6 +4781,29 @@ mod tests {
     }
 
     #[test]
+    fn place_stands_copies_on_the_face_under_the_cursor() {
+        let mut doc = Document::default();
+        // A tall box on the ground, and a cube to place on its +X side.
+        let wall = doc.add_body("Wall", ductile_brep::primitives::make_box(&ductile_geom::Frame { origin: DVec3::new(-10.0, -1.0, 0.0), ..ductile_geom::Frame::WORLD }, DVec3::new(10.0, 2.0, 4.0)));
+        let cube = doc.add_body("Cube", ductile_brep::primitives::make_box(&ductile_geom::Frame { origin: DVec3::new(5.0, 5.0, 0.0), ..ductile_geom::Frame::WORLD }, DVec3::splat(1.0)));
+        doc.selection = [Pick::Object(cube)].into_iter().collect();
+        let mut t = PlaceTool::new(&doc).unwrap();
+        // Looking along -X at the wall's side, at (0, 0, 2).
+        let info = PointerInfo { ray: Ray { origin: DVec3::new(10.0, 0.0, 2.0), dir: -DVec3::X }, point: None, plane_point: None, clicked: true, world_per_px: 0.01 };
+        t.pointer(&doc, &CPlane::default(), &info);
+        // And once on the top.
+        click(&mut t, &doc, DVec3::new(-5.0, 0.0, 4.0), true);
+        assert!(t.commit(&mut doc));
+        assert_eq!(doc.objects.len(), 4);
+        let side = doc.objects[2].body.bbox();
+        assert!(side.min.x.abs() < 2e-3 && (side.max.x - 1.0).abs() < 2e-3 && (side.center().z - 2.0).abs() < 1e-9, "{side:?}");
+        let top = doc.objects[3].body.bbox();
+        assert!((top.min.z - 4.0).abs() < 2e-3 && (top.center().x + 5.0).abs() < 1e-9, "{top:?}");
+        assert!((doc.objects[3].body.vertices.iter().map(|v| v.point.z).fold(f64::MAX, f64::min) - 4.0).abs() < 1e-9);
+        let _ = wall;
+    }
+
+    #[test]
     fn isoparam_untrim_unjoin_and_boundary_edges() {
         let mut doc = Document::default();
         let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 2.0, 1.0)));
@@ -5496,6 +5519,113 @@ impl Tool for TangentCircleTool {
         let id = doc.add_body("Circle", ductile_brep::profile::wire_from_segments(&[s]));
         doc.selection.clear();
         doc.selection.insert(Pick::Object(id));
+        true
+    }
+}
+
+// ---------------------------------------------------------------- Place ----
+
+/// Place: copies of the selection stood on the face under the cursor (or the
+/// construction plane), their bottom centre on the point and their up axis
+/// along the surface normal; each click places one.
+pub struct PlaceTool {
+    targets: Vec<(ObjectId, std::sync::Arc<Body>)>,
+    /// The selection's bottom centre, which lands on the surface.
+    base: DVec3,
+    hover: Option<(DVec3, DVec3)>,
+    placed: Vec<DMat4>,
+    /// Turn about the normal, in degrees.
+    pub angle: f64,
+    pub scale: f64,
+}
+
+impl PlaceTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let targets: Vec<_> = doc.selected_objects().iter().filter_map(|id| doc.object(*id).map(|o| (*id, o.body.clone()))).collect();
+        let bb = targets.iter().map(|(_, b)| b.bbox()).reduce(|a, b| a.union(&b))?;
+        let c = bb.center();
+        // The lowest point of the shaded surface (the box has some slack).
+        let low = doc.selected_objects().iter().filter_map(|id| doc.object(*id)).flat_map(|o| o.mesh.faces.iter().flat_map(|f| f.positions.iter().map(|p| p.z)).chain(o.body.vertices.iter().map(|v| v.point.z))).fold(f64::INFINITY, f64::min);
+        let low = if low.is_finite() { low } else { bb.min.z };
+        Some(Self { targets, base: DVec3::new(c.x, c.y, low), hover: None, placed: vec![], angle: 0.0, scale: 1.0 })
+    }
+
+    fn matrix(&self, p: DVec3, n: DVec3) -> DMat4 {
+        let r = DQuat::from_rotation_arc(DVec3::Z, n.normalize()) * DQuat::from_rotation_z(self.angle.to_radians());
+        DMat4::from_translation(p) * DMat4::from_quat(r) * DMat4::from_scale(DVec3::splat(self.scale.max(1e-6))) * DMat4::from_translation(-self.base)
+    }
+
+    fn matrices(&self) -> Vec<DMat4> {
+        self.placed.iter().copied().chain(self.hover.map(|(p, n)| self.matrix(p, n))).collect()
+    }
+}
+
+impl Tool for PlaceTool {
+    fn name(&self) -> &'static str {
+        "Place"
+    }
+    fn hint(&self) -> String {
+        format!("Place: click a face to stand a copy on it ({} placed); turn and scale in the panel; Enter to finish", self.placed.len())
+    }
+    fn pointer(&mut self, doc: &Document, cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        let hit = crate::picking::pick_face(doc, &p.ray).filter(|h| doc.object(h.object).is_some_and(|o| o.body.mesh.is_none()));
+        self.hover = match hit {
+            Some(h) => {
+                let b = &doc.object(h.object).unwrap().body;
+                let f = b.face(h.face);
+                let uv = f.surface.project(h.point, None);
+                let n = b.face_normal(h.face, uv.x, uv.y);
+                // A bad projection falls back to the facet's normal.
+                Some((h.point, if n.dot(h.normal) > 0.5 { n } else { h.normal }))
+            }
+            None => p.point.map(|q| (q, cplane.frame.z)),
+        };
+        if p.clicked {
+            if let Some((q, n)) = self.hover {
+                self.placed.push(self.matrix(q, n));
+            }
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let mut out: Option<Body> = None;
+        for m in self.matrices() {
+            for (_, b) in &self.targets {
+                let c = b.transformed(&m);
+                match &mut out {
+                    None => out = Some(c),
+                    Some(o) => o.append(&c),
+                }
+            }
+        }
+        out
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut ch = drag_value(ui, "Angle", &mut self.angle, 1.0);
+        ch |= drag_value(ui, "Scale", &mut self.scale, 0.01);
+        ui.label(format!("{} placed", self.placed.len()));
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        if let Some(v) = v {
+            self.angle = v;
+        }
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        if self.placed.is_empty() {
+            return false;
+        }
+        doc.selection.clear();
+        for m in self.placed.clone() {
+            for (id, b) in &self.targets {
+                let (name, group, color, metal, rough) = doc.object(*id).map(|o| (o.name.clone(), o.group, o.color, o.metalness, o.roughness)).unwrap_or(("Copy".into(), None, crate::document::DEFAULT_COLOR, 0.0, 0.5));
+                let new = doc.add_body(&name, b.transformed(&m));
+                if let Some(o) = doc.objects.iter_mut().find(|o| o.id == new) {
+                    (o.group, o.color, o.metalness, o.roughness) = (group, color, metal, rough);
+                }
+                doc.selection.insert(Pick::Object(new));
+            }
+        }
         true
     }
 }

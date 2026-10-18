@@ -86,6 +86,7 @@ const DEFAULTS: &[(Command, &str)] = {
         (Delete, "Backspace"),
         (Delete, "Shift+X"),
         (Duplicate, "Shift+D"),
+        (Place, "Ctrl+D"),
         (SelectAll, "A"),
         (SelectAll, "Ctrl+A"),
         (InvertSelection, "Alt+A"),

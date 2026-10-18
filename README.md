@@ -182,6 +182,9 @@ code from them.
   arrays, undo/redo. Mirror reflects across the construction plane,
   or across a selected planar face; a solid mirrored across its own face is
   joined to its reflection, so half a symmetric part becomes the whole.
+- Place (Ctrl+D) stands copies of the selection on the faces you click,
+  bottom centre on the point and up along the surface normal, turned and
+  scaled from the panel.
 - Curve array copies the selection evenly along the longest selected curve,
   turning each copy with the curve's tangent (Align off keeps them upright).
 - Hide (H), isolate the selection (Shift+H or .), show everything (Alt+H).

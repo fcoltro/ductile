@@ -103,6 +103,7 @@ pub enum Command {
     LinearArray,
     RadialArray,
     CurveArray,
+    Place,
     MirrorX,
     MirrorY,
     MirrorZ,
@@ -228,6 +229,7 @@ impl Command {
         Command::LinearArray,
         Command::RadialArray,
         Command::CurveArray,
+        Command::Place,
         Command::MirrorX,
         Command::MirrorY,
         Command::MirrorZ,
@@ -354,6 +356,7 @@ impl Command {
             LinearArray => "Linear array",
             RadialArray => "Radial array",
             CurveArray => "Curve array (copies along a curve)",
+            Place => "Place (copies stood on faces)",
             MirrorX => "Mirror X",
             MirrorY => "Mirror Y",
             MirrorZ => "Mirror Z",
@@ -848,6 +851,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 None => app.status = "Select a solid, or the faces to open (face mode: 3)".into(),
             }
         }
+        Place => match crate::tools::PlaceTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select the objects to place".into(),
+        },
         CurveArray => match crate::tools::CurveArrayTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Select the objects to copy and the curve to copy them along".into(),
