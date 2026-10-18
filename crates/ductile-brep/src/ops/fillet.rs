@@ -706,6 +706,27 @@ mod tests {
     }
 
     #[test]
+    fn blends_vertical_edges_after_the_top_ones() {
+        // The vertical edges then run into the earlier blends' faces, and
+        // straight on into their end arcs.
+        let b = make_box(&Frame::WORLD, DVec3::new(3.0, 2.0, 1.0));
+        let top: Vec<EdgeId> = b.edge_ids().filter(|e| b.edge(*e).start().z > 0.9 && b.edge(*e).end().z > 0.9).collect();
+        for (first, second) in [(Blend::Chamfer(0.3), Blend::Chamfer(0.2)), (Blend::Fillet(0.3), Blend::Fillet(0.2)), (Blend::Fillet(0.2), Blend::Fillet(0.3)), (Blend::Fillet(0.3), Blend::Chamfer(0.2))] {
+            let a = blend_edges(&b, &top, first).unwrap();
+            let v = a
+                .edge_ids()
+                .find(|e| {
+                    let ed = a.edge(*e);
+                    (ed.start().x - ed.end().x).abs() < 1e-9 && (ed.start().y - ed.end().y).abs() < 1e-9
+                })
+                .unwrap();
+            let r = blend_edges(&a, &[v], second).unwrap();
+            assert_eq!(open_edges(&r), 0, "{first:?} then {second:?}");
+            assert!(vol(&r) < vol(&a));
+        }
+    }
+
+    #[test]
     fn fillets_the_edge_between_a_chamfer_and_the_cylinder() {
         // Chamfer a cylinder's top rim, then round the chamfer's lower
         // edge: a circle between a cone and a cylinder, blended by a torus.
