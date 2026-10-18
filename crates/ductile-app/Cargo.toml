@@ -3,9 +3,24 @@ name = "ductile-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Ductile: a free NURBS solid and surface modeler."
 
 [[bin]]
 name = "ductile"
 path = "src/main.rs"
 
 [dependencies]
+ductile-geom.workspace = true
+ductile-brep.workspace = true
+ductile-io.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+egui-wgpu = "0.37"
+egui = "0.37"
+log = "0.4"
+png = "0.18"
+env_logger = "0.11"
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }

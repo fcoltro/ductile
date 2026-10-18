@@ -10,6 +10,8 @@ public literature around industrial kernels (Parasolid, xNURBS) and by
 classic references such as *The NURBS Book* (Piegl & Tiller), but contains no
 code from them.
 
+![Ductile screenshot](docs/screenshot.png)
+
 ## Layout
 
 | Crate | What it is |
