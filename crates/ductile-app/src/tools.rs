@@ -113,7 +113,7 @@ thread_local! {
 pub fn set_current_cplane(c: CPlane) {
     CPLANE.with(|x| x.set(c));
 }
-fn current_cplane() -> CPlane {
+pub fn current_cplane() -> CPlane {
     CPLANE.with(|x| x.get())
 }
 
@@ -2235,6 +2235,130 @@ impl Tool for ThickenTool {
     }
 }
 
+// ---------------------------------------------------------------- Draft ----
+
+/// Tilts the selected planar faces of a solid about the line where they
+/// cross a neutral plane square to the construction plane's normal, laid
+/// through the lowest point of the faces so their base stays put. Dragging
+/// moves the faces' top edge in or out; the angle can be typed in degrees.
+pub struct DraftTool {
+    id: ObjectId,
+    body: std::sync::Arc<Body>,
+    faces: Vec<FaceId>,
+    pull: DVec3,
+    /// Middle of the faces' top, where the drag handle sits.
+    top: DVec3,
+    normal: DVec3,
+    height: f64,
+    /// Degrees; positive leans the faces in towards the pull direction.
+    pub value: f64,
+    start_t: Option<f64>,
+    typed: Option<f64>,
+    cache: std::cell::RefCell<Option<(f64, Option<Body>)>>,
+}
+
+impl DraftTool {
+    pub fn new(doc: &Document, pull: DVec3) -> Option<Self> {
+        let picked = doc.selected_faces();
+        let id = picked.first()?.0;
+        let o = doc.object(id)?;
+        if o.body.kind != ductile_brep::BodyKind::Solid {
+            return None;
+        }
+        let faces: Vec<FaceId> = picked.iter().filter(|(x, _)| *x == id).map(|(_, f)| *f).collect();
+        let b = &o.body;
+        let pts: Vec<DVec3> = faces.iter().flat_map(|f| b.face_loops(*f).flat_map(|l| l.coedges.iter()).map(|c| b.edge(c.edge).start()).collect::<Vec<_>>()).collect();
+        let lo = pts.iter().map(|p| p.dot(pull)).fold(f64::MAX, f64::min);
+        let hi = pts.iter().map(|p| p.dot(pull)).fold(f64::MIN, f64::max);
+        let tops: Vec<DVec3> = pts.iter().copied().filter(|p| p.dot(pull) > hi - 1e-9 * (1.0 + hi.abs())).collect();
+        let top = tops.iter().copied().sum::<DVec3>() / tops.len().max(1) as f64;
+        let normal = b.face_normal(faces[0], 0.5, 0.5);
+        let normal = (normal - pull * normal.dot(pull)).try_normalize().unwrap_or(normal);
+        Some(Self { id, body: o.body.clone(), faces, pull, top, normal, height: (hi - lo).max(1e-6), value: 0.0, start_t: None, typed: None, cache: std::cell::RefCell::new(None) })
+    }
+
+    fn angle(&self) -> f64 {
+        self.typed.unwrap_or(self.value)
+    }
+
+    fn bottom(&self) -> DVec3 {
+        self.top - self.pull * self.height
+    }
+
+    fn result(&self) -> Option<Body> {
+        let a = self.angle();
+        if let Some((ca, r)) = &*self.cache.borrow() {
+            if *ca == a {
+                return r.clone();
+            }
+        }
+        let r = if a.abs() < 1e-9 { None } else { ductile_brep::ops::draft::draft_faces(&self.body, &self.faces, self.bottom(), self.pull, a.to_radians()) };
+        *self.cache.borrow_mut() = Some((a, r.clone()));
+        r
+    }
+}
+
+impl Tool for DraftTool {
+    fn name(&self) -> &'static str {
+        "Draft"
+    }
+    fn hint(&self) -> String {
+        if self.angle().abs() > 1e-9 && self.result().is_none() {
+            return format!("Draft: {:.1}° does not fit; the faces around these must be flat and meet them along straight edges", self.angle());
+        }
+        format!("Draft: drag the top edge in or out, or type an angle ({:.1}°); click or Enter to finish", self.angle())
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if self.typed.is_none() {
+            let t = height_from_ray(self.top, self.normal, &p.ray);
+            let t0 = *self.start_t.get_or_insert(t);
+            let deg = (-(t - t0) / self.height).atan().to_degrees();
+            self.value = (deg * 2.0).round() / 2.0;
+        }
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        self.result()
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        let lo = self.bottom();
+        let tip = self.top - self.normal * self.height * self.angle().to_radians().tan();
+        out.push(LineInstance::new(lo, self.top, [0.6, 0.6, 0.6, 1.0], 1.0));
+        out.push(LineInstance::new(lo, tip, [1.0, 0.85, 0.3, 1.0], 2.0));
+        out.push(LineInstance::point(tip, [1.0, 0.85, 0.3, 1.0], 7.0));
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut v = self.angle();
+        let ch = drag_value(ui, "Angle (°)", &mut v, 0.1);
+        if ch {
+            self.typed = Some(v);
+        }
+        ch
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        if self.result().is_some() {
+            vec![self.id]
+        } else {
+            vec![]
+        }
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v;
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        match self.result() {
+            Some(b) => {
+                doc.replace_body(self.id, b);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 // ----------------------------------------------------------------- Trim ----
 
 /// Click pieces of curves, between their crossings with other curves, to
@@ -2769,6 +2893,26 @@ mod tests {
         assert_eq!(doc.object(id).unwrap().body.faces.len(), 5);
         doc.undo();
         assert_eq!(doc.object(id).unwrap().body.faces.len(), 6);
+    }
+
+    #[test]
+    fn drafts_box_sides_by_a_typed_angle() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(2.0, 2.0, 1.0)));
+        let b = doc.object(id).unwrap().body.clone();
+        doc.mode = SelectMode::Face;
+        for f in b.face_ids().filter(|f| b.face_normal(*f, 0.5, 0.5).z.abs() < 0.5) {
+            doc.selection.insert(Pick::Face(id, f));
+        }
+        let mut t = DraftTool::new(&doc, DVec3::Z).unwrap();
+        t.typed_value(Some(5.0));
+        assert!(t.commit(&mut doc));
+        let d = &doc.object(id).unwrap().body;
+        // The base stays, the top shrinks by tan 5 deg on each side.
+        let top = d.vertices.iter().map(|v| v.point).filter(|p| p.z > 0.5).map(|p| p.x).fold(f64::MIN, f64::max);
+        let bottom = d.vertices.iter().map(|v| v.point).filter(|p| p.z < 0.5).map(|p| p.x).fold(f64::MIN, f64::max);
+        assert!((top - (2.0 - 5f64.to_radians().tan())).abs() < 1e-9, "{top}");
+        assert!((bottom - 2.0).abs() < 1e-9);
     }
 
     #[test]

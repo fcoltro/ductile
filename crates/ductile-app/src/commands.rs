@@ -50,6 +50,7 @@ pub enum Command {
     Thicken,
     Cut,
     Imprint,
+    Draft,
     Sweep,
     Fillet,
     Chamfer,
@@ -127,6 +128,7 @@ impl Command {
         Command::Thicken,
         Command::Cut,
         Command::Imprint,
+        Command::Draft,
         Command::Sweep,
         Command::Fillet,
         Command::Chamfer,
@@ -205,6 +207,7 @@ impl Command {
             Thicken => "Thicken surface",
             Cut => "Cut solid with curves",
             Imprint => "Imprint curves onto faces",
+            Draft => "Draft faces",
             Sweep => "Sweep",
             Fillet => "Fillet edges",
             Chamfer => "Chamfer edges",
@@ -290,6 +293,7 @@ impl Command {
             Thicken => "Alt+K",
             Cut => "Alt+D",
             Imprint => "Alt+I",
+            Draft => "Alt+G",
             Sweep => "Alt+W",
             Subtract => "Shift+D",
             Intersect => "Shift+I",
@@ -353,6 +357,7 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::K, false, false, true) => Thicken,
         (Key::D, false, false, true) => Cut,
         (Key::I, false, false, true) => Imprint,
+        (Key::G, false, false, true) => Draft,
         (Key::W, false, false, true) => Sweep,
         (Key::F, false, true, false) => Fillet,
         (Key::K, false, true, false) => Chamfer,
@@ -562,6 +567,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 app.status = "Cut done".into();
             }
             Err(e) => app.status = e,
+        },
+        Draft => match crate::tools::DraftTool::new(&app.doc, crate::tools::current_cplane().frame.z) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Draft: select planar faces of a solid (face mode, 3)".into(),
         },
         Imprint => match crate::tools::imprint_selected(&app.doc) {
             Ok((ids, bodies)) => {
@@ -933,6 +942,18 @@ pub fn demo_scene(doc: &mut Document) {
                 doc.add_body("Tangent cap", c);
             }
         }
+    }
+    // A drafted block with a spline imprinted across its top.
+    {
+        use ductile_brep::profile::{Loop3, Segment};
+        let bx = make_box(&at(26.0, -24.0, 0.0), DVec3::new(6.0, 4.0, 3.0));
+        let sides: Vec<ductile_brep::FaceId> = bx.face_ids().filter(|f| bx.face_normal(*f, 0.5, 0.5).z.abs() < 0.5).collect();
+        let drafted = ductile_brep::ops::draft::draft_faces(&bx, &sides, DVec3::new(0.0, 0.0, 0.0), DVec3::Z, 8f64.to_radians()).unwrap_or(bx);
+        let n = ductile_geom::NurbsCurve::interpolate(&[DVec3::new(27.0, -25.0, 3.0), DVec3::new(28.0, -21.2, 3.0), DVec3::new(30.0, -23.2, 3.0), DVec3::new(31.0, -19.0, 3.0)], 3);
+        let (t0, t1) = n.domain();
+        let wave = Loop3 { segments: vec![Segment::new(ductile_geom::Curve3::Nurbs(n), t0, t1)] };
+        let imprinted = ductile_brep::ops::cut::imprint_curves(&drafted, &[wave], DVec3::Z).unwrap_or(drafted);
+        doc.add_body("Drafted block", imprinted);
     }
     // Capsule end: cylinder with a hemispherical cap.
     let cap = op(make_cylinder(&at(13.0, 3.0, 0.0), 2.5, 4.0), make_sphere(DVec3::new(13.0, 3.0, 4.0), 2.5), BoolOp::Union);
