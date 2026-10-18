@@ -86,7 +86,14 @@ impl Zone {
             return Pos::In;
         }
         let uv = self.surf.align_periodic(self.surf.project(p, None), self.center);
-        if point_in_loops(uv, &self.loops) {
+        // A face crossing its surface's seam where the seam is no edge can
+        // span more than a period in parameter space (parts of it on both
+        // sides of the seam edges it does have): try the point a period
+        // either way too.
+        let (pu, pv) = (self.surf.period_u().unwrap_or(0.0), self.surf.period_v().unwrap_or(0.0));
+        let shifts = |p: f64| if p > 0.0 { vec![0.0, -p, p] } else { vec![0.0] };
+        let inside = shifts(pu).into_iter().any(|du| shifts(pv).into_iter().any(|dv| point_in_loops(uv + DVec2::new(du, dv), &self.loops)));
+        if inside {
             Pos::In
         } else {
             Pos::Out
@@ -1176,6 +1183,7 @@ fn split_face(w: &Body, f: FaceId, extras: &[EdgeId], samples: &[Vec<(f64, DVec3
             }
         }
     }
+    let face_loops: Vec<Vec<DVec2>> = boundary.iter().map(|l| l.iter().flat_map(|(_, s)| s.iter().map(|x| fix(x.uv))).collect()).collect();
     for &e in extras {
         let pts: Vec<DVec3> = samples[e.idx()].iter().map(|s| s.1).collect();
         let m = pts.len() / 2;
@@ -1196,8 +1204,43 @@ fn split_face(w: &Body, f: FaceId, extras: &[EdgeId], samples: &[Vec<(f64, DVec3
                 uv[last].x = uv[last - 1].x;
             }
         }
-        let uv: Vec<DVec2> = uv.into_iter().map(fix).collect();
+        let mut uv: Vec<DVec2> = uv.into_iter().map(fix).collect();
         let ed = w.edge(e);
+        // On a periodic surface the face may cover the same parameters a
+        // period apart (where it crosses the seam away from its seam
+        // edges): take the copy of the edge that starts and ends at its
+        // vertices' nodes and runs inside the face.
+        if surf.period_u().is_some() || surf.period_v().is_some() {
+            let shifts = |p: Option<f64>| p.map_or(vec![0.0], |p| vec![0.0, -p, p]);
+            let near = |v: VertexId, q: DVec2| nodes.iter().filter(|n| n.0 == v).map(|n| n.1.distance(q)).fold(f64::INFINITY, f64::min);
+            let mid = 0.5 * (uv[(uv.len() - 1) / 2] + uv[uv.len() / 2]);
+            let on_boundary = |q: DVec2| {
+                face_loops.iter().any(|l| (0..l.len()).any(|i| ductile_geom::poly2::dist_to_segment(q, l[i], l[(i + 1) % l.len()]) < loose))
+            };
+            let score = |d: DVec2| {
+                let ends = near(ed.v0, uv[0] + d).min(loose * 10.0) + near(ed.v1, *uv.last().unwrap() + d).min(loose * 10.0);
+                let inside = point_in_loops(mid + d, &face_loops) || on_boundary(mid + d);
+                ends + if inside { 0.0 } else { loose * 100.0 }
+            };
+            let mut best = (score(DVec2::ZERO), DVec2::ZERO);
+            for du in shifts(surf.period_u()) {
+                for dv in shifts(surf.period_v()) {
+                    let d = DVec2::new(du, dv);
+                    let sc = score(d);
+                    if sc < best.0 - loose * 1e-3 {
+                        best = (sc, d);
+                    }
+                }
+            }
+            if debug() {
+                eprintln!("  extra e{} uv {:.4} -> {:.4}: shift {:.3} score {:.3e} (unshifted {:.3e})", e.0, uv[0], uv.last().unwrap(), best.1, best.0, score(DVec2::ZERO));
+            }
+            if best.1 != DVec2::ZERO {
+                for q in uv.iter_mut() {
+                    *q += best.1;
+                }
+            }
+        }
         let a = extra_node(&mut nodes, &mut hes, ed.v0, uv[0], loose);
         let b = extra_node(&mut nodes, &mut hes, ed.v1, *uv.last().unwrap(), loose);
         let mut fwd = mk(a, b, uv.clone(), Some(Coedge::new(e, false)), Some(e));
@@ -1640,6 +1683,32 @@ mod tests {
         let a = crate::ops::fillet::blend_edges(&b, &edges, crate::ops::fillet::Blend::Fillet(0.2)).unwrap();
         let c = make_cylinder(&Frame { origin: DVec3::new(0.5, 0.5, -1.0), ..Frame::WORLD }, 0.35, 4.0);
         identities(&a, &c);
+    }
+
+    #[test]
+    fn hole_through_a_wall_that_wraps_past_its_seam() {
+        // The side hole breaks through the top and through the first
+        // vertical hole, which opens a window across its seam, so its
+        // wall crosses its seam where the seam is no edge: its outline
+        // spans more than a turn. The second hole cuts that wall there.
+        // (Replayed from a random modeling session; the boss and chamfer
+        // leave the seam split where it matters.)
+        let b = bx(DVec3::ZERO, DVec3::new(4.849270842546171, 2.4653975300651134, 1.8190143696579502));
+        let boss = make_cylinder(&Frame { origin: DVec3::new(2.9887166213526886, 1.27264659691675, 1.2467111751821771), ..Frame::WORLD }, 0.5339996622237425, 1.284880404319773);
+        let b = boolean(&b, &boss, BoolOp::Union).unwrap();
+        // The front bottom edge and the front left one, chamfered.
+        let front: Vec<EdgeId> = b.edge_ids().filter(|e| {
+            let (p, q) = (b.edge(*e).start(), b.edge(*e).end());
+            p.y.abs() < 1e-9 && q.y.abs() < 1e-9 && ((p.z.abs() < 1e-9 && q.z.abs() < 1e-9) || (p.x.abs() < 1e-9 && q.x.abs() < 1e-9))
+        }).collect();
+        assert_eq!(front.len(), 2);
+        let b = crate::ops::fillet::blend_edges(&b, &front, crate::ops::fillet::Blend::Chamfer(0.12302128188281884)).unwrap();
+        let side = make_cylinder(&Frame::new(DVec3::new(-1.0, 1.2684697417672646, 1.4584311405145924), DVec3::X, DVec3::Y), 0.4856398041045248, 6.849);
+        let h1 = make_cylinder(&Frame { origin: DVec3::new(0.6799684160181607, 1.7471310229137824, -1.0), ..Frame::WORLD }, 0.44832715294742753, 4.5316);
+        let a = boolean(&boolean(&b, &h1, BoolOp::Difference).unwrap(), &side, BoolOp::Difference).unwrap();
+        let h2 = make_cylinder(&Frame { origin: DVec3::new(1.4388697111179811, 1.884376871963028, -1.0), ..Frame::WORLD }, 0.1625918619502269, 4.5316);
+        let d = boolean(&a, &h2, BoolOp::Difference).unwrap();
+        assert!(vol(&d) < vol(&a));
     }
 
     #[test]

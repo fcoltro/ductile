@@ -373,6 +373,9 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
                     (t0, f0) = (t1, f1);
                     t1 = tn;
                     if ((t1 - t_end) / inward).abs() > 0.5 * m as f64 {
+                        if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+                            eprintln!("cap crossing at w {w:.3} not found: t {t1:.4} from end {t_end:.4}, step {inward:.4} of {m}, offsets {f0:.3e} {f1:.3e}");
+                        }
                         return Err(super::fillet::unsupported(line!(), file!()));
                     }
                     f1 = off(&at(t1)?, w);

@@ -56,11 +56,12 @@ fn random_step(rng: &mut Rng, b: &Body, size: DVec3) -> Step {
     let y = rng.range(lo.y + r + 0.15, hi.y - r - 0.15);
     match rng.pick(6) {
         0 => {
-            Step::Cut(format!("hole r{r:.3} at ({x:.3}, {y:.3})"), make_cylinder(&at(x, y, lo.z - 1.0), r, hi.z - lo.z + 2.0))
+            Step::Cut(format!("hole r{r:?} at ({x:?}, {y:?})"), make_cylinder(&at(x, y, lo.z - 1.0), r, hi.z - lo.z + 2.0))
         }
         1 => {
             let z = rng.range(lo.z + 0.3 * size.z, hi.z - 0.2);
-            Step::Add(format!("boss r{r:.3} at ({x:.3}, {y:.3}, {z:.3})"), make_cylinder(&at(x, y, z), r, hi.z - z + rng.range(0.2, 0.8)))
+            let h = hi.z - z + rng.range(0.2, 0.8);
+            Step::Add(format!("boss r{r:?} at ({x:?}, {y:?}, {z:?}) height {h:?}"), make_cylinder(&at(x, y, z), r, h))
         }
         2 => {
             let (w, d) = (2.0 * r, rng.range(0.3, 2.0 * r));
@@ -69,7 +70,8 @@ fn random_step(rng: &mut Rng, b: &Body, size: DVec3) -> Step {
         }
         3 => {
             let r = r.min(0.45 * (hi.z - lo.z) - 0.15).max(0.05);
-            Step::Cut(format!("side hole r{r:.3} at y {y:.3}"), make_cylinder(&Frame::new(DVec3::new(lo.x - 1.0, y, rng.range(lo.z + r + 0.15, hi.z - r - 0.15)), DVec3::X, DVec3::Y), r, hi.x - lo.x + 2.0))
+            let z = rng.range(lo.z + r + 0.15, hi.z - r - 0.15);
+            Step::Cut(format!("side hole r{r:?} at (y, z) ({y:?}, {z:?})"), make_cylinder(&Frame::new(DVec3::new(lo.x - 1.0, y, z), DVec3::X, DVec3::Y), r, hi.x - lo.x + 2.0))
         }
         k => {
             let edges: Vec<EdgeId> = b.edge_ids().filter(|e| b.edge(*e).length() > 0.4 && b.edge_faces(*e).len() == 2).collect();
@@ -115,7 +117,7 @@ fn main() {
             }
             if only.is_some() {
                 if k == 0 {
-                    println!("  block {size:.3}");
+                    println!("  block {size:?}");
                 }
                 if let Step::Blend(_, edges, _) = &step {
                     for e in edges {
