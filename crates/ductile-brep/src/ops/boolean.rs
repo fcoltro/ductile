@@ -17,7 +17,7 @@ use crate::topo::{Body, BodyKind, Coedge, EdgeId, FaceId, Loop, VertexId};
 use ductile_geom::poly2::{point_in_loops, point_in_polygon, signed_area};
 use ductile_geom::{BBox3, Curve3, DVec2, DVec3, Surface};
 use std::collections::{BTreeSet, HashMap};
-use std::f64::consts::TAU;
+use std::f64::consts::{PI, TAU};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoolOp {
@@ -1111,6 +1111,11 @@ struct HalfEdge {
     curv_in_rev: f64,
     dir_out: f64,
     dir_in_rev: f64,
+    /// The polyline's own directions before the exact tangents sharpen
+    /// them: where tangents tie, the chord leans toward the side the edge
+    /// bends to.
+    chord_out: f64,
+    chord_in_rev: f64,
 }
 
 /// Splits face `f` along the interior edges `extras`. Returns the loops of
@@ -1161,6 +1166,8 @@ fn split_face(w: &Body, f: FaceId, extras: &[EdgeId], samples: &[Vec<(f64, DVec3
             twin: None,
             dir_out,
             dir_in_rev,
+            chord_out: dir_out,
+            chord_in_rev: dir_in_rev,
         }
     };
     for lp in &boundary {
@@ -1289,13 +1296,15 @@ fn split_face(w: &Body, f: FaceId, extras: &[EdgeId], samples: &[Vec<(f64, DVec3
     let next = |h: usize| -> Option<usize> {
         // Effective angles: an edge bending left (positive curvature) lies
         // slightly counter-clockwise of a straight one with the same tangent.
-        let eff = |a: f64, k: f64| a + (k * span).atan() * 1e-6;
-        let r = eff(hes[h].dir_in_rev, hes[h].curv_in_rev);
+        // Where both are alike, the chord's lean toward the bend decides.
+        let lean = |a: f64, c: f64| ((c - a + PI).rem_euclid(TAU) - PI).clamp(-0.5, 0.5);
+        let eff = |a: f64, k: f64, c: f64| a + (k * span).atan() * 1e-6 + lean(a, c) * 1e-5;
+        let r = eff(hes[h].dir_in_rev, hes[h].curv_in_rev, hes[h].chord_in_rev);
         out_at[hes[h].to]
             .iter()
             .copied()
             .map(|o| {
-                let mut cw = (r - eff(hes[o].dir_out, hes[o].curv_out)).rem_euclid(TAU);
+                let mut cw = (r - eff(hes[o].dir_out, hes[o].curv_out, hes[o].chord_out)).rem_euclid(TAU);
                 if cw < 1e-9 || hes[h].twin == Some(o) {
                     cw += TAU;
                 }
@@ -1420,7 +1429,9 @@ fn extra_node(nodes: &mut Vec<(VertexId, DVec2)>, hes: &mut Vec<HalfEdge>, v: Ve
         hes[i].uv = vec![a, uv];
         hes[i].dir_out = o1;
         hes[i].dir_in_rev = r1;
-        hes.push(HalfEdge { from: n, to, uv: vec![uv, b], coedge: None, extra: None, twin: None, curv_out: 0.0, curv_in_rev: 0.0, dir_out: o2, dir_in_rev: r2 });
+        hes[i].chord_out = o1;
+        hes[i].chord_in_rev = r1;
+        hes.push(HalfEdge { from: n, to, uv: vec![uv, b], coedge: None, extra: None, twin: None, curv_out: 0.0, curv_in_rev: 0.0, dir_out: o2, dir_in_rev: r2, chord_out: o2, chord_in_rev: r2 });
     }
     n
 }
