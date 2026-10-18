@@ -611,6 +611,8 @@ pub fn curve_surface_crossings(c: &Curve3, t0: f64, t1: f64, s: &Surface, tol: f
     };
     let mut roots: Vec<f64> = Vec::new();
     let vals: Vec<f64> = samples.iter().map(|t| g(*t)).collect();
+    // Intervals with a sign change, to be closed in on.
+    let mut brackets: Vec<(f64, f64, f64, f64)> = Vec::new();
     for i in 0..samples.len() {
         if vals[i].abs() < tol {
             // Local minimum of |g| near zero: a touching/crossing sample.
@@ -621,35 +623,74 @@ pub fn curve_surface_crossings(c: &Curve3, t0: f64, t1: f64, s: &Surface, tol: f
             }
         }
         if i + 1 < samples.len() && vals[i] * vals[i + 1] < 0.0 && vals[i].abs() >= tol && vals[i + 1].abs() >= tol {
-            // Illinois regula falsi.
-            let (mut a, mut b) = (samples[i], samples[i + 1]);
-            let (mut fa, mut fb) = (vals[i], vals[i + 1]);
-            let mut side = 0;
-            let mut r = a;
-            for _ in 0..100 {
-                r = (a * fb - b * fa) / (fb - fa);
-                let fr = g(r);
-                if fr.abs() < tol * 1e-4 || (b - a).abs() < 1e-15 {
-                    break;
+            brackets.push((samples[i], samples[i + 1], vals[i], vals[i + 1]));
+        }
+        // A dip towards the surface between samples on the same side may
+        // hide two close crossings (a curve grazing past a saddle or a
+        // torus's inner rim): find the dip's bottom and look across it.
+        if i > 0 && i + 1 < samples.len() && vals[i].abs() >= tol {
+            let (l, m, r) = (vals[i - 1], vals[i], vals[i + 1]);
+            if l * m > 0.0 && m * r > 0.0 && m.abs() < l.abs() && m.abs() <= r.abs() {
+                let sign = m.signum();
+                let (mut a, mut b) = (samples[i - 1], samples[i + 1]);
+                const PHI: f64 = 0.618_033_988_749_894_8;
+                let (mut x1, mut x2) = (b - PHI * (b - a), a + PHI * (b - a));
+                let (mut f1, mut f2) = (sign * g(x1), sign * g(x2));
+                for _ in 0..60 {
+                    if f1 < f2 {
+                        b = x2;
+                        (x2, f2) = (x1, f1);
+                        x1 = b - PHI * (b - a);
+                        f1 = sign * g(x1);
+                    } else {
+                        a = x1;
+                        (x1, f1) = (x2, f2);
+                        x2 = a + PHI * (b - a);
+                        f2 = sign * g(x2);
+                    }
+                    if f1.min(f2) < 0.0 || (b - a).abs() < 1e-14 * (1.0 + a.abs()) {
+                        break;
+                    }
                 }
-                if fr * fb > 0.0 {
-                    b = r;
-                    fb = fr;
-                    if side == -1 {
-                        fa *= 0.5;
-                    }
-                    side = -1;
-                } else {
-                    a = r;
-                    fa = fr;
-                    if side == 1 {
-                        fb *= 0.5;
-                    }
-                    side = 1;
+                // Only a clear dip through the surface counts; a curve that
+                // merely touches it there (lying in a tangent plane) does not.
+                let (tm, fm) = if f1 < f2 { (x1, f1) } else { (x2, f2) };
+                if fm <= -tol {
+                    let gm = sign * fm;
+                    brackets.push((samples[i - 1], tm, l, gm));
+                    brackets.push((tm, samples[i + 1], gm, r));
                 }
             }
-            roots.push(r);
         }
+    }
+    for (a0, b0, fa0, fb0) in brackets {
+        // Illinois regula falsi.
+        let (mut a, mut b, mut fa, mut fb) = (a0, b0, fa0, fb0);
+        let mut side = 0;
+        let mut r = a;
+        for _ in 0..100 {
+            r = (a * fb - b * fa) / (fb - fa);
+            let fr = g(r);
+            if fr.abs() < tol * 1e-4 || (b - a).abs() < 1e-15 {
+                break;
+            }
+            if fr * fb > 0.0 {
+                b = r;
+                fb = fr;
+                if side == -1 {
+                    fa *= 0.5;
+                }
+                side = -1;
+            } else {
+                a = r;
+                fa = fr;
+                if side == 1 {
+                    fb *= 0.5;
+                }
+                side = 1;
+            }
+        }
+        roots.push(r);
     }
     roots.sort_by(|a, b| a.total_cmp(b));
     let mut out: Vec<f64> = Vec::new();
