@@ -728,7 +728,47 @@ pub struct ExtrudeTool {
     start_t: Option<f64>,
     pub distance: f64,
     typed: Option<f64>,
-    cache: std::cell::RefCell<Option<(f64, Option<Body>, Option<String>)>>,
+    /// For curves drawn on a solid's planar face: that solid, and the
+    /// face's outward normal.
+    onto: Option<(ObjectId, std::sync::Arc<Body>, DVec3)>,
+    pub op: ExtrudeOp,
+    cache: std::cell::RefCell<Option<(f64, ExtrudeOp, Option<Body>, Option<String>)>>,
+}
+
+/// What an extrusion of curves drawn on a solid does to that solid.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ExtrudeOp {
+    /// Join when pulled out of the face, cut when pushed into it.
+    Auto,
+    NewBody,
+    Join,
+    Cut,
+}
+
+/// The visible solid one of whose planar faces holds region `r`, with that
+/// face's outward normal.
+fn solid_under_region(doc: &Document, r: &ductile_brep::profile::Region) -> Option<(ObjectId, std::sync::Arc<Body>, DVec3)> {
+    use ductile_geom::poly2::point_in_polygon;
+    let pts = r.outer.polygon(1e-3);
+    let centre = pts.iter().copied().sum::<DVec3>() / pts.len().max(1) as f64;
+    for o in doc.objects.iter().filter(|o| o.visible && o.body.kind == ductile_brep::BodyKind::Solid) {
+        let tol = 1e-7 * o.body.bbox().diagonal().max(1.0);
+        for f in o.body.face_ids() {
+            let face = o.body.face(f);
+            let ductile_geom::Surface::Plane { frame } = &face.surface else { continue };
+            if frame.z.dot(r.plane.z).abs() < 1.0 - 1e-9 || pts.iter().any(|p| (*p - frame.origin).dot(frame.z).abs() > tol) {
+                continue;
+            }
+            let Some(fr) = ductile_brep::profile::Region::from_face(&o.body, f) else { continue };
+            let flat = |l: &ductile_brep::profile::Loop3| -> Vec<ductile_geom::DVec2> { l.polygon(1e-3).into_iter().map(|p| fr.plane.to_local(p).truncate()).collect() };
+            let c = fr.plane.to_local(centre).truncate();
+            if point_in_polygon(c, &flat(&fr.outer)) && !fr.holes.iter().any(|h| point_in_polygon(c, &flat(h))) {
+                let n = if face.reversed { -frame.z } else { frame.z };
+                return Some((o.id, o.body.clone(), n));
+            }
+        }
+    }
+    None
 }
 
 /// Regions bounded by the closed curves of the selected wire objects.
@@ -1147,13 +1187,14 @@ impl ExtrudeTool {
                     let normal = ductile_brep::profile::loops_plane(&open).filter(|_| open.iter().any(|c| c.segments.iter().any(|s| !s.curve.is_linear()) || c.segments.len() > 1)).map(|f| f.z).unwrap_or(current_cplane().frame.z);
                     let poly: Vec<DVec3> = open.iter().flat_map(|c| c.polygon(1e-3)).collect();
                     let base = poly.iter().copied().sum::<DVec3>() / poly.len().max(1) as f64;
-                    return Some(Self { target: None, body: None, regions, open, normal, base, start_t: None, distance: 0.0, typed: None, cache: std::cell::RefCell::new(None) });
+                    return Some(Self { target: None, body: None, regions, open, normal, base, start_t: None, distance: 0.0, typed: None, onto: None, op: ExtrudeOp::Auto, cache: std::cell::RefCell::new(None) });
                 }
                 (None, None, regions)
             }
         };
         let poly = regions[0].outer.polygon(1e-3);
         let base = poly.iter().copied().sum::<DVec3>() / poly.len().max(1) as f64;
+        let onto = if target.is_none() { solid_under_region(doc, &regions[0]) } else { None };
         Some(Self {
             target,
             body,
@@ -1164,6 +1205,8 @@ impl ExtrudeTool {
             start_t: None,
             distance: 0.0,
             typed: None,
+            onto,
+            op: ExtrudeOp::Auto,
             cache: std::cell::RefCell::new(None),
         })
     }
@@ -1175,8 +1218,8 @@ impl ExtrudeTool {
     fn result(&self) -> (Option<Body>, Option<String>) {
         use ductile_brep::ops::boolean::{boolean, BoolOp};
         let d = self.value();
-        if let Some((cd, b, e)) = &*self.cache.borrow() {
-            if *cd == d {
+        if let Some((cd, cop, b, e)) = &*self.cache.borrow() {
+            if *cd == d && *cop == self.op {
                 return (b.clone(), e.clone());
             }
         }
@@ -1202,7 +1245,13 @@ impl ExtrudeTool {
             match (acc, &self.body) {
                 (Err(e), _) => (None, Some(e)),
                 (Ok(None), _) => (None, None),
-                (Ok(Some(prism)), None) => (Some(prism), None),
+                (Ok(Some(prism)), None) => match (self.on_solid_op(d), &self.onto) {
+                    (Some(op), Some((_, solid, _))) => match boolean(solid, &prism, op) {
+                        Ok(b) => (Some(b), None),
+                        Err(e) => (None, Some(e.to_string())),
+                    },
+                    _ => (Some(prism), None),
+                },
                 (Ok(Some(prism)), Some(body)) => {
                     let op = if d > 0.0 { BoolOp::Union } else { BoolOp::Difference };
                     match boolean(body, &prism, op) {
@@ -1212,8 +1261,21 @@ impl ExtrudeTool {
                 }
             }
         };
-        *self.cache.borrow_mut() = Some((d, out.0.clone(), out.1.clone()));
+        *self.cache.borrow_mut() = Some((d, self.op, out.0.clone(), out.1.clone()));
         out
+    }
+
+    /// The boolean an extrusion of curves applies to the solid they were
+    /// drawn on, if any.
+    fn on_solid_op(&self, d: f64) -> Option<ductile_brep::ops::boolean::BoolOp> {
+        use ductile_brep::ops::boolean::BoolOp;
+        let (_, _, n) = self.onto.as_ref()?;
+        match self.op {
+            ExtrudeOp::NewBody => None,
+            ExtrudeOp::Join => Some(BoolOp::Union),
+            ExtrudeOp::Cut => Some(BoolOp::Difference),
+            ExtrudeOp::Auto => Some(if self.normal.dot(*n) * d > 0.0 { BoolOp::Union } else { BoolOp::Difference }),
+        }
     }
 }
 
@@ -1222,7 +1284,7 @@ impl Tool for ExtrudeTool {
         "Extrude"
     }
     fn hint(&self) -> String {
-        match self.cache.borrow().as_ref().and_then(|c| c.2.clone()) {
+        match self.cache.borrow().as_ref().and_then(|c| c.3.clone()) {
             Some(e) => format!("Extrude failed: {e}"),
             None => format!("Extrude: move along the normal or type a distance ({:.4}), click or Enter to finish", self.value()),
         }
@@ -1248,14 +1310,23 @@ impl Tool for ExtrudeTool {
     }
     fn panel(&mut self, ui: &mut egui::Ui) -> bool {
         let mut d = self.value();
-        let ch = drag_value(ui, "Distance", &mut d, 0.05);
+        let mut ch = drag_value(ui, "Distance", &mut d, 0.05);
         if ch {
             self.typed = Some(d);
+        }
+        if self.onto.is_some() {
+            ui.horizontal(|ui| {
+                ui.label("Solid");
+                for (op, name) in [(ExtrudeOp::Auto, "Auto"), (ExtrudeOp::NewBody, "New"), (ExtrudeOp::Join, "Join"), (ExtrudeOp::Cut, "Cut")] {
+                    ch |= ui.selectable_value(&mut self.op, op, name).changed();
+                }
+            });
         }
         ch
     }
     fn hidden_objects(&self) -> Vec<ObjectId> {
-        match self.target {
+        let on = self.onto.as_ref().filter(|_| self.on_solid_op(self.value()).is_some()).map(|o| o.0);
+        match self.target.or(on) {
             Some(t) if self.result().0.is_some() => vec![t],
             _ => vec![],
         }
@@ -1266,7 +1337,8 @@ impl Tool for ExtrudeTool {
     fn commit(&mut self, doc: &mut Document) -> bool {
         let Some(b) = self.result().0 else { return false };
         doc.selection.clear();
-        match self.target {
+        let on = self.onto.as_ref().filter(|_| self.on_solid_op(self.value()).is_some()).map(|o| o.0);
+        match self.target.or(on) {
             Some(t) => doc.replace_body(t, b),
             None => {
                 let id = doc.add_body("Extrusion", b);
@@ -3258,6 +3330,28 @@ mod tests {
         let solid = doc.objects.last().unwrap();
         let expect = (12.0 - std::f64::consts::PI) * 2.0;
         assert!((volume(&solid.body).abs() - expect).abs() < 1e-2, "{}", volume(&solid.body));
+    }
+
+    #[test]
+    fn extruding_a_curve_on_a_face_joins_or_cuts_the_solid() {
+        use ductile_brep::profile::{wire_from_segments, Segment};
+        let circle = circle_at(DVec3::new(2.0, 1.5, 1.0), 1.0);
+        for (d, expect) in [(0.5, 12.0 + 0.5 * std::f64::consts::PI), (-0.5, 12.0 - 0.5 * std::f64::consts::PI)] {
+            let mut doc = Document::default();
+            let bx = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 3.0, 1.0)));
+            let c = doc.add_body("Circle", wire_from_segments(&[Segment::new(circle.clone(), 0.0, std::f64::consts::TAU)]));
+            doc.selection.insert(Pick::Object(c));
+            let mut e = ExtrudeTool::new(&doc).unwrap();
+            e.typed_value(Some(d));
+            assert!(e.commit(&mut doc));
+            assert_eq!(doc.objects.len(), 2, "no new body");
+            let v = volume(&doc.object(bx).unwrap().body);
+            assert!((v - expect).abs() < 1e-2, "{d}: {v} vs {expect}");
+        }
+    }
+
+    fn circle_at(c: DVec3, r: f64) -> ductile_geom::Curve3 {
+        ductile_geom::Curve3::Circle { frame: ductile_geom::Frame { origin: c, ..ductile_geom::Frame::WORLD }, radius: r }
     }
 
     #[test]

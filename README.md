@@ -52,7 +52,9 @@ code from them.
   and arcs stay lines and arcs, splines continue their own polynomial) or
   straight along the end tangent.
 - Extrude (E): push/pull planar faces, or turn closed planar curves (with
-  holes) into solids, with live preview.
+  holes) into solids, with live preview. Curves drawn on a solid's face
+  join it when pulled out and cut it when pushed in (or pick New, Join or
+  Cut in the panel).
 - Revolve (V) closed curves by any angle about a selected edge or the
   construction plane axes; exact planes, cylinders, cones, spheres, tori,
   and NURBS surfaces of revolution for splines.
