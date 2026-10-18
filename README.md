@@ -24,7 +24,8 @@ code from them.
   mode (1) spline control points show and can be selected and moved (G).
   Fillet (Shift+F) with curves selected rounds their corners (or just the
   selected vertices'); Offset curve (Alt+C) offsets them in their plane,
-  rounding outside corners.
+  rounding outside corners; Trim (Alt+T) deletes the pieces you click
+  between curve crossings.
 - Extrude (E): push/pull planar faces, or turn closed planar curves (with
   holes) into solids, with live preview.
 - Revolve (V) closed curves by any angle about a selected edge or the

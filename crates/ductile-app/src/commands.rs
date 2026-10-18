@@ -3,7 +3,7 @@
 
 use crate::app::DuctileApp;
 use crate::document::{Document, Pick, SelectMode};
-use crate::tools::{ArrayTool, BoxTool, CurveEditTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
+use crate::tools::{ArrayTool, BoxTool, CurveEditTool, TrimTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
 use ductile_geom::{DMat4, DVec3, Frame};
@@ -53,6 +53,7 @@ pub enum Command {
     OffsetSolid,
     OffsetFaces,
     OffsetCurve,
+    Trim,
     Union,
     Subtract,
     Intersect,
@@ -123,6 +124,7 @@ impl Command {
         Command::OffsetSolid,
         Command::OffsetFaces,
         Command::OffsetCurve,
+        Command::Trim,
         Command::Union,
         Command::Subtract,
         Command::Intersect,
@@ -194,6 +196,7 @@ impl Command {
             OffsetSolid => "Offset solid",
             OffsetFaces => "Offset faces",
             OffsetCurve => "Offset curve",
+            Trim => "Trim curves",
             Union => "Boolean union",
             Subtract => "Boolean subtract",
             Intersect => "Boolean intersect",
@@ -260,6 +263,7 @@ impl Command {
             OffsetSolid => "Alt+O",
             OffsetFaces => "Alt+F",
             OffsetCurve => "Alt+C",
+            Trim => "Alt+T",
             Union => "Shift+U",
             Loft => "Alt+L",
             Sweep => "Alt+W",
@@ -328,6 +332,7 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::O, false, false, true) => OffsetSolid,
         (Key::F, false, false, true) => OffsetFaces,
         (Key::C, false, false, true) => OffsetCurve,
+        (Key::T, false, false, true) => Trim,
         (Key::U, false, true, false) => Union,
         (Key::D, false, true, false) => Subtract,
         (Key::I, false, true, false) => Intersect,
@@ -516,6 +521,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 Some(t) => app.start_tool(std::boxed::Box::new(t)),
                 None => app.status = "Select edges to blend (edge mode: 2), or curves to round".into(),
             },
+        },
+        Trim => match TrimTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "There are no curves to trim".into(),
         },
         OffsetCurve => match CurveEditTool::new(&app.doc, true) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),

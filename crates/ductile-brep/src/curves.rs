@@ -223,6 +223,115 @@ fn crossing(a: &Segment, b: &Segment) -> Option<(f64, f64)> {
     (point_tangent(a, sa).0.distance(point_tangent(b, sb).0) < 1e-7).then_some((sa, sb))
 }
 
+/// Every segment split where any other crosses or touches it (within
+/// 1e-7), for trimming. Returns, per input segment, its pieces in order.
+pub fn split_at_crossings(segs: &[Segment]) -> Vec<Vec<Segment>> {
+    let tol = 1e-4;
+    let polys: Vec<Vec<DVec3>> = segs.iter().map(|s| s.sample(tol)).collect();
+    let mut cuts: Vec<Vec<f64>> = vec![Vec::new(); segs.len()];
+    for i in 0..segs.len() {
+        for j in i + 1..segs.len() {
+            for (pa, pb) in polyline_crossings(&polys[i], &polys[j]) {
+                // Refine from the polyline crossing to the curves' own.
+                if let Some((sa, sb)) = refine_crossing(&segs[i], &segs[j], pa, pb) {
+                    cuts[i].push(sa);
+                    cuts[j].push(sb);
+                }
+            }
+        }
+    }
+    segs.iter()
+        .zip(cuts)
+        .map(|(s, mut c)| {
+            c.retain(|x| *x > 1e-7 && *x < 1.0 - 1e-7);
+            c.sort_by(f64::total_cmp);
+            c.dedup_by(|a, b| (*a - *b).abs() < 1e-7);
+            let mut out = Vec::with_capacity(c.len() + 1);
+            // A cut circle starts at its first cut rather than at its seam.
+            if s.is_closed() && s.curve.period().is_some() && !c.is_empty() {
+                let first = c[0];
+                for w in c.windows(2) {
+                    out.push(trimmed(s, w[0], w[1]));
+                }
+                out.push(trimmed(s, *c.last().unwrap(), 1.0 + first));
+                return out;
+            }
+            let mut prev = 0.0;
+            for x in c.into_iter().chain([1.0]) {
+                out.push(trimmed(s, prev, x));
+                prev = x;
+            }
+            out
+        })
+        .collect()
+}
+
+/// Fractions along two sampled curves where their polylines cross.
+fn polyline_crossings(a: &[DVec3], b: &[DVec3]) -> Vec<(f64, f64)> {
+    let (na, nb) = ((a.len() - 1).max(1) as f64, (b.len() - 1).max(1) as f64);
+    let mut out = Vec::new();
+    for i in 0..a.len().saturating_sub(1) {
+        for k in 0..b.len().saturating_sub(1) {
+            let (p, r) = (a[i], a[i + 1] - a[i]);
+            let (q, s) = (b[k], b[k + 1] - b[k]);
+            let n = r.cross(s);
+            let nn = n.length_squared();
+            if nn < 1e-24 {
+                continue;
+            }
+            let t = (q - p).cross(s).dot(n) / nn;
+            let u = (q - p).cross(r).dot(n) / nn;
+            if !(-1e-9..=1.0 + 1e-9).contains(&t) || !(-1e-9..=1.0 + 1e-9).contains(&u) {
+                continue;
+            }
+            // Coplanar segments only.
+            let gap = (p + r * t).distance(q + s * u);
+            if gap > 1e-6 * (1.0 + r.length() + s.length()) {
+                continue;
+            }
+            out.push(((i as f64 + t) / na, (k as f64 + u) / nb));
+        }
+    }
+    out
+}
+
+/// Newton on the fractions of two segments for a common point, from a
+/// polyline estimate (polyline fractions approximate curve fractions).
+fn refine_crossing(a: &Segment, b: &Segment, mut sa: f64, mut sb: f64) -> Option<(f64, f64)> {
+    let (la, lb) = (seg_len(a), seg_len(b));
+    // The polyline fraction is by sample index; map through arc length by
+    // a few projection steps first.
+    for _ in 0..60 {
+        let (pa, ta) = point_tangent(a, sa);
+        let (pb, tb) = point_tangent(b, sb);
+        let f = pa - pb;
+        if f.length() < 1e-12 {
+            break;
+        }
+        let (ja, jb) = (ta * dpds(a, sa, la), -tb * dpds(b, sb, lb));
+        let (aa, ab, bb) = (ja.dot(ja), ja.dot(jb), jb.dot(jb));
+        let det = aa * bb - ab * ab;
+        if det.abs() < 1e-300 {
+            return None;
+        }
+        let (ra, rb) = (-ja.dot(f), -jb.dot(f));
+        sa = (sa + (bb * ra - ab * rb) / det).clamp(0.0, 1.0);
+        sb = (sb + (aa * rb - ab * ra) / det).clamp(0.0, 1.0);
+    }
+    (point_tangent(a, sa).0.distance(point_tangent(b, sb).0) < 1e-7).then_some((sa, sb))
+}
+
+/// Speed of a segment with respect to its traversal fraction.
+fn dpds(s: &Segment, x: f64, fallback: f64) -> f64 {
+    let t = param(s, x);
+    let v = s.curve.tangent(t).length() * (s.t1 - s.t0).abs();
+    if v.is_finite() && v > 0.0 {
+        v
+    } else {
+        fallback
+    }
+}
+
 /// One segment offset by `d` to the left of its travel direction about `z`.
 fn offset_segment(s: &Segment, d: f64, z: DVec3) -> Option<Segment> {
     match &s.curve {
@@ -299,6 +408,19 @@ mod tests {
         let out = fillet_corners(&segs, false, 0.3, None);
         assert_eq!(out.len(), 3);
         assert!(out[0].end().distance(out[1].start()) < 1e-9 && out[1].end().distance(out[2].start()) < 1e-9);
+    }
+
+    #[test]
+    fn splits_a_rectangle_and_a_circle() {
+        let mut segs = rect(4.0, 3.0);
+        segs.push(Segment::new(Curve3::Circle { frame: Frame { origin: DVec3::new(4.0, 3.0, 0.0), ..Frame::WORLD }, radius: 1.0 }, 0.0, 2.0 * PI));
+        let parts = split_at_crossings(&segs);
+        // The circle crosses the right and top sides once each.
+        assert_eq!(parts[1].len(), 2);
+        assert_eq!(parts[2].len(), 2);
+        assert_eq!(parts[0].len(), 1);
+        assert_eq!(parts[4].len(), 2);
+        assert!(parts[1][0].end().distance(DVec3::new(4.0, 2.0, 0.0)) < 1e-9, "{}", parts[1][0].end());
     }
 
     #[test]

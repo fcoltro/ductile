@@ -1429,7 +1429,7 @@ impl Tool for ShellTool {
     fn hint(&self) -> String {
         match self.cache.borrow().as_ref().and_then(|c| c.3.clone()) {
             Some(e) => format!("{} failed: {e}", self.name()),
-            None => format!("{}: drag or type a {} ({:.4}), click or Enter to finish", self.name(), if (self.mode != OffsetMode::Shell) { "distance" } else { "thickness" }, self.amount()),
+            None => format!("{}: drag or type a {} ({:.4}), click or Enter to finish", self.name(), if self.mode != OffsetMode::Shell { "distance" } else { "thickness" }, self.amount()),
         }
     }
     fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
@@ -1437,7 +1437,7 @@ impl Tool for ShellTool {
         let t0 = *self.start_t.get_or_insert(t);
         if self.typed.is_none() {
             let d = t - t0;
-            self.value = if (self.mode != OffsetMode::Shell) { snap_len(d.abs(), p.world_per_px).copysign(d) } else { snap_len(d.max(0.0), p.world_per_px) };
+            self.value = if self.mode != OffsetMode::Shell { snap_len(d.abs(), p.world_per_px).copysign(d) } else { snap_len(d.max(0.0), p.world_per_px) };
         }
         if p.clicked {
             return ToolOutcome::Finished;
@@ -1454,9 +1454,9 @@ impl Tool for ShellTool {
     }
     fn panel(&mut self, ui: &mut egui::Ui) -> bool {
         let mut t = self.amount();
-        let ch = drag_value(ui, if (self.mode != OffsetMode::Shell) { "Distance" } else { "Thickness" }, &mut t, 0.01);
+        let ch = drag_value(ui, if self.mode != OffsetMode::Shell { "Distance" } else { "Thickness" }, &mut t, 0.01);
         if ch {
-            self.typed = Some(if (self.mode != OffsetMode::Shell) { t } else { t.max(0.0) });
+            self.typed = Some(if self.mode != OffsetMode::Shell { t } else { t.max(0.0) });
         }
         ch
     }
@@ -1468,7 +1468,7 @@ impl Tool for ShellTool {
         }
     }
     fn typed_value(&mut self, v: Option<f64>) {
-        self.typed = v.map(|x| if (self.mode != OffsetMode::Shell) { x } else { x.abs() });
+        self.typed = v.map(|x| if self.mode != OffsetMode::Shell { x } else { x.abs() });
     }
     fn commit(&mut self, doc: &mut Document) -> bool {
         let Some(b) = self.result().0 else { return false };
@@ -1615,6 +1615,124 @@ impl Tool for CurveEditTool {
             }
         }
         any
+    }
+}
+
+// ----------------------------------------------------------------- Trim ----
+
+/// Click pieces of curves, between their crossings with other curves, to
+/// delete them. Works on all visible curves.
+pub struct TrimTool {
+    /// Per curve object, its pieces (None once trimmed away).
+    pieces: Vec<(ObjectId, Vec<Option<ductile_brep::profile::Segment>>)>,
+    hover: Option<(usize, usize)>,
+    trimmed: usize,
+}
+
+impl TrimTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let ids: Vec<ObjectId> = doc.objects.iter().filter(|o| o.visible && o.body.kind == ductile_brep::BodyKind::Wire).map(|o| o.id).collect();
+        if ids.is_empty() {
+            return None;
+        }
+        let mut segs = Vec::new();
+        let mut owner = Vec::new();
+        for id in &ids {
+            for e in &doc.object(*id)?.body.edges {
+                segs.push(ductile_brep::profile::Segment::new(e.curve.clone(), e.t0, e.t1));
+                owner.push(*id);
+            }
+        }
+        let parts = ductile_brep::curves::split_at_crossings(&segs);
+        let mut pieces: Vec<(ObjectId, Vec<Option<ductile_brep::profile::Segment>>)> = ids.iter().map(|id| (*id, Vec::new())).collect();
+        for (o, ps) in owner.into_iter().zip(parts) {
+            let slot = pieces.iter_mut().find(|p| p.0 == o).unwrap();
+            slot.1.extend(ps.into_iter().map(Some));
+        }
+        Some(Self { pieces, hover: None, trimmed: 0 })
+    }
+
+    fn pick(&self, p: &PointerInfo) -> Option<(usize, usize)> {
+        let mut best = (f64::INFINITY, None);
+        for (i, (_, ps)) in self.pieces.iter().enumerate() {
+            for (k, s) in ps.iter().enumerate() {
+                let Some(s) = s else { continue };
+                for w in s.sample(1e-3).windows(2) {
+                    let d = ray_segment_distance(&p.ray, w[0], w[1]);
+                    if d < best.0 {
+                        best = (d, Some((i, k)));
+                    }
+                }
+            }
+        }
+        (best.0 < 8.0 * p.world_per_px).then_some(best.1).flatten()
+    }
+}
+
+/// Distance from a view ray to a line segment.
+fn ray_segment_distance(ray: &Ray, a: DVec3, b: DVec3) -> f64 {
+    let mut best = f64::INFINITY;
+    for i in 0..=8 {
+        let q = a.lerp(b, i as f64 / 8.0);
+        let t = (q - ray.origin).dot(ray.dir).max(0.0);
+        best = best.min((ray.origin + ray.dir * t).distance(q));
+    }
+    best
+}
+
+impl Tool for TrimTool {
+    fn name(&self) -> &'static str {
+        "Trim"
+    }
+    fn hint(&self) -> String {
+        format!("Trim: click curve pieces to delete them ({} removed), Enter to finish", self.trimmed)
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        self.hover = self.pick(p);
+        if p.clicked {
+            if let Some((i, k)) = self.hover.take() {
+                self.pieces[i].1[k] = None;
+                self.trimmed += 1;
+            }
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let segs: Vec<_> = self.pieces.iter().flat_map(|(_, ps)| ps.iter().flatten().cloned()).collect();
+        (!segs.is_empty()).then(|| ductile_brep::profile::wire_from_segments(&segs))
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        if let Some((i, k)) = self.hover {
+            if let Some(s) = &self.pieces[i].1[k] {
+                for w in s.sample(1e-3).windows(2) {
+                    out.push(LineInstance::new(w[0], w[1], [1.0, 0.3, 0.25, 1.0], 4.0));
+                }
+            }
+        }
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        ui.label(format!("{} pieces removed", self.trimmed));
+        false
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        self.pieces.iter().map(|p| p.0).collect()
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        if self.trimmed == 0 {
+            return false;
+        }
+        for (id, ps) in &self.pieces {
+            if ps.iter().all(|s| s.is_some()) {
+                continue;
+            }
+            let segs: Vec<_> = ps.iter().flatten().cloned().collect();
+            if segs.is_empty() {
+                doc.remove(*id);
+            } else {
+                doc.replace_body(*id, ductile_brep::profile::wire_from_segments(&segs));
+            }
+        }
+        true
     }
 }
 
@@ -1959,6 +2077,37 @@ mod tests {
         let pi = std::f64::consts::PI;
         let (area, perimeter) = (12.0 - (4.0 - pi) * 0.25, 10.0 + pi);
         let expect = area + perimeter * 0.25 + pi * 0.0625;
+        assert!((a - expect).abs() < 2e-2, "{a} vs {expect}");
+    }
+
+    #[test]
+    fn trims_a_circle_against_a_rectangle() {
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        let mut r = CurveTool::new(CurveKind::Rectangle);
+        click(&mut r, &doc, DVec3::ZERO, true);
+        assert!(click(&mut r, &doc, DVec3::new(4.0, 3.0, 0.0), true));
+        assert!(r.commit(&mut doc));
+        let mut c = CurveTool::new(CurveKind::Circle);
+        click(&mut c, &doc, DVec3::new(4.0, 3.0, 0.0), true);
+        c.typed_value(Some(1.0));
+        assert!(c.commit(&mut doc));
+        let mut t = TrimTool::new(&doc).unwrap();
+        // Remove the circle's arc outside the rectangle and the
+        // rectangle's corner inside the circle.
+        let ray = |x: f64, y: f64| PointerInfo { ray: Ray { origin: DVec3::new(x, y, 10.0), dir: -DVec3::Z }, point: None, plane_point: None, clicked: true, world_per_px: 0.01 };
+        t.pointer(&doc, &CPlane::default(), &ray(5.0, 3.0));
+        t.pointer(&doc, &CPlane::default(), &ray(4.0, 2.5));
+        t.pointer(&doc, &CPlane::default(), &ray(3.5, 3.0));
+        assert!(t.commit(&mut doc));
+
+        // What is left closes into one region: the rectangle with a bite.
+        doc.selection.clear();
+        for o in doc.objects.iter() {
+            doc.selection.insert(Pick::Object(o.id));
+        }
+        let a = extrude_selected(&mut doc);
+        let expect = 12.0 - std::f64::consts::PI / 4.0;
         assert!((a - expect).abs() < 2e-2, "{a} vs {expect}");
     }
 
