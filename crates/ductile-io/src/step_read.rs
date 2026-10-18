@@ -4,7 +4,7 @@
 use crate::step_parse::{parse, Entity, StepFile, Value};
 use ductile_brep::{Body, BodyKind, Coedge, EdgeId, VertexId};
 use ductile_geom::nurbs::{NurbsCurve, NurbsSurface};
-use ductile_geom::{Curve3, DVec3, DVec4, Frame, Surface};
+use ductile_geom::{Curve3, DMat4, DVec3, DVec4, Frame, Surface};
 use std::collections::HashMap;
 use std::f64::consts::TAU;
 
@@ -551,7 +551,77 @@ impl Reader<'_> {
     }
 }
 
-/// Reads the B-rep bodies of a STEP file.
+impl Reader<'_> {
+    /// Reads one B-rep representation item, or `None` if `id` is not one.
+    fn brep(&mut self, id: u64) -> Option<R<Body>> {
+        let e = self.get(id).ok()?;
+        let name = e.params().first().and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let res = match e.name() {
+            "MANIFOLD_SOLID_BREP" => ref_at(e.params(), 1).and_then(|s| self.shell_body(name.clone(), &[(s, true)], BodyKind::Solid)),
+            "BREP_WITH_VOIDS" => ref_at(e.params(), 1).and_then(|s| {
+                let mut shells = vec![(s, true)];
+                shells.extend(refs_at(e.params(), 2).unwrap_or_default().into_iter().map(|v| (v, true)));
+                self.shell_body(name.clone(), &shells, BodyKind::Solid)
+            }),
+            "SHELL_BASED_SURFACE_MODEL" => {
+                refs_at(e.params(), 1).and_then(|ss| self.shell_body(name.clone(), &ss.into_iter().map(|s| (s, true)).collect::<Vec<_>>(), BodyKind::Sheet))
+            }
+            _ => return None,
+        };
+        Some(res.map(|mut b| {
+            if b.faces.is_empty() {
+                return b;
+            }
+            ductile_brep::ops::seams::add_seams(&mut b);
+            // A closed solid encloses positive volume; some writers leave
+            // the sense of whole-surface faces ambiguous.
+            if b.kind == BodyKind::Solid && ductile_brep::tessellate(&b, &ductile_brep::TessOptions::for_size(b.bbox().diagonal())).volume() < 0.0 {
+                b = ductile_brep::primitives::flip_orientation(b);
+            }
+            if b.kind == BodyKind::Solid && ductile_brep::ops::boolean::open_edges(&b) > 0 {
+                self.warnings.push(format!("{}: shell is not closed; imported as a surface", if name.is_empty() { "body" } else { &name }));
+                b.kind = BodyKind::Sheet;
+            }
+            b
+        }))
+    }
+
+    fn matrix(&self, placement: u64) -> R<DMat4> {
+        let f = self.placement(placement)?;
+        Ok(DMat4::from_cols(f.x.extend(0.0), f.y.extend(0.0), f.z.extend(0.0), f.origin.extend(1.0)))
+    }
+
+    /// Transform from the frame of `from` to the frame of `to` (both
+    /// placements): maps `from` onto `to`.
+    fn relative(&self, from: u64, to: u64) -> R<DMat4> {
+        Ok(self.matrix(to)? * self.matrix(from)?.inverse())
+    }
+}
+
+/// Items of a shape representation entity, if `e` is one.
+fn rep_items(e: &Entity) -> Option<Vec<u64>> {
+    let p = if e.is_complex() { e.part("REPRESENTATION").or_else(|| e.part("SHAPE_REPRESENTATION"))? } else if e.name().ends_with("REPRESENTATION") && e.name() != "SHAPE_DEFINITION_REPRESENTATION" && e.name() != "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION" {
+        e.params()
+    } else {
+        return None;
+    };
+    p.get(1)?.as_list().map(|l| l.iter().filter_map(|v| v.as_ref()).collect())
+}
+
+fn find(parent: &mut HashMap<u64, u64>, x: u64) -> u64 {
+    let mut r = x;
+    while let Some(&p) = parent.get(&r) {
+        if p == r {
+            break;
+        }
+        r = p;
+    }
+    parent.insert(x, r);
+    r
+}
+
+/// Reads the B-rep bodies of a STEP file. Assemblies are flattened: each
+/// placed instance of a part becomes its own body, moved into place.
 pub fn read_step(text: &str) -> crate::Result<StepImport> {
     let f = parse(text).map_err(crate::IoError::Parse)?;
     let (scale, angle) = units(&f);
@@ -563,40 +633,142 @@ pub fn read_step(text: &str) -> crate::Result<StepImport> {
         .filter_map(|e| e.params().get(1).and_then(|v| v.as_list()).map(|c| c.iter().filter_map(|x| x.as_f64()).fold(0.0f64, |m, x| m.max(x.abs()))))
         .fold(1.0f64, f64::max);
     let mut r = Reader { f: &f, scale, angle, reach: 2.0 * extent * scale, warnings: Vec::new() };
-    let mut bodies = Vec::new();
+
+    // Shape representations, grouped by identity relationships.
+    let mut items: HashMap<u64, Vec<u64>> = HashMap::new();
+    for &id in &f.order {
+        if let Some(it) = rep_items(&f.entities[&id]) {
+            items.insert(id, it);
+        }
+    }
+    let mut group: HashMap<u64, u64> = items.keys().map(|&k| (k, k)).collect();
+    // (parent rep, child rep, transform from child to parent)
+    let mut links: Vec<(u64, u64, Option<(u64, u64)>)> = Vec::new();
     for &id in &f.order {
         let e = &f.entities[&id];
-        let name = e.params().first().and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let res = match e.name() {
-            "MANIFOLD_SOLID_BREP" => ref_at(e.params(), 1).and_then(|s| r.shell_body(name.clone(), &[(s, true)], BodyKind::Solid)),
-            "BREP_WITH_VOIDS" => ref_at(e.params(), 1).and_then(|s| {
-                let mut shells = vec![(s, true)];
-                shells.extend(refs_at(e.params(), 2).unwrap_or_default().into_iter().map(|v| (v, true)));
-                r.shell_body(name.clone(), &shells, BodyKind::Solid)
-            }),
-            "SHELL_BASED_SURFACE_MODEL" => {
-                refs_at(e.params(), 1).and_then(|ss| r.shell_body(name.clone(), &ss.into_iter().map(|s| (s, true)).collect::<Vec<_>>(), BodyKind::Sheet))
+        let rel = if e.is_complex() { e.part("REPRESENTATION_RELATIONSHIP") } else if e.name() == "SHAPE_REPRESENTATION_RELATIONSHIP" || e.name() == "REPRESENTATION_RELATIONSHIP" { Some(e.params()) } else { None };
+        let Some(rel) = rel else { continue };
+        let (Ok(r1), Ok(r2)) = (ref_at(rel, 2), ref_at(rel, 3)) else { continue };
+        if !items.contains_key(&r1) || !items.contains_key(&r2) {
+            continue;
+        }
+        let t = e.part("REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION").and_then(|p| p.first()).and_then(|v| v.as_ref());
+        match t.and_then(|t| f.entities.get(&t)) {
+            Some(te) if te.name() == "ITEM_DEFINED_TRANSFORMATION" => match (ref_at(te.params(), 2), ref_at(te.params(), 3)) {
+                (Ok(a), Ok(b)) => links.push((r2, r1, Some((a, b)))),
+                _ => r.warnings.push(format!("#{id}: bad transformation")),
+            },
+            Some(te) => {
+                r.warnings.push(format!("#{id}: {} placement not supported; part left unmoved", te.name()));
+                links.push((r2, r1, None));
             }
-            _ => continue,
+            None => {
+                let (a, b) = (find(&mut group, r1), find(&mut group, r2));
+                group.insert(a, b);
+            }
+        }
+    }
+    // Mapped items place a representation inside another.
+    for (&rep, its) in &items {
+        for &it in its {
+            let Some(e) = f.entities.get(&it) else { continue };
+            if e.name() != "MAPPED_ITEM" {
+                continue;
+            }
+            let Some(map) = ref_at(e.params(), 1).ok().and_then(|m| f.entities.get(&m)) else { continue };
+            let (Ok(origin), Ok(child), Ok(target)) = (ref_at(map.params(), 0), ref_at(map.params(), 1), ref_at(e.params(), 2)) else { continue };
+            if items.contains_key(&child) {
+                links.push((rep, child, Some((origin, target))));
+            }
+        }
+    }
+    let mut members: HashMap<u64, Vec<u64>> = HashMap::new();
+    for &rep in items.keys() {
+        let g = find(&mut group, rep);
+        members.entry(g).or_default().push(rep);
+    }
+    for m in members.values_mut() {
+        m.sort();
+    }
+    let mut children: HashMap<u64, Vec<(u64, DMat4)>> = HashMap::new();
+    let mut is_child = std::collections::HashSet::new();
+    for (p, c, t) in links {
+        let m = match t {
+            Some((a, b)) => match r.relative(a, b) {
+                Ok(m) => m,
+                Err(e) => {
+                    r.warnings.push(format!("bad placement: {e}"));
+                    DMat4::IDENTITY
+                }
+            },
+            None => DMat4::IDENTITY,
         };
-        match res {
-            Ok(mut b) => {
-                if b.faces.is_empty() {
-                    continue;
-                }
-                ductile_brep::ops::seams::add_seams(&mut b);
-                // A closed solid encloses positive volume; some writers leave
-                // the sense of whole-surface faces ambiguous.
-                if b.kind == BodyKind::Solid && ductile_brep::tessellate(&b, &ductile_brep::TessOptions::for_size(b.bbox().diagonal())).volume() < 0.0 {
-                    b = ductile_brep::primitives::flip_orientation(b);
-                }
-                if b.kind == BodyKind::Solid && ductile_brep::ops::boolean::open_edges(&b) > 0 {
-                    r.warnings.push(format!("{}: shell is not closed; imported as a surface", if name.is_empty() { "body" } else { &name }));
-                    b.kind = BodyKind::Sheet;
-                }
-                bodies.push(Imported { name: if name.is_empty() { format!("Body {}", bodies.len() + 1) } else { name }, body: b });
+        let (gp, gc) = (find(&mut group, p), find(&mut group, c));
+        if gp != gc {
+            children.entry(gp).or_default().push((gc, m));
+            is_child.insert(gc);
+        }
+    }
+    // Part names: representation -> product, through the shape definition.
+    let mut part_name: HashMap<u64, String> = HashMap::new();
+    for e in f.entities.values().filter(|e| e.name() == "SHAPE_DEFINITION_REPRESENTATION") {
+        let product_name = (|| {
+            let pds = f.entities.get(&ref_at(e.params(), 0).ok()?)?;
+            let pd = f.entities.get(&ref_at(pds.params(), 2).ok()?)?;
+            let pdf = f.entities.get(&ref_at(pd.params(), 2).ok()?)?;
+            let prod = f.entities.get(&ref_at(pdf.params(), 2).ok()?)?;
+            prod.params().first()?.as_str().map(str::to_string)
+        })();
+        if let (Some(n), Ok(rep)) = (product_name, ref_at(e.params(), 1)) {
+            part_name.insert(find(&mut group, rep), n);
+        }
+    }
+
+    let mut bodies = Vec::new();
+    let mut cache: HashMap<u64, Option<Body>> = HashMap::new();
+    let mut placed = std::collections::HashSet::new();
+    let mut emit = |r: &mut Reader, id: u64, m: &DMat4, fallback: &str, bodies: &mut Vec<Imported>| {
+        let b = cache.entry(id).or_insert_with(|| match r.brep(id) {
+            Some(Ok(b)) if !b.faces.is_empty() => Some(b),
+            Some(Err(e)) => {
+                r.warnings.push(format!("#{id} skipped: {e}"));
+                None
             }
-            Err(e) => r.warnings.push(format!("#{id} skipped: {e}")),
+            _ => None,
+        });
+        let Some(b) = b else { return };
+        let own = f.entities[&id].params().first().and_then(|v| v.as_str()).unwrap_or("");
+        let name = if !own.is_empty() { own.to_string() } else if !fallback.is_empty() { fallback.to_string() } else { format!("Body {}", bodies.len() + 1) };
+        let body = if *m == DMat4::IDENTITY { b.clone() } else { b.transformed(m) };
+        bodies.push(Imported { name, body });
+    };
+    let mut roots: Vec<u64> = members.keys().copied().filter(|g| !is_child.contains(g)).collect();
+    roots.sort();
+    let mut stack: Vec<(u64, DMat4, usize)> = roots.into_iter().rev().map(|g| (g, DMat4::IDENTITY, 0)).collect();
+    while let Some((g, m, depth)) = stack.pop() {
+        if depth > 32 {
+            r.warnings.push("assembly nested too deeply (cycle?)".into());
+            continue;
+        }
+        let fallback = part_name.get(&g).cloned().unwrap_or_default();
+        for &rep in &members[&g] {
+            for &it in &items[&rep] {
+                if f.entities.get(&it).is_some_and(|e| matches!(e.name(), "MANIFOLD_SOLID_BREP" | "BREP_WITH_VOIDS" | "SHELL_BASED_SURFACE_MODEL")) {
+                    placed.insert(it);
+                    emit(&mut r, it, &m, &fallback, &mut bodies);
+                }
+            }
+        }
+        if let Some(cs) = children.get(&g) {
+            for (c, t) in cs.iter().rev() {
+                stack.push((*c, m * *t, depth + 1));
+            }
+        }
+    }
+    // B-reps outside any representation are read where they stand.
+    for &id in &f.order {
+        if !placed.contains(&id) && matches!(f.entities[&id].name(), "MANIFOLD_SOLID_BREP" | "BREP_WITH_VOIDS" | "SHELL_BASED_SURFACE_MODEL") {
+            emit(&mut r, id, &DMat4::IDENTITY, "", &mut bodies);
         }
     }
     Ok(StepImport { bodies, warnings: r.warnings })

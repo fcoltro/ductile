@@ -50,3 +50,23 @@ fn torus() {
 fn vase() {
     check("occ_vase", 1, 1507.9645);
 }
+
+#[test]
+fn assembly_instances_are_placed() {
+    let path = format!("{}/tests/data/occ_assembly.step", env!("CARGO_MANIFEST_DIR"));
+    let imp = ductile_io::step_read::read_step(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert!(imp.warnings.is_empty(), "{:?}", imp.warnings);
+    let names: Vec<&str> = imp.bodies.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["block", "block", "pin"]);
+    let opts = TessOptions { chord_tol: 1e-3, angle_tol: 0.1 };
+    let vols: Vec<f64> = imp.bodies.iter().map(|b| tessellate(&b.body, &opts).volume()).collect();
+    assert!((vols[0] - 24.0).abs() < 1e-6 && (vols[1] - 24.0).abs() < 1e-6, "{vols:?}");
+    assert!((vols[2] - std::f64::consts::PI * 5.0).abs() < 0.05, "{vols:?}");
+    // The block (4 x 3 x 2 at the origin) is placed as is, then moved to
+    // x = 10 and turned a quarter turn about Z; the pin stands at y = 20.
+    let bb: Vec<_> = imp.bodies.iter().map(|b| b.body.bbox()).collect();
+    let near = |a: ductile_geom::DVec3, b: [f64; 3]| (a - ductile_geom::DVec3::from(b)).length() < 1e-2;
+    assert!(near(bb[0].min, [0.0, 0.0, 0.0]) && near(bb[0].max, [4.0, 3.0, 2.0]), "{:?}", bb[0]);
+    assert!(near(bb[1].min, [7.0, 0.0, 0.0]) && near(bb[1].max, [10.0, 4.0, 2.0]), "{:?}", bb[1]);
+    assert!((bb[2].min.y - 19.0).abs() < 1e-2 && (bb[2].max.z - 5.0).abs() < 1e-2, "{:?}", bb[2]);
+}
