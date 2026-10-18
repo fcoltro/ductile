@@ -113,6 +113,9 @@ code from them.
 - Zebra stripes (Alt+R, or the Zebra button) to judge surface continuity:
   stripes stay unbroken across tangent (G1) joins and keep their direction
   across curvature-continuous (G2) ones. Headless: `--zebra`.
+- Curvature combs (the Curvature button) on the selected curves, edges and
+  solids, all at one scale so joins compare, with G0 / G1 / G2 marked where
+  picked curves meet. Headless: `--curvature`.
 - Move (G) / rotate (R) / scale (S) / mirror (Alt+X), linear and radial
   arrays, undo/redo. Mirror reflects across the construction plane,
   or across a selected planar face; a solid mirrored across its own face is

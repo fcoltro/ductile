@@ -54,6 +54,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                     Command::ToggleEdges,
                     Command::ToggleXray,
                     Command::ToggleZebra,
+                    Command::ToggleCurvature,
                     Command::ToggleSnap,
                 ] {
                     menu_item(app, ui, c);
@@ -90,6 +91,12 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 }
                 if ui.add(egui::Button::new("Snap").selected(app.snap_enabled)).clicked() {
                     app.pending.push(Command::ToggleSnap);
+                }
+                if app.show_curvature {
+                    ui.add(egui::DragValue::new(&mut app.comb_scale).speed(0.002).range(0.001..=5.0).max_decimals(3)).on_hover_text("Comb scale");
+                }
+                if ui.add(egui::Button::new("Curvature").selected(app.show_curvature)).on_hover_text("Curvature combs on the selected curves and edges").clicked() {
+                    app.pending.push(Command::ToggleCurvature);
                 }
                 if ui.add(egui::Button::new("Zebra").selected(app.zebra())).clicked() {
                     app.pending.push(Command::ToggleZebra);

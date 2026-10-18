@@ -21,6 +21,7 @@ pub struct Options {
     pub open: Option<std::path::PathBuf>,
     pub demo: bool,
     pub zebra: bool,
+    pub curvature: bool,
     /// Camera override: target x, y, z, distance, yaw and pitch in degrees.
     pub camera: Option<[f64; 6]>,
     /// Index of an object to select at start (for screenshots).
@@ -52,6 +53,10 @@ pub struct DuctileApp {
     typed_echo: Option<char>,
     pub show_grid: bool,
     pub show_edges: bool,
+    /// Curvature combs on the selected curves and edges.
+    pub show_curvature: bool,
+    /// Length of the longer comb teeth, as a fraction of the curves' size.
+    pub comb_scale: f64,
     pub palette_open: bool,
     pub palette_query: String,
     pub show_help: bool,
@@ -117,6 +122,8 @@ impl DuctileApp {
             typed_echo: None,
             show_grid: true,
             show_edges: true,
+            show_curvature: false,
+            comb_scale: 0.1,
             palette_open: false,
             palette_query: String::new(),
             show_help: false,
@@ -142,6 +149,7 @@ impl DuctileApp {
         if opts.zebra {
             app.toggle_zebra();
         }
+        app.show_curvature = opts.curvature;
         if let Some(id) = opts.select.and_then(|i| app.doc.objects.get(i)).map(|o| o.id) {
             app.doc.selection.insert(Pick::Object(id));
         }
@@ -491,10 +499,14 @@ impl DuctileApp {
         if let Some(t) = &self.tool {
             t.guides(&mut overlay);
         }
-        let snap_label = self.snap_marker.take().filter(|_| self.tool.is_some()).map(|(p, label)| {
+        let mut labels: Vec<(DVec3, String)> = Vec::new();
+        if let Some((p, label)) = self.snap_marker.take().filter(|_| self.tool.is_some()) {
             overlay.push(LineInstance::point(p, [0.3, 0.9, 1.0, 1.0], 6.0));
-            (p, label)
-        });
+            labels.extend(label.map(|l| (p, l.to_string())));
+        }
+        if self.show_curvature {
+            self.curvature_overlay(&mut overlay, &mut labels);
+        }
         vertex_overlay(&self.doc, &mut overlay);
         let ppp = ui.ctx().pixels_per_point();
         let px = [(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32];
@@ -507,12 +519,12 @@ impl DuctileApp {
             ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(20));
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "wgpu renderer unavailable", egui::FontId::proportional(16.0), egui::Color32::GRAY);
         }
-        // The snap's label beside its marker.
-        if let Some((p, Some(label))) = snap_label {
+        // Labels beside their points: the snap's, continuity markers.
+        for (p, label) in labels {
             if let Some(n) = self.camera.project(p) {
                 let at = egui::pos2(rect.min.x + (n.x as f32 * 0.5 + 0.5) * rect.width() + 10.0, rect.min.y + (0.5 - n.y as f32 * 0.5) * rect.height() - 10.0);
                 let painter = ui.painter();
-                let galley = painter.layout_no_wrap(label.to_string(), egui::FontId::proportional(12.0), egui::Color32::from_gray(235));
+                let galley = painter.layout_no_wrap(label, egui::FontId::proportional(12.0), egui::Color32::from_gray(235));
                 let bg = egui::Rect::from_min_size(at, galley.size()).expand(3.0);
                 painter.rect_filled(bg, 3.0, egui::Color32::from_black_alpha(190));
                 painter.galley(at, galley, egui::Color32::WHITE);
@@ -682,6 +694,57 @@ impl DuctileApp {
                         _ => DVec3::Z,
                     } * sign;
                     self.camera.set_view(dir);
+                }
+            }
+        }
+    }
+
+    /// Curvature combs on the selected curves and edges (all of a selected
+    /// object's), and G0 / G1 / G2 where two of them meet.
+    fn curvature_overlay(&self, out: &mut Vec<LineInstance>, labels: &mut Vec<(DVec3, String)>) {
+        // Picked edges and whole curves are checked for continuity where
+        // they meet; a selected solid's edges only get combs.
+        let mut edges: Vec<(&ductile_brep::topo::Edge, bool)> = self.doc.selected_edges().into_iter().filter_map(|(o, e)| Some((self.doc.object(o)?.body.edge(e), true))).collect();
+        for id in self.doc.selected_objects() {
+            if let Some(ob) = self.doc.object(id) {
+                let wire = ob.body.kind == ductile_brep::BodyKind::Wire;
+                edges.extend((0..ob.body.edges.len() as u32).map(ductile_brep::EdgeId).filter(|e| !is_seam(&ob.body, *e)).map(|e| (ob.body.edge(e), wire)));
+            }
+        }
+        if edges.is_empty() {
+            return;
+        }
+        let mut bb = ductile_geom::BBox3::EMPTY;
+        for (e, _) in &edges {
+            bb = bb.union(&e.curve.bbox(e.t0, e.t1));
+        }
+        let size = bb.diagonal().max(1e-9);
+        let combs: Vec<_> = edges.iter().map(|(e, _)| crate::analysis::comb(&e.curve, e.t0, e.t1, 1.0)).collect();
+        // Scaled so the longer teeth come to `comb_scale` of the curves'
+        // size, the same scale for all of them so joins compare.
+        let mut k: Vec<f64> = combs.iter().flat_map(|(teeth, _)| teeth.iter().map(|(p, q)| p.distance(*q))).collect();
+        k.sort_by(f64::total_cmp);
+        let high = k[(k.len() * 9 / 10).min(k.len() - 1)];
+        if high < 1e-12 {
+            return;
+        }
+        let scale = self.comb_scale * size / high;
+        let (tooth, hull) = ([0.95, 0.35, 0.55, 0.55], [0.95, 0.45, 0.65, 0.95]);
+        for (teeth, _) in &combs {
+            let tips: Vec<DVec3> = teeth.iter().map(|(p, q)| *p + (*q - *p) * scale).collect();
+            out.extend(teeth.iter().zip(&tips).map(|((p, _), q)| LineInstance::new(*p, *q, tooth, 1.0)));
+            out.extend(tips.windows(2).map(|w| LineInstance::new(w[0], w[1], hull, 1.5)));
+        }
+        let tol = 1e-6 * (1.0 + size);
+        let joined: Vec<&ductile_brep::topo::Edge> = edges.iter().filter(|(_, j)| *j).map(|(e, _)| *e).collect();
+        for (i, a) in joined.iter().enumerate() {
+            for b in &joined[i + 1..] {
+                for ta in [a.t0, a.t1] {
+                    for tb in [b.t0, b.t1] {
+                        if let Some(g) = crate::analysis::continuity(&a.curve, ta, &b.curve, tb, tol) {
+                            labels.push((a.curve.point(ta), g.to_string()));
+                        }
+                    }
                 }
             }
         }

@@ -88,6 +88,7 @@ pub enum Command {
     ToggleEdges,
     ToggleXray,
     ToggleZebra,
+    ToggleCurvature,
     ToggleSnap,
     SetCPlane,
     SetCPlaneOnly,
@@ -180,6 +181,7 @@ impl Command {
         Command::ToggleEdges,
         Command::ToggleXray,
         Command::ToggleZebra,
+        Command::ToggleCurvature,
         Command::ToggleSnap,
         Command::SetCPlane,
         Command::SetCPlaneOnly,
@@ -273,6 +275,7 @@ impl Command {
             ToggleEdges => "Toggle edges",
             ToggleXray => "Toggle x-ray",
             ToggleZebra => "Toggle zebra stripes",
+            ToggleCurvature => "Toggle curvature combs",
             ToggleSnap => "Toggle snapping",
             SetCPlane => "Construction plane from selection, and look at it",
             SetCPlaneOnly => "Construction plane from selection",
@@ -310,7 +313,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
     // Shift+R repeats modeling commands, not navigation or selection.
     let fleeting = matches!(
         cmd,
-        Repeat | Palette | Help | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
+        Repeat | Palette | Help | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleCurvature | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
     );
     if !fleeting {
         app.last_command = Some(cmd);
@@ -696,6 +699,12 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         ToggleEdges => app.show_edges = !app.show_edges,
         ToggleXray => app.toggle_xray(),
         ToggleZebra => app.toggle_zebra(),
+        ToggleCurvature => {
+            app.show_curvature = !app.show_curvature;
+            if app.show_curvature && app.doc.selection.is_empty() {
+                app.status = "Curvature combs show on the selected curves and edges".into();
+            }
+        }
         ToggleSnap => app.snap_enabled = !app.snap_enabled,
         Palette => {
             app.palette_open = true;
