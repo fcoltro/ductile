@@ -1200,6 +1200,25 @@ pub fn join_selected(doc: &mut Document) -> Result<ObjectId, String> {
     Ok(doc.add_body("Curve", ductile_brep::profile::wire_from_segments(&segs)))
 }
 
+/// Sews the selected surfaces into one along the edges they share; true
+/// when they closed up into a solid.
+pub fn join_sheets_selected(doc: &mut Document) -> Result<(ObjectId, bool), String> {
+    let ids: Vec<ObjectId> = doc.selected_objects().into_iter().filter(|id| doc.object(*id).is_some_and(|o| o.body.kind == ductile_brep::BodyKind::Sheet)).collect();
+    if ids.len() < 2 {
+        return Err("Join: select two or more surfaces".into());
+    }
+    let bodies: Vec<std::sync::Arc<Body>> = ids.iter().filter_map(|id| doc.object(*id).map(|o| o.body.clone())).collect();
+    let size = bodies.iter().map(|b| b.bbox().diagonal()).fold(0.0, f64::max);
+    let refs: Vec<&Body> = bodies.iter().map(|b| b.as_ref()).collect();
+    let joined = ductile_brep::ops::join::join_sheets(&refs, 1e-5 * (1.0 + size)).map_err(|e| format!("Join: {e}"))?;
+    let solid = joined.kind == ductile_brep::BodyKind::Solid;
+    doc.checkpoint("Join surfaces");
+    for id in &ids {
+        doc.remove(*id);
+    }
+    Ok((doc.add_body(if solid { "Solid" } else { "Surface" }, joined), solid))
+}
+
 /// Sweeps the selected closed curve along the selected open one.
 pub fn sweep_selected(doc: &Document) -> Result<Body, String> {
     let chains = selected_chains(doc);
@@ -3994,6 +4013,43 @@ mod tests {
             let v = volume(&doc.object(bx).unwrap().body);
             assert!((v - expect).abs() < 1e-2, "{d}: {v} vs {expect}");
         }
+    }
+
+    #[test]
+    fn bridges_extends_and_joins_surfaces() {
+        use ductile_brep::ops::bridge::{bridge_surface, Continuity, Side};
+        use ductile_brep::profile::{Loop3, Segment};
+        let p = |x: f64, z: f64| DVec3::new(x, 0.0, z);
+        let sheet = |pts: &[DVec3]| {
+            let c = ductile_geom::NurbsCurve::interpolate(pts, 3);
+            let (t0, t1) = c.domain();
+            ductile_brep::ops::sheet::extrude_sheet(&[Loop3 { segments: vec![Segment::new(ductile_geom::Curve3::Nurbs(c), t0, t1)] }], DVec3::Y * 3.0).unwrap()
+        };
+        let (a, b) = (sheet(&[p(0.0, 0.0), p(1.5, 1.2), p(3.0, 1.6)]), sheet(&[p(8.0, 0.6), p(9.5, 0.9), p(11.0, 0.0)]));
+        let edge_at = |s: &Body, x: f64| s.edge_ids().find(|e| s.edge(*e).curve.is_linear() && (s.edge(*e).mid().x - x).abs() < 1e-6).unwrap();
+        let mut doc = Document::default();
+        let ia = doc.add_body("A", a.clone());
+        let ib = doc.add_body("B", b.clone());
+        // Extend the first sheet's far edge, then bridge the gap with G2.
+        doc.selection.insert(Pick::Edge(ia, edge_at(&a, 3.0)));
+        let mut ext = ExtendSheetTool::new(&doc).unwrap();
+        ext.typed_value(Some(1.0));
+        assert!(ext.commit(&mut doc));
+        let a2 = doc.object(ia).unwrap().body.clone();
+        let far = a2.edge_ids().filter(|e| a2.edge(*e).curve.is_linear() || a2.edge_faces(*e).len() == 1).max_by(|x, y| a2.edge(*x).mid().x.total_cmp(&a2.edge(*y).mid().x)).unwrap();
+        assert!(a2.edge(far).mid().x > 3.5);
+        let sa = Side::of_edge(&a2, far, DVec3::new(8.0, 1.5, 0.6), Continuity::G2, 1.0);
+        let sb = Side::of_edge(&b, edge_at(&b, 8.0), a2.edge(far).mid(), Continuity::G2, 1.0);
+        let bridge = doc.add_body("Bridge", bridge_surface(&sa, &sb).unwrap());
+        doc.selection.clear();
+        for id in [ia, ib, bridge] {
+            doc.selection.insert(Pick::Object(id));
+        }
+        let (id, solid) = join_sheets_selected(&mut doc).unwrap();
+        assert!(!solid);
+        let j = &doc.object(id).unwrap().body;
+        assert_eq!(j.faces.len(), 3);
+        assert_eq!(j.edge_ids().filter(|e| j.edge_faces(*e).len() == 2).count(), 2, "sewn along both bridged edges");
     }
 
     #[test]

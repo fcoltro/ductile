@@ -84,7 +84,9 @@ code from them.
   selected edges with a sheet meeting the faces beyond them with G0, G1 or
   G2 continuity, chosen per side, with a tension per side. Extend with
   open surface edges selected grows the surface past them, naturally (its
-  own shape continued) or straight along the tangent. Back faces show
+  own shape continued) or straight along the tangent. Join (J) with
+  surfaces selected sews them along the edges they share, turning them to
+  face the same way, and makes a solid when they close up. Back faces show
   tinted.
 - Fillets (B) and chamfers (Shift+K) on edges between planes, on
   circular plane/cylinder edges (boss and hole rims), with spherical corner

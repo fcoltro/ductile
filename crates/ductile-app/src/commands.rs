@@ -269,7 +269,7 @@ impl Command {
             OffsetSolid => "Offset solid",
             OffsetFaces => "Offset faces",
             OffsetCurve => "Offset curve",
-            JoinCurves => "Join curves",
+            JoinCurves => "Join curves or surfaces",
             Trim => "Trim curves",
             BridgeCurve => "Bridge curves",
             ExtendCurve => "Extend curve or surface",
@@ -478,6 +478,16 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                     o.visible = keep.contains(&o.id);
                 }
                 app.status = format!("Isolated; {} shows everything again", UnhideAll.shortcut_text());
+            }
+        }
+        JoinCurves if app.doc.selected_objects().iter().filter(|id| app.doc.object(**id).is_some_and(|o| o.body.kind == ductile_brep::BodyKind::Sheet)).count() >= 2 => {
+            app.status = match crate::tools::join_sheets_selected(&mut app.doc) {
+                Ok((id, solid)) => {
+                    app.doc.selection.clear();
+                    app.doc.selection.insert(Pick::Object(id));
+                    if solid { "Surfaces joined into a closed solid".into() } else { "Surfaces joined".into() }
+                }
+                Err(e) => e,
             }
         }
         JoinCurves => {
