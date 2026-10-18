@@ -95,18 +95,60 @@ pub fn cut_with_curves(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Vec
         let Some(prism) = cutter(c, d, reach) else { continue };
         let mut next = Vec::new();
         for p in &pieces {
-            for op in [BoolOp::Intersection, BoolOp::Difference] {
-                match boolean(p, &prism, op) {
-                    Ok(r) => next.extend(split_shells(&r)),
-                    // The curve missed this piece, or took all of it.
-                    Err(BoolError::Empty) => {}
-                    Err(e) => return Err(e),
-                }
-            }
+            next.extend(split_by(p, &prism)?);
         }
         pieces = next;
     }
     Ok(pieces)
+}
+
+/// Cuts `solid` along `sheet`, which should reach right across it: returns
+/// the pieces in front of and behind the sheet.
+pub fn cut_with_sheet(solid: &Body, sheet: &Body) -> Result<Vec<Body>, BoolError> {
+    match sheet_cutter(solid, sheet) {
+        Some(prism) => split_by(solid, &prism),
+        None => Ok(vec![solid.clone()]),
+    }
+}
+
+/// Splits the faces of `solid` where `sheet` crosses them, like
+/// [`imprint_curves`], leaving the solid in one piece.
+pub fn imprint_sheet(solid: &Body, sheet: &Body) -> Result<Body, BoolError> {
+    match sheet_cutter(solid, sheet) {
+        Some(prism) => imprint_by(solid, &prism),
+        None => Ok(solid.clone()),
+    }
+}
+
+/// The solid swept from `sheet` far out in front of it, past `solid`.
+fn sheet_cutter(solid: &Body, sheet: &Body) -> Option<Body> {
+    let mesh = tessellate(sheet, &TessOptions::for_size(sheet.bbox().diagonal()));
+    let mut n = DVec3::ZERO;
+    for f in &mesh.faces {
+        for t in &f.triangles {
+            let [a, b, c] = t.map(|i| f.positions[i as usize]);
+            n += (b - a).cross(c - a);
+        }
+    }
+    let n = n.try_normalize()?;
+    let (sb, cb) = (solid.bbox(), sheet.bbox());
+    let reach = 2.0 * (sb.diagonal() + cb.diagonal() + sb.center().distance(cb.center()));
+    super::sheet::sweep_sheet(sheet, n * reach)
+}
+
+/// The pieces of `p` inside and outside `prism`, each split into its
+/// connected parts.
+fn split_by(p: &Body, prism: &Body) -> Result<Vec<Body>, BoolError> {
+    let mut out = Vec::new();
+    for op in [BoolOp::Intersection, BoolOp::Difference] {
+        match boolean(p, prism, op) {
+            Ok(r) => out.extend(split_shells(&r)),
+            // The cutter missed this piece, or took all of it.
+            Err(BoolError::Empty) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
 }
 
 /// Imprints each curve chain onto the faces of `solid`, swept straight
@@ -122,45 +164,7 @@ pub fn imprint_curves(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Body
         }
         let reach = 2.0 * (bb.diagonal() + c.segments[0].start().distance(bb.center()));
         let Some(prism) = cutter(c, d, reach) else { continue };
-        let tool: Vec<_> = prism.faces.iter().map(|f| f.surface.clone()).collect();
-        let tol = 1e-6 * bb.diagonal().max(1.0);
-        let mut sewer = Sewer::new(body.kind, tol);
-        let mut pieces = 0;
-        for op in [BoolOp::Intersection, BoolOp::Difference] {
-            let part = match boolean(&body, &prism, op) {
-                Ok(r) => r,
-                Err(BoolError::Empty) => continue,
-                Err(e) => return Err(e),
-            };
-            pieces += 1;
-            for f in part.face_ids() {
-                let face = part.face(f);
-                if tool.contains(&face.surface) {
-                    continue;
-                }
-                let loops: Vec<Vec<Segment>> = part
-                    .face_loops(f)
-                    .map(|l| {
-                        l.coedges
-                            .iter()
-                            .map(|c| {
-                                let e = part.edge(c.edge);
-                                Segment { curve: e.curve.clone(), t0: e.t0, t1: e.t1, reversed: c.reversed }
-                            })
-                            .collect()
-                    })
-                    .collect();
-                if let Some((outer, holes)) = loops.split_first() {
-                    sewer.face(face.surface.clone(), face.reversed, outer, holes);
-                } else {
-                    sewer.body.add_face(face.surface.clone(), face.reversed, Vec::new());
-                }
-            }
-        }
-        // A curve that missed the solid leaves it as it was.
-        if pieces == 2 {
-            body = sewer.body;
-        }
+        body = imprint_by(&body, &prism)?;
     }
     Ok(body)
 }
@@ -190,6 +194,49 @@ pub fn intersection_curves(a: &Body, b: &Body) -> Result<Body, BoolError> {
         }
     }
     Ok(crate::profile::wire_from_segments(&segs))
+}
+
+/// `body` with its faces split where they cross the surface of `prism`:
+/// the faces of both pieces, cut apart by `prism`, sewn back together
+/// without the faces that came from `prism`.
+fn imprint_by(body: &Body, prism: &Body) -> Result<Body, BoolError> {
+    let tool: Vec<_> = prism.faces.iter().map(|f| f.surface.clone()).collect();
+    let tol = 1e-6 * body.bbox().diagonal().max(1.0);
+    let mut sewer = Sewer::new(body.kind, tol);
+    let mut pieces = 0;
+    for op in [BoolOp::Intersection, BoolOp::Difference] {
+        let part = match boolean(body, prism, op) {
+            Ok(r) => r,
+            Err(BoolError::Empty) => continue,
+            Err(e) => return Err(e),
+        };
+        pieces += 1;
+        for f in part.face_ids() {
+            let face = part.face(f);
+            if tool.contains(&face.surface) {
+                continue;
+            }
+            let loops: Vec<Vec<Segment>> = part
+                .face_loops(f)
+                .map(|l| {
+                    l.coedges
+                        .iter()
+                        .map(|c| {
+                            let e = part.edge(c.edge);
+                            Segment { curve: e.curve.clone(), t0: e.t0, t1: e.t1, reversed: c.reversed }
+                        })
+                        .collect()
+                })
+                .collect();
+            if let Some((outer, holes)) = loops.split_first() {
+                sewer.face(face.surface.clone(), face.reversed, outer, holes);
+            } else {
+                sewer.body.add_face(face.surface.clone(), face.reversed, Vec::new());
+            }
+        }
+    }
+    // A cutter that missed the body leaves it as it was.
+    Ok(if pieces == 2 { sewer.body } else { body.clone() })
 }
 
 /// The solid swept by the region a chain bounds (closed), or cuts off on
@@ -301,6 +348,30 @@ mod tests {
                 assert!((p.length() - 2.0).abs() < 1e-4 && ((p.x - 0.7).hypot(p.y) - 0.8).abs() < 1e-4, "{p}");
             }
         }
+    }
+
+    #[test]
+    fn cuts_and_imprints_with_sheets() {
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        // A flat sheet through the middle, overhanging the box.
+        let edge = Loop3 { segments: vec![Segment::line(DVec3::new(-1.0, -1.0, 1.0), DVec3::new(5.0, -1.0, 1.0))] };
+        let flat = crate::ops::sheet::extrude_sheet(&[edge], DVec3::new(0.0, 5.0, 0.0)).unwrap();
+        let mut parts = cut_with_sheet(&b, &flat).unwrap();
+        parts.sort_by(|x, y| vol(x).total_cmp(&vol(y)));
+        assert_eq!(parts.len(), 2);
+        assert!((vol(&parts[0]) - 12.0).abs() < 1e-9 && (vol(&parts[1]) - 12.0).abs() < 1e-9);
+        // A wavy sheet: the pieces still add up.
+        let n = ductile_geom::NurbsCurve::interpolate(&[DVec3::new(-1.0, -1.0, 0.8), DVec3::new(1.0, -1.0, 1.4), DVec3::new(3.0, -1.0, 0.6), DVec3::new(5.0, -1.0, 1.2)], 3);
+        let (t0, t1) = n.domain();
+        let wave = Loop3 { segments: vec![Segment::new(Curve3::Nurbs(n), t0, t1)] };
+        let wavy = crate::ops::sheet::extrude_sheet(&[wave], DVec3::new(0.0, 5.0, 0.0)).unwrap();
+        let parts = cut_with_sheet(&b, &wavy).unwrap();
+        assert_eq!(parts.len(), 2);
+        let total: f64 = parts.iter().map(vol).sum();
+        assert!((total - 24.0).abs() < 1e-4, "{total}");
+        let split = imprint_sheet(&b, &wavy).unwrap();
+        assert_eq!(split.faces.len(), 10);
+        assert_eq!(crate::ops::boolean::open_edges(&split), 0);
     }
 
     #[test]

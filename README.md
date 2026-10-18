@@ -20,7 +20,8 @@ code from them.
   along curves swept straight through them: a closed curve cuts out a
   plug, an open one splits the solid in two. Imprint (Alt+I) sweeps curves
   the same way but only splits the faces they cross, so the pieces of a
-  face can be picked, offset or extruded on their own. Draft (Alt+G) tilts
+  face can be picked, offset or extruded on their own. Both also take a
+  surface (sheet) that reaches across the solid in place of curves. Draft (Alt+G) tilts
   selected planar faces about the line where they meet a neutral plane
   through their base, by a dragged or typed angle. Intersection curves
   (Alt+N) adds the curves where selected solids cross.

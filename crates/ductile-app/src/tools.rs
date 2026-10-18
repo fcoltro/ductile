@@ -806,26 +806,71 @@ fn patch_edges(doc: &Document) -> Result<Body, String> {
 /// square to the curves' plane (the construction plane for a straight
 /// line). Returns each cut solid with its pieces.
 pub fn cut_selected(doc: &Document) -> Result<(Vec<ObjectId>, Vec<Vec<Body>>), String> {
-    let (solids, chains, dir) = cut_inputs(doc, "Cut")?;
+    let (solids, cutter) = cut_inputs(doc, "Cut")?;
     let mut pieces = Vec::new();
     for id in &solids {
         let b = &doc.object(*id).ok_or("Cut: missing object")?.body;
-        let parts = ductile_brep::ops::cut::cut_with_curves(b, &chains, dir).map_err(|e| format!("Cut failed: {e}"))?;
+        let parts = match &cutter {
+            Cutter::Curves(chains, dir) => ductile_brep::ops::cut::cut_with_curves(b, chains, *dir),
+            Cutter::Sheets(sheets) => {
+                let mut parts = vec![(**b).clone()];
+                for s in sheets {
+                    let mut next = Vec::new();
+                    for p in &parts {
+                        next.extend(ductile_brep::ops::cut::cut_with_sheet(p, s).map_err(|e| format!("Cut failed: {e}"))?);
+                    }
+                    parts = next;
+                }
+                Ok(parts)
+            }
+        }
+        .map_err(|e| format!("Cut failed: {e}"))?;
         pieces.push(parts);
     }
     Ok((solids, pieces))
 }
 
-/// Imprints the selected curves onto the selected solids, splitting the
-/// faces they cross; returns the solids and their imprinted bodies.
+/// Imprints the selected curves or sheets onto the selected solids,
+/// splitting the faces they cross; returns the solids and their imprinted
+/// bodies.
 pub fn imprint_selected(doc: &Document) -> Result<(Vec<ObjectId>, Vec<Body>), String> {
-    let (solids, chains, dir) = cut_inputs(doc, "Imprint")?;
+    let (solids, cutter) = cut_inputs(doc, "Imprint")?;
     let mut out = Vec::new();
     for id in &solids {
         let b = &doc.object(*id).ok_or("Imprint: missing object")?.body;
-        out.push(ductile_brep::ops::cut::imprint_curves(b, &chains, dir).map_err(|e| format!("Imprint failed: {e}"))?);
+        let r = match &cutter {
+            Cutter::Curves(chains, dir) => ductile_brep::ops::cut::imprint_curves(b, chains, *dir),
+            Cutter::Sheets(sheets) => sheets.iter().try_fold((**b).clone(), |acc, s| ductile_brep::ops::cut::imprint_sheet(&acc, s)),
+        };
+        out.push(r.map_err(|e| format!("Imprint failed: {e}"))?);
     }
     Ok((solids, out))
+}
+
+/// What the selected solids are cut or imprinted with.
+enum Cutter {
+    /// Curve chains swept through the solids along a direction.
+    Curves(Vec<ductile_brep::profile::Loop3>, DVec3),
+    /// Sheets reaching right across the solids.
+    Sheets(Vec<std::sync::Arc<Body>>),
+}
+
+/// The selected solids and what to cut them with: the selected sheets, or
+/// else the selected curve chains, swept square to their plane (or along
+/// the construction plane's normal for a straight line).
+fn cut_inputs(doc: &Document, what: &str) -> Result<(Vec<ObjectId>, Cutter), String> {
+    let of_kind = |k: ductile_brep::BodyKind| -> Vec<ObjectId> { doc.selected_objects().into_iter().filter(|id| doc.object(*id).is_some_and(|o| o.body.kind == k)).collect() };
+    let solids = of_kind(ductile_brep::BodyKind::Solid);
+    let sheets: Vec<std::sync::Arc<Body>> = of_kind(ductile_brep::BodyKind::Sheet).into_iter().filter_map(|id| doc.object(id).map(|o| o.body.clone())).collect();
+    let chains = selected_chains(doc);
+    if solids.is_empty() || (chains.is_empty() && sheets.is_empty()) {
+        return Err(format!("{what}: select solids and the curves or surfaces to {} them with", what.to_lowercase()));
+    }
+    if !sheets.is_empty() {
+        return Ok((solids, Cutter::Sheets(sheets)));
+    }
+    let dir = ductile_brep::profile::loops_plane(&chains).filter(|_| chains.iter().any(|c| c.segments.len() > 1 || !c.segments[0].curve.is_linear())).map(|f| f.z).unwrap_or(current_cplane().frame.z);
+    Ok((solids, Cutter::Curves(chains, dir)))
 }
 
 /// The curves where each pair of selected solids cross, one wire body per
@@ -848,19 +893,6 @@ pub fn intersection_curves_selected(doc: &Document) -> Result<Vec<Body>, String>
         return Err("Intersection curves: the selected solids do not meet".into());
     }
     Ok(out)
-}
-
-/// The selected solids, the selected curve chains, and the direction to
-/// sweep them through the solids: square to the curves' plane, or else
-/// along the construction plane's normal.
-fn cut_inputs(doc: &Document, what: &str) -> Result<(Vec<ObjectId>, Vec<ductile_brep::profile::Loop3>, DVec3), String> {
-    let solids: Vec<ObjectId> = doc.selected_objects().into_iter().filter(|id| doc.object(*id).is_some_and(|o| o.body.kind == ductile_brep::BodyKind::Solid)).collect();
-    let chains = selected_chains(doc);
-    if solids.is_empty() || chains.is_empty() {
-        return Err(format!("{what}: select solids and the curves to {} them with", what.to_lowercase()));
-    }
-    let dir = ductile_brep::profile::loops_plane(&chains).filter(|_| chains.iter().any(|c| c.segments.len() > 1 || !c.segments[0].curve.is_linear())).map(|f| f.z).unwrap_or(current_cplane().frame.z);
-    Ok((solids, chains, dir))
 }
 
 /// Deletes the selection: whole objects in object mode, faces (healing

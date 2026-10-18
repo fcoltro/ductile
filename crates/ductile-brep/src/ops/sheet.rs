@@ -318,10 +318,39 @@ pub fn thicken(sheet: &Body, t: f64) -> Result<Body, crate::ops::offset::OffsetE
         return thicken(&flip_orientation(sheet.clone()), -t);
     }
     let top = offset_body(sheet, &|_| t)?;
+    Ok(close_between(sheet, &top))
+}
+
+/// The solid swept by moving `sheet` straight along `d`: the sheet, its
+/// moved copy and ruled walls between their boundaries. The sheet should
+/// not fold back over itself as seen along `d`.
+pub fn sweep_sheet(sheet: &Body, d: DVec3) -> Option<Body> {
+    use crate::primitives::flip_orientation;
+    if sheet.kind != BodyKind::Sheet || sheet.faces.is_empty() || d.length() < 1e-12 {
+        return None;
+    }
+    // Sweep towards the sheet's front, flipping it first if needed.
+    let mesh = crate::tess::tessellate(sheet, &crate::tess::TessOptions::for_size(sheet.bbox().diagonal()));
+    let mut front = 0.0;
+    for f in &mesh.faces {
+        for t in &f.triangles {
+            let [a, b, c] = [f.positions[t[0] as usize], f.positions[t[1] as usize], f.positions[t[2] as usize]];
+            front += (b - a).cross(c - a).dot(d);
+        }
+    }
+    let base = if front < 0.0 { flip_orientation(sheet.clone()) } else { sheet.clone() };
+    Some(close_between(&base, &base.transformed(&ductile_geom::DMat4::from_translation(d))))
+}
+
+/// The solid enclosed by `sheet` (facing away), `top` (a copy of the sheet
+/// with the same topology, lying in front of it) and walls joining their
+/// boundary edges.
+fn close_between(sheet: &Body, top: &Body) -> Body {
+    use crate::primitives::flip_orientation;
     let mut b = flip_orientation(sheet.clone());
     b.kind = BodyKind::Solid;
     let (nv, ne) = (b.vertices.len() as u32, b.edges.len() as u32);
-    b.append(&top);
+    b.append(top);
     // Each edge's uses by the faces of the bottom and the top.
     let mut uses: Vec<Vec<Coedge>> = vec![Vec::new(); b.edges.len()];
     for f in &b.faces {
@@ -360,7 +389,7 @@ pub fn thicken(sheet: &Body, t: f64) -> Result<Body, crate::ops::offset::OffsetE
         let rev = flipped(&surface, m + up * 0.5, tan.cross(up));
         b.add_face(surface, rev, vec![lp]);
     }
-    Ok(b)
+    b
 }
 
 /// The surface beyond one side of a patch: the neighbouring face's surface
