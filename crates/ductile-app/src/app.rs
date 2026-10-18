@@ -305,13 +305,32 @@ impl DuctileApp {
         }
     }
 
-    /// Snapped pointer position: vertices, edge midpoints, face centres and the grid.
+    /// Snapped pointer position: vertices, circle centres, edge midpoints,
+    /// points on edges and faces, and the grid.
     fn snap(&self, cursor: DVec2, size: DVec2, ray: &crate::camera::Ray, ctrl: bool) -> (Option<DVec3>, Option<DVec3>) {
         let f = self.cplane.frame;
         let plane_pt = ray.hit_plane(f.origin, f.z);
         if self.snap_enabled {
             if let Some((o, v)) = picking::pick_vertex(&self.doc, &self.camera, cursor, size, 10.0, None) {
                 return (self.doc.object(o).map(|ob| ob.body.vertex(v)), plane_pt);
+            }
+            // Centres of circles and arcs (concentric drawing, holes).
+            let to_px = |p: DVec3| self.camera.project(p).map(|n| DVec2::new((n.x * 0.5 + 0.5) * size.x, (0.5 - n.y * 0.5) * size.y));
+            let centre = self
+                .doc
+                .objects
+                .iter()
+                .filter(|o| o.visible)
+                .flat_map(|o| o.body.edges.iter())
+                .filter_map(|e| match &e.curve {
+                    ductile_geom::Curve3::Circle { frame, .. } | ductile_geom::Curve3::Ellipse { frame, .. } => Some(frame.origin),
+                    _ => None,
+                })
+                .filter_map(|c| to_px(c).map(|px| (px.distance(cursor), c)))
+                .filter(|(d, _)| *d < 10.0)
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((_, c)) = centre {
+                return (Some(c), plane_pt);
             }
             if let Some((o, e)) = picking::pick_edge(&self.doc, &self.camera, cursor, size, 8.0, None) {
                 if let Some(ob) = self.doc.object(o) {
