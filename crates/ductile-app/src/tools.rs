@@ -802,6 +802,25 @@ fn patch_edges(doc: &Document) -> Result<Body, String> {
     ductile_brep::ops::sheet::patch_g1(&chain, &neighbours).ok_or_else(|| "Patch failed".into())
 }
 
+/// Cuts the selected solids along the selected curves, swept through them
+/// square to the curves' plane (the construction plane for a straight
+/// line). Returns each cut solid with its pieces.
+pub fn cut_selected(doc: &Document) -> Result<(Vec<ObjectId>, Vec<Vec<Body>>), String> {
+    let solids: Vec<ObjectId> = doc.selected_objects().into_iter().filter(|id| doc.object(*id).is_some_and(|o| o.body.kind == ductile_brep::BodyKind::Solid)).collect();
+    let chains = selected_chains(doc);
+    if solids.is_empty() || chains.is_empty() {
+        return Err("Cut: select solids and the curves to cut them with".into());
+    }
+    let dir = ductile_brep::profile::loops_plane(&chains).filter(|_| chains.iter().any(|c| c.segments.len() > 1 || !c.segments[0].curve.is_linear())).map(|f| f.z).unwrap_or(current_cplane().frame.z);
+    let mut pieces = Vec::new();
+    for id in &solids {
+        let b = &doc.object(*id).ok_or("Cut: missing object")?.body;
+        let parts = ductile_brep::ops::cut::cut_with_curves(b, &chains, dir).map_err(|e| format!("Cut failed: {e}"))?;
+        pieces.push(parts);
+    }
+    Ok((solids, pieces))
+}
+
 /// Sweeps the selected closed curve along the selected open one.
 pub fn sweep_selected(doc: &Document) -> Result<Body, String> {
     let chains = selected_chains(doc);
@@ -2613,6 +2632,22 @@ mod tests {
         let b = &doc.object(id).unwrap().body;
         assert!(b.vertices.iter().any(|v| v.point.distance(q[2] + DVec3::Z * 1.5) < 1e-9));
         assert!(b.vertices.iter().any(|v| v.point.distance(q[0]) < 1e-12));
+    }
+
+    #[test]
+    fn cuts_a_box_with_a_drawn_line() {
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        let b = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 3.0, 2.0)));
+        let line = ductile_brep::profile::wire_from_segments(&[ductile_brep::profile::Segment::line(DVec3::new(1.0, -1.0, 0.0), DVec3::new(3.0, 4.0, 0.0))]);
+        let l = doc.add_body("Line", line);
+        doc.selection.insert(Pick::Object(b));
+        doc.selection.insert(Pick::Object(l));
+        let (ids, pieces) = cut_selected(&doc).unwrap();
+        assert_eq!(ids, vec![b]);
+        assert_eq!(pieces[0].len(), 2);
+        let total: f64 = pieces[0].iter().map(|p| ductile_brep::tessellate(p, &ductile_brep::TessOptions::default()).volume()).sum();
+        assert!((total - 24.0).abs() < 1e-9, "{total}");
     }
 
     #[test]

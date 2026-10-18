@@ -14,3 +14,4 @@ pub mod chain;
 pub mod offset;
 pub mod corner;
 pub mod sheet;
+pub mod cut;

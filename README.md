@@ -16,7 +16,9 @@ code from them.
 
 - Primitives: box, cylinder, cone, sphere, torus (exact analytic surfaces).
 - Exact booleans: union, subtract, intersect (Shift+U / Shift+D / Shift+I),
-  including coplanar, tangent and pole cases.
+  including coplanar, tangent and pole cases. Cut (Alt+D) splits solids
+  along curves swept straight through them: a closed curve cuts out a
+  plug, an open one splits the solid in two.
 - Curves on the construction plane: polyline (L), spline through points
   (Shift+L, open or closed C2), three-point arc (Shift+A), rectangle
   (Shift+R), circle (Shift+O), ellipse (Shift+E), regular polygon (Shift+P).

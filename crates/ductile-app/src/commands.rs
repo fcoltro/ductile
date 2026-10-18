@@ -48,6 +48,7 @@ pub enum Command {
     Loft,
     Patch,
     Thicken,
+    Cut,
     Sweep,
     Fillet,
     Chamfer,
@@ -123,6 +124,7 @@ impl Command {
         Command::Loft,
         Command::Patch,
         Command::Thicken,
+        Command::Cut,
         Command::Sweep,
         Command::Fillet,
         Command::Chamfer,
@@ -199,6 +201,7 @@ impl Command {
             Loft => "Loft",
             Patch => "Patch surface",
             Thicken => "Thicken surface",
+            Cut => "Cut solid with curves",
             Sweep => "Sweep",
             Fillet => "Fillet edges",
             Chamfer => "Chamfer edges",
@@ -282,6 +285,7 @@ impl Command {
             Loft => "Alt+L",
             Patch => "Alt+P",
             Thicken => "Alt+K",
+            Cut => "Alt+D",
             Sweep => "Alt+W",
             Subtract => "Shift+D",
             Intersect => "Shift+I",
@@ -343,6 +347,7 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::L, false, false, true) => Loft,
         (Key::P, false, false, true) => Patch,
         (Key::K, false, false, true) => Thicken,
+        (Key::D, false, false, true) => Cut,
         (Key::W, false, false, true) => Sweep,
         (Key::F, false, true, false) => Fillet,
         (Key::K, false, true, false) => Chamfer,
@@ -545,6 +550,22 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Trim => match TrimTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "There are no curves to trim".into(),
+        },
+        Cut => match crate::tools::cut_selected(&app.doc) {
+            Ok((ids, pieces)) => {
+                app.doc.checkpoint("Cut");
+                app.doc.selection.clear();
+                for (id, parts) in ids.into_iter().zip(pieces) {
+                    let name = app.doc.object(id).map(|o| o.name.clone()).unwrap_or_else(|| "Solid".into());
+                    app.doc.remove(id);
+                    for (k, p) in parts.into_iter().enumerate() {
+                        let nid = app.doc.add_body(&format!("{name} {}", k + 1), p);
+                        app.doc.selection.insert(Pick::Object(nid));
+                    }
+                }
+                app.status = "Cut done".into();
+            }
+            Err(e) => app.status = e,
         },
         Thicken => match ThickenTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
