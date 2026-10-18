@@ -1011,6 +1011,45 @@ pub fn cplane_on_face(b: &Body, f: FaceId) -> Option<Frame> {
     Some(Frame::new(origin, z, x))
 }
 
+/// Mirrors the selected objects. With a planar face selected the mirror
+/// plane is that face, and a solid mirrored across its own face is joined
+/// to its reflection (model one half, mirror the other); otherwise the
+/// plane is square to the construction plane's `axis` through its origin.
+pub fn mirror_selected(doc: &mut Document, cplane: &Frame, axis: usize) -> Result<String, String> {
+    use ductile_brep::ops::boolean::{boolean, BoolOp};
+    let face = doc.selected_faces().into_iter().find_map(|(o, f)| {
+        let b = &doc.object(o)?.body;
+        match &b.face(f).surface {
+            ductile_geom::Surface::Plane { frame } => Some((o, frame.origin, frame.z)),
+            _ => None,
+        }
+    });
+    let (origin, n) = match face {
+        Some((_, p, n)) => (p, n),
+        None => (cplane.origin, [cplane.x, cplane.y, cplane.z][axis]),
+    };
+    let n = n.normalize();
+    // Reflection x -> x - 2 n (n . (x - origin)).
+    let m = DMat4::from_translation(origin) * DMat4::from_mat3(ductile_geom::DMat3::IDENTITY - 2.0 * ductile_geom::DMat3::from_cols(n * n.x, n * n.y, n * n.z)) * DMat4::from_translation(-origin);
+    let ids = doc.selected_objects();
+    doc.selection.clear();
+    let mut joined = 0;
+    for id in ids {
+        let Some(ob) = doc.object(id).cloned() else { continue };
+        let mirrored = ob.body.transformed(&m);
+        if face.map(|f| f.0) == Some(id) && ob.body.kind == ductile_brep::BodyKind::Solid {
+            let whole = boolean(&ob.body, &mirrored, BoolOp::Union).map_err(|e| format!("Mirror: could not join the halves: {e}"))?;
+            doc.replace_body(id, whole);
+            doc.selection.insert(Pick::Object(id));
+            joined += 1;
+        } else {
+            let nid = doc.add_body(&ob.name, mirrored);
+            doc.selection.insert(Pick::Object(nid));
+        }
+    }
+    Ok(if joined > 0 { "Mirrored across the face and joined into one solid".into() } else { "Mirrored".into() })
+}
+
 /// The curves where each pair of selected solids cross, one wire body per
 /// pair that meets.
 pub fn intersection_curves_selected(doc: &Document) -> Result<Vec<Body>, String> {
@@ -3258,6 +3297,30 @@ mod tests {
         let body = &doc.object(id).unwrap().body;
         assert_eq!((body.edges.len(), body.vertices.len()), (2, 3));
         assert_eq!(wire_chains(body).len(), 1);
+    }
+
+    #[test]
+    fn mirrors_a_half_across_its_cut_face_into_one_solid() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Half", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(1.0, 2.0, 1.0)));
+        let b = doc.object(id).unwrap().body.clone();
+        // The x = 1 face.
+        let f = b.face_ids().find(|f| b.face_normal(*f, 0.5, 0.5).x > 0.9).unwrap();
+        doc.mode = SelectMode::Face;
+        doc.selection.insert(Pick::Face(id, f));
+        mirror_selected(&mut doc, &ductile_geom::Frame::WORLD, 0).unwrap();
+        assert_eq!(doc.objects.len(), 1);
+        let whole = &doc.object(id).unwrap().body;
+        let bb = whole.bbox();
+        assert!((bb.max.x - 2.0).abs() < 1e-2 && bb.min.x.abs() < 1e-2, "{bb:?}");
+        // The cut face is gone: a plain box again.
+        assert_eq!(whole.faces.len(), 6);
+        // Without a face: a copy mirrored across the construction plane.
+        doc.mode = SelectMode::Object;
+        doc.selection.insert(Pick::Object(id));
+        mirror_selected(&mut doc, &ductile_geom::Frame::WORLD, 0).unwrap();
+        assert_eq!(doc.objects.len(), 2);
+        assert!((doc.objects[1].body.bbox().min.x + 2.0).abs() < 1e-2);
     }
 
     #[test]

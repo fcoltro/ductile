@@ -731,24 +731,21 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             }
         }
         MirrorX | MirrorY | MirrorZ => {
-            let ids = app.doc.selected_objects();
-            if ids.is_empty() {
+            let axis = match cmd {
+                MirrorX => 0,
+                MirrorY => 1,
+                _ => 2,
+            };
+            if app.doc.selection.is_empty() {
                 app.status = "Select something to mirror first".into();
                 return;
             }
-            let s = match cmd {
-                MirrorX => DVec3::new(-1.0, 1.0, 1.0),
-                MirrorY => DVec3::new(1.0, -1.0, 1.0),
-                _ => DVec3::new(1.0, 1.0, -1.0),
-            };
-            let o = app.cplane.frame.origin;
-            let m = DMat4::from_translation(o) * DMat4::from_scale(s) * DMat4::from_translation(-o);
             app.doc.checkpoint("Mirror");
-            app.doc.selection.clear();
-            for id in ids {
-                if let Some(ob) = app.doc.object(id).cloned() {
-                    let nid = app.doc.add_body(&ob.name, ob.body.transformed(&m));
-                    app.doc.selection.insert(Pick::Object(nid));
+            match crate::tools::mirror_selected(&mut app.doc, &app.cplane.frame, axis) {
+                Ok(msg) => app.status = msg,
+                Err(e) => {
+                    app.doc.undo();
+                    app.status = e;
                 }
             }
         }

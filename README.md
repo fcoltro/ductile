@@ -110,7 +110,9 @@ code from them.
   stripes stay unbroken across tangent (G1) joins and keep their direction
   across curvature-continuous (G2) ones. Headless: `--zebra`.
 - Move / rotate / scale / mirror, linear and radial arrays (Alt+A,
-  Alt+Shift+A), undo/redo.
+  Alt+Shift+A), undo/redo. Mirror reflects across the construction plane,
+  or across a selected planar face; a solid mirrored across its own face is
+  joined to its reflection, so half a symmetric part becomes the whole.
 - Hide (H), isolate the selection (Shift+H), show everything (Alt+H).
 - Transform gizmo: selecting something shows axis arrows and rotation rings
   at it; drag an arrow to move along that axis or a ring to turn about it
