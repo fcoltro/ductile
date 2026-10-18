@@ -241,3 +241,20 @@ pub fn eye(painter: &Painter, rect: Rect, color: Color32, open: bool) {
         p.line(&[(0.18, 0.88), (0.82, 0.12)]);
     }
 }
+
+/// A padlock, shut or open.
+pub fn lock(painter: &Painter, rect: Rect, color: Color32, shut: bool) {
+    let p = Pen { painter, rect, stroke: Stroke::new(1.3, color) };
+    p.closed(&[(0.22, 0.48), (0.78, 0.48), (0.78, 0.92), (0.22, 0.92)]);
+    if shut {
+        p.arc((0.5, 0.48), 0.2, 0.32, std::f32::consts::PI, std::f32::consts::TAU);
+    } else {
+        p.arc((0.72, 0.4), 0.2, 0.28, std::f32::consts::PI, std::f32::consts::TAU);
+    }
+}
+
+/// A folder, for Outliner groups.
+pub fn folder(painter: &Painter, rect: Rect, color: Color32) {
+    let p = Pen { painter, rect, stroke: Stroke::new(1.2, color) };
+    p.closed(&[(0.1, 0.25), (0.4, 0.25), (0.5, 0.36), (0.9, 0.36), (0.9, 0.82), (0.1, 0.82)]);
+}

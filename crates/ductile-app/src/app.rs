@@ -674,6 +674,11 @@ impl DuctileApp {
                     let fs = if mods.ctrl { crate::select::parallel_faces(&ob.body, f) } else { crate::select::tangent_faces(&ob.body, f) };
                     fs.into_iter().map(|x| Pick::Face(o, x)).collect()
                 }),
+                // A grouped object: everything in its group.
+                Some(Pick::Object(o)) => match self.doc.object(o).and_then(|x| x.group) {
+                    Some(g) => self.doc.group_members(g).into_iter().filter(|id| !self.doc.is_locked(*id) && self.doc.object(*id).is_some_and(|x| x.visible)).map(Pick::Object).collect(),
+                    None => vec![Pick::Object(o)],
+                },
                 Some(p) => vec![p],
                 None => vec![],
             };

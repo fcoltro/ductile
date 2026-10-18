@@ -154,6 +154,13 @@ code from them.
   or across a selected planar face; a solid mirrored across its own face is
   joined to its reflection, so half a symmetric part becomes the whole.
 - Hide (H), isolate the selection (Shift+H or .), show everything (Alt+H).
+- Outliner groups: Ctrl+G groups the selection (nested inside the group it
+  shares), Alt+G ungroups. Each row has show/hide and lock toggles; locked
+  objects stay visible but can't be selected. Click a group to select its
+  objects, Alt+click an object in the viewport for its whole group, and
+  double-click a group to make it the active group that new objects go into.
+  Right-click a group to rename, dissolve, delete it with its contents or
+  add the selection to it. Groups and locks are saved in `.ductile` files.
   Double-click an edge to add the edges running on tangentially from it
   (a filleted outline, a spline profile) to the selection. As in
   Plasticity, Alt+click an edge picks its loop and Ctrl+Alt+click its ring;

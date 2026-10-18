@@ -29,6 +29,10 @@ pub enum Command {
     Hide,
     Isolate,
     UnhideAll,
+    Group,
+    Ungroup,
+    LockSelected,
+    UnlockAll,
     ModeVertex,
     ModeEdge,
     ModeFace,
@@ -138,6 +142,10 @@ impl Command {
         Command::Hide,
         Command::Isolate,
         Command::UnhideAll,
+        Command::Group,
+        Command::Ungroup,
+        Command::LockSelected,
+        Command::UnlockAll,
         Command::ModeVertex,
         Command::ModeEdge,
         Command::ModeFace,
@@ -248,6 +256,10 @@ impl Command {
             Hide => "Hide selected",
             Isolate => "Isolate selected",
             UnhideAll => "Unhide all",
+            Group => "Group selected",
+            Ungroup => "Ungroup selected",
+            LockSelected => "Lock selected",
+            UnlockAll => "Unlock all",
             ModeVertex => "Select vertices",
             ModeEdge => "Select edges",
             ModeFace => "Select faces",
@@ -362,7 +374,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
     // Shift+R repeats modeling commands, not navigation or selection.
     let fleeting = matches!(
         cmd,
-        Repeat | Palette | Help | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleIsophote | ToggleDraft | ToggleFaceDirection | ToggleCurvature | ToggleSection | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
+        Repeat | Palette | Help | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | Group | Ungroup | LockSelected | UnlockAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleIsophote | ToggleDraft | ToggleFaceDirection | ToggleCurvature | ToggleSection | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
     );
     if !fleeting {
         app.last_command = Some(cmd);
@@ -478,7 +490,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 .doc
                 .objects
                 .iter()
-                .filter(|o| o.visible)
+                .filter(|o| o.visible && !app.doc.is_locked(o.id))
                 .flat_map(|o| -> Vec<Pick> {
                     match mode {
                         SelectMode::Object => vec![Pick::Object(o.id)],
@@ -542,6 +554,48 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         UnhideAll => {
             for o in app.doc.objects.iter_mut() {
                 o.visible = true;
+            }
+            for g in app.doc.groups.iter_mut() {
+                g.visible = true;
+            }
+        }
+        Group => {
+            app.doc.checkpoint("Group");
+            match app.doc.group_selected() {
+                Some(g) => app.status = format!("Grouped as {}", app.doc.group(g).map_or("", |g| g.name.as_str())),
+                None => {
+                    app.doc.undo();
+                    app.status = "Select objects to group".into();
+                }
+            }
+        }
+        Ungroup => {
+            let mut gs: Vec<_> = app.doc.selected_objects().iter().filter_map(|id| app.doc.object(*id)?.group).collect();
+            gs.sort();
+            gs.dedup();
+            if gs.is_empty() {
+                app.status = "Select grouped objects to ungroup".into();
+            } else {
+                app.doc.checkpoint("Ungroup");
+                for g in gs {
+                    app.doc.ungroup(g);
+                }
+            }
+        }
+        LockSelected => {
+            let ids = app.doc.selected_objects();
+            for o in app.doc.objects.iter_mut().filter(|o| ids.contains(&o.id)) {
+                o.locked = true;
+            }
+            app.doc.selection.clear();
+            app.status = format!("Locked {} object(s); they show but can't be selected", ids.len());
+        }
+        UnlockAll => {
+            for o in app.doc.objects.iter_mut() {
+                o.locked = false;
+            }
+            for g in app.doc.groups.iter_mut() {
+                g.locked = false;
             }
         }
         ModeVertex => app.set_mode(SelectMode::Vertex),
@@ -891,11 +945,28 @@ pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), Strin
     let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let nd = ductile_io::native::NativeDocument::from_json(&s).map_err(|e| e.to_string())?;
     doc.clear();
+    // Group ids are renumbered past the objects'.
+    let mut gid = std::collections::HashMap::new();
+    for g in &nd.groups {
+        gid.insert(g.id, doc.new_group_id());
+    }
+    for g in &nd.groups {
+        doc.groups.push(crate::document::Group {
+            id: gid[&g.id],
+            name: g.name.clone(),
+            parent: g.parent.and_then(|p| gid.get(&p).copied()),
+            visible: g.visible,
+            locked: g.locked,
+            open: true,
+        });
+    }
     for o in nd.objects {
         let id = doc.add_body(&o.name, o.body);
         if let Some(ob) = doc.objects.iter_mut().find(|x| x.id == id) {
             ob.name = o.name;
             ob.visible = o.visible;
+            ob.locked = o.locked;
+            ob.group = o.group.and_then(|g| gid.get(&g).copied());
             if let Some(c) = o.color {
                 ob.color = c;
             }
@@ -927,9 +998,17 @@ pub fn write_native(doc: &Document, path: &std::path::Path) -> Result<(), String
                 body: (*o.body).clone(),
                 color: Some(o.color),
                 visible: o.visible,
+                locked: o.locked,
+                group: o.group,
             })
             .collect(),
     );
+    let mut nd = nd;
+    nd.groups = doc
+        .groups
+        .iter()
+        .map(|g| ductile_io::native::NativeGroup { id: g.id, name: g.name.clone(), parent: g.parent, visible: g.visible, locked: g.locked })
+        .collect();
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -1203,5 +1282,40 @@ pub fn demo_scene(doc: &mut Document) {
             doc.add_body("Pipe", b);
         }
     }
+    // The surfaces in a group, as an Outliner example.
+    let sheets: Vec<crate::document::ObjectId> = doc.objects.iter().filter(|o| o.body.kind == ductile_brep::BodyKind::Sheet).map(|o| o.id).collect();
+    if sheets.len() > 1 {
+        doc.selection = sheets.into_iter().map(Pick::Object).collect();
+        if let Some(g) = doc.group_selected() {
+            if let Some(g) = doc.groups.iter_mut().find(|x| x.id == g) {
+                g.name = "Surfaces".into();
+            }
+        }
+        doc.selection.clear();
+    }
     doc.dirty = false;
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+
+    #[test]
+    fn groups_and_locks_survive_save_and_open() {
+        let mut doc = Document::default();
+        demo_scene(&mut doc);
+        let g = doc.groups[0].id;
+        let member = doc.group_members(g)[0];
+        doc.objects.iter_mut().find(|o| o.id == member).unwrap().locked = true;
+        let path = std::env::temp_dir().join(format!("ductile-groups-{}.ductile", std::process::id()));
+        write_native(&doc, &path).unwrap();
+        let mut back = Document::default();
+        load_into(&mut back, &path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(back.groups.len(), 1);
+        assert_eq!(back.groups[0].name, "Surfaces");
+        let g2 = back.groups[0].id;
+        assert_eq!(back.group_members(g2).len(), doc.group_members(g).len());
+        assert_eq!(back.objects.iter().filter(|o| o.locked).count(), 1);
+    }
 }

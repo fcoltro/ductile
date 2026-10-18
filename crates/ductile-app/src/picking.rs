@@ -94,7 +94,13 @@ pub(crate) fn visible(cam: &Camera, doc: &Document, p: DVec3, occluder: Option<&
 
 /// Picks the best entity under the cursor for the given selection mode.
 /// `cursor` is in viewport pixels (origin top-left).
+/// What the cursor picks, unless it belongs to a locked object (which
+/// still hides what is behind it).
 pub fn pick(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, mode: SelectMode) -> Option<Pick> {
+    pick_any(doc, cam, cursor, size, mode).filter(|p| !doc.is_locked(p.object()))
+}
+
+fn pick_any(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, mode: SelectMode) -> Option<Pick> {
     let ndc = DVec2::new(cursor.x / size.x * 2.0 - 1.0, 1.0 - cursor.y / size.y * 2.0);
     let ray = cam.ray(ndc);
     let face_hit = pick_face(doc, &ray);
@@ -188,6 +194,12 @@ pub fn pick_control(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, to
 /// What a box drawn from `a` to `b` selects: only what lies wholly inside
 /// it, or with `crossing` anything it touches.
 pub fn pick_box(doc: &Document, cam: &Camera, a: DVec2, b: DVec2, size: DVec2, mode: SelectMode, crossing: bool) -> Vec<Pick> {
+    let mut v = pick_box_any(doc, cam, a, b, size, mode, crossing);
+    v.retain(|p| !doc.is_locked(p.object()));
+    v
+}
+
+fn pick_box_any(doc: &Document, cam: &Camera, a: DVec2, b: DVec2, size: DVec2, mode: SelectMode, crossing: bool) -> Vec<Pick> {
     let lo = a.min(b);
     let hi = a.max(b);
     let inside = |p: DVec3| to_screen(cam, p, size).map(|(s, _)| s.cmpge(lo).all() && s.cmple(hi).all()).unwrap_or(false);

@@ -14,6 +14,24 @@ pub struct NativeObject {
     pub color: Option<[f32; 3]>,
     #[serde(default = "yes")]
     pub visible: bool,
+    #[serde(default)]
+    pub locked: bool,
+    /// Id of its group in the document's `groups`.
+    #[serde(default)]
+    pub group: Option<u64>,
+}
+
+/// An Outliner group.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NativeGroup {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub parent: Option<u64>,
+    #[serde(default = "yes")]
+    pub visible: bool,
+    #[serde(default)]
+    pub locked: bool,
 }
 
 fn yes() -> bool {
@@ -25,11 +43,13 @@ pub struct NativeDocument {
     pub format: String,
     pub version: u32,
     pub objects: Vec<NativeObject>,
+    #[serde(default)]
+    pub groups: Vec<NativeGroup>,
 }
 
 impl NativeDocument {
     pub fn new(objects: Vec<NativeObject>) -> Self {
-        Self { format: "ductile".into(), version: FORMAT_VERSION, objects }
+        Self { format: "ductile".into(), version: FORMAT_VERSION, objects, groups: vec![] }
     }
 
     pub fn to_json(&self) -> crate::Result<String> {

@@ -1173,7 +1173,11 @@ pub fn duplicate_selected(doc: &mut Document) -> Vec<ObjectId> {
         let fs: Vec<FaceId> = faces.iter().filter(|(x, _)| *x == id).map(|(_, f)| *f).collect();
         let es: Vec<EdgeId> = edges.iter().filter(|(x, _)| *x == id).map(|(_, e)| *e).collect();
         if objects.contains(&id) {
-            made.push(doc.add_body(&o.name, (*o.body).clone()));
+            let copy = doc.add_body(&o.name, (*o.body).clone());
+            if let Some(c) = doc.objects.iter_mut().find(|x| x.id == copy) {
+                (c.group, c.color) = (o.group, o.color);
+            }
+            made.push(copy);
         }
         if !fs.is_empty() {
             made.push(doc.add_body("Surface", extract_faces(&o.body, &fs)));

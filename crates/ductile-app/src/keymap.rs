@@ -128,6 +128,8 @@ const DEFAULTS: &[(Command, &str)] = {
         (ToggleXray, "Alt+Z"),
         (ToggleZebra, "Alt+R"),
         (Help, "F1"),
+        (Group, "Ctrl+G"),
+        (Ungroup, "Alt+G"),
     ]
 };
 

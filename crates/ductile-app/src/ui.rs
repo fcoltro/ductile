@@ -4,7 +4,7 @@
 use crate::app::DuctileApp;
 use crate::render::Analysis;
 use crate::commands::Command;
-use crate::document::SelectMode;
+use crate::document::{GroupId, ObjectId, SelectMode};
 use crate::theme;
 use egui::{Color32, RichText};
 
@@ -249,40 +249,221 @@ pub fn side_panel(app: &mut DuctileApp, ui: &mut egui::Ui) {
         }
         ui.label(RichText::new("Outliner").strong());
         egui::ScrollArea::vertical().max_height(ui.available_height() * 0.6).show(ui, |ui| {
-            let mut toggle_vis = None;
-            let mut select = None;
-            for o in &app.doc.objects {
-                let selected = app.doc.selection.contains(&crate::document::Pick::Object(o.id));
-                ui.horizontal(|ui| {
-                    let r = ui.add(egui::Button::new("").frame(false).min_size(egui::vec2(18.0, 18.0)));
-                    let col = if r.hovered() { theme::TEXT } else if o.visible { theme::TEXT_DIM } else { theme::TEXT_DIM.gamma_multiply(0.5) };
-                    crate::icons::eye(ui.painter(), r.rect.shrink2(egui::vec2(1.0, 3.0)), col, o.visible);
-                    if r.on_hover_text(if o.visible { "Hide" } else { "Show" }).clicked() {
-                        toggle_vis = Some(o.id);
-                    }
-                    let text = RichText::new(o.name.as_str()).color(if o.visible { theme::TEXT } else { theme::TEXT_DIM });
-                    if ui.selectable_label(selected, text).clicked() {
-                        select = Some(o.id);
-                    }
-                });
-            }
-            if let Some(id) = toggle_vis {
-                if let Some(o) = app.doc.objects.iter_mut().find(|o| o.id == id) {
-                    o.visible = !o.visible;
-                }
-            }
-            if let Some(id) = select {
-                let shift = ui.input(|i| i.modifiers.shift);
-                if !shift {
-                    app.doc.selection.clear();
-                }
-                app.doc.mode = SelectMode::Object;
-                app.doc.selection.insert(crate::document::Pick::Object(id));
+            let mut acts = vec![];
+            outliner_level(app, ui, None, 0, &mut acts);
+            let shift = ui.input(|i| i.modifiers.shift);
+            for a in acts {
+                outliner_act(app, a, shift);
             }
         });
         ui.separator();
         properties(app, ui);
     });
+}
+
+/// Something done in the Outliner, applied after drawing it.
+enum OutlinerAct {
+    ToggleVisible(ObjectId),
+    ToggleLock(ObjectId),
+    Select(ObjectId),
+    GroupVisible(GroupId),
+    GroupLock(GroupId),
+    GroupOpen(GroupId),
+    SelectGroup(GroupId),
+    Activate(Option<GroupId>),
+    Dissolve(GroupId),
+    DeleteGroup(GroupId),
+    AddSelection(GroupId),
+    ToRoot(ObjectId),
+    Rename(GroupId, String),
+}
+
+fn row_icon(ui: &mut egui::Ui, tip: &str, paint: impl FnOnce(&egui::Painter, egui::Rect, Color32)) -> bool {
+    let r = ui.add(egui::Button::new("").frame(false).min_size(egui::vec2(18.0, 18.0)));
+    let col = if r.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+    paint(ui.painter(), r.rect.shrink2(egui::vec2(1.0, 3.0)), col);
+    r.on_hover_text(tip).clicked()
+}
+
+/// The groups and objects directly inside `parent`, indented by `depth`.
+fn outliner_level(app: &DuctileApp, ui: &mut egui::Ui, parent: Option<GroupId>, depth: usize, acts: &mut Vec<OutlinerAct>) {
+    let doc = &app.doc;
+    let indent = depth as f32 * 14.0;
+    for g in doc.groups.iter().filter(|g| g.parent == parent) {
+        let active = doc.active_group == Some(g.id);
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            let (vis, locked) = (g.visible, g.locked);
+            if row_icon(ui, if vis { "Hide group" } else { "Show group" }, |p, r, c| crate::icons::eye(p, r, if vis { c } else { c.gamma_multiply(0.5) }, vis)) {
+                acts.push(OutlinerAct::GroupVisible(g.id));
+            }
+            if row_icon(ui, if locked { "Unlock group" } else { "Lock group" }, |p, r, c| crate::icons::lock(p, r, if locked { c } else { c.gamma_multiply(0.45) }, locked)) {
+                acts.push(OutlinerAct::GroupLock(g.id));
+            }
+            let open = g.open;
+            if row_icon(ui, if open { "Collapse" } else { "Expand" }, |p, r, c| {
+                let r = r.shrink(2.0);
+                let pts = if open { vec![r.left_top(), r.right_top(), egui::pos2(r.center().x, r.bottom())] } else { vec![r.left_top(), egui::pos2(r.right(), r.center().y), r.left_bottom()] };
+                p.add(egui::Shape::convex_polygon(pts, c, egui::Stroke::NONE));
+            }) {
+                acts.push(OutlinerAct::GroupOpen(g.id));
+            }
+            let folder = ui.add(egui::Button::new("").frame(false).min_size(egui::vec2(16.0, 18.0)));
+            crate::icons::folder(ui.painter(), folder.rect.shrink2(egui::vec2(0.0, 2.0)), if active { theme::ACCENT } else { theme::TEXT_DIM });
+            let mut text = RichText::new(g.name.as_str()).color(if vis { theme::TEXT } else { theme::TEXT_DIM });
+            if active {
+                text = text.color(theme::ACCENT).strong();
+            }
+            let r = ui.selectable_label(false, text).on_hover_text("Click: select its objects · double-click: make it the active group (new objects go in it)");
+            if r.double_clicked() {
+                acts.push(OutlinerAct::Activate(if active { None } else { Some(g.id) }));
+            } else if r.clicked() {
+                acts.push(OutlinerAct::SelectGroup(g.id));
+            }
+            r.context_menu(|ui| {
+                let mut name = g.name.clone();
+                if ui.text_edit_singleline(&mut name).changed() {
+                    acts.push(OutlinerAct::Rename(g.id, name));
+                }
+                if ui.button(if active { "Stop being the active group" } else { "Make active group" }).clicked() {
+                    acts.push(OutlinerAct::Activate(if active { None } else { Some(g.id) }));
+                    ui.close();
+                }
+                if ui.button("Select all").clicked() {
+                    acts.push(OutlinerAct::SelectGroup(g.id));
+                    ui.close();
+                }
+                if ui.button("Add current selection to group").clicked() {
+                    acts.push(OutlinerAct::AddSelection(g.id));
+                    ui.close();
+                }
+                if ui.button("Dissolve (keep children)").clicked() {
+                    acts.push(OutlinerAct::Dissolve(g.id));
+                    ui.close();
+                }
+                if ui.button("Delete recursively").clicked() {
+                    acts.push(OutlinerAct::DeleteGroup(g.id));
+                    ui.close();
+                }
+            });
+        });
+        if g.open {
+            outliner_level(app, ui, Some(g.id), depth + 1, acts);
+        }
+    }
+    for o in doc.objects.iter().filter(|o| o.group == parent || (parent.is_none() && o.group.is_some_and(|g| doc.group(g).is_none()))) {
+        let selected = doc.selection.contains(&crate::document::Pick::Object(o.id));
+        ui.horizontal(|ui| {
+            ui.add_space(indent);
+            let (vis, locked) = (o.visible, o.locked);
+            if row_icon(ui, if vis { "Hide" } else { "Show" }, |p, r, c| crate::icons::eye(p, r, if vis { c } else { c.gamma_multiply(0.5) }, vis)) {
+                acts.push(OutlinerAct::ToggleVisible(o.id));
+            }
+            if row_icon(ui, if locked { "Unlock" } else { "Lock (shows, but can't be selected)" }, |p, r, c| crate::icons::lock(p, r, if locked { c } else { c.gamma_multiply(0.45) }, locked)) {
+                acts.push(OutlinerAct::ToggleLock(o.id));
+            }
+            let text = RichText::new(o.name.as_str()).color(if vis && !locked { theme::TEXT } else { theme::TEXT_DIM });
+            let r = ui.selectable_label(selected, text);
+            if r.clicked() && !doc.is_locked(o.id) {
+                acts.push(OutlinerAct::Select(o.id));
+            }
+            if o.group.is_some() {
+                r.context_menu(|ui| {
+                    if ui.button("Move to root").clicked() {
+                        acts.push(OutlinerAct::ToRoot(o.id));
+                        ui.close();
+                    }
+                });
+            }
+        });
+    }
+}
+
+fn outliner_act(app: &mut DuctileApp, a: OutlinerAct, shift: bool) {
+    use crate::document::Pick;
+    let doc = &mut app.doc;
+    match a {
+        OutlinerAct::ToggleVisible(id) => {
+            if let Some(o) = doc.objects.iter_mut().find(|o| o.id == id) {
+                o.visible = !o.visible;
+            }
+        }
+        OutlinerAct::ToggleLock(id) => {
+            if let Some(o) = doc.objects.iter_mut().find(|o| o.id == id) {
+                o.locked = !o.locked;
+            }
+            if doc.is_locked(id) {
+                doc.selection.retain(|p| p.object() != id);
+            }
+        }
+        OutlinerAct::Select(id) => {
+            if !shift {
+                doc.selection.clear();
+            }
+            doc.mode = SelectMode::Object;
+            doc.selection.insert(Pick::Object(id));
+        }
+        OutlinerAct::GroupVisible(g) => {
+            let vis = doc.group(g).is_some_and(|x| x.visible);
+            doc.set_group_visible(g, !vis);
+        }
+        OutlinerAct::GroupLock(g) => {
+            if let Some(x) = doc.groups.iter_mut().find(|x| x.id == g) {
+                x.locked = !x.locked;
+            }
+            let members = doc.group_members(g);
+            let locked: Vec<ObjectId> = members.into_iter().filter(|id| doc.is_locked(*id)).collect();
+            doc.selection.retain(|p| !locked.contains(&p.object()));
+        }
+        OutlinerAct::GroupOpen(g) => {
+            if let Some(x) = doc.groups.iter_mut().find(|x| x.id == g) {
+                x.open = !x.open;
+            }
+        }
+        OutlinerAct::SelectGroup(g) => {
+            if !shift {
+                doc.selection.clear();
+            }
+            doc.mode = SelectMode::Object;
+            let ids: Vec<ObjectId> = doc.group_members(g).into_iter().filter(|id| !doc.is_locked(*id) && doc.object(*id).is_some_and(|o| o.visible)).collect();
+            doc.selection.extend(ids.into_iter().map(Pick::Object));
+        }
+        OutlinerAct::Activate(g) => doc.active_group = g,
+        OutlinerAct::Dissolve(g) => {
+            doc.checkpoint("Dissolve group");
+            doc.ungroup(g);
+        }
+        OutlinerAct::DeleteGroup(g) => {
+            doc.checkpoint("Delete group");
+            for id in doc.group_members(g) {
+                doc.remove(id);
+            }
+            let inner: Vec<GroupId> = doc.groups.iter().filter(|x| doc.within(Some(x.id), g)).map(|x| x.id).collect();
+            doc.groups.retain(|x| !inner.contains(&x.id));
+            if doc.active_group.is_some_and(|a| inner.contains(&a)) {
+                doc.active_group = None;
+            }
+        }
+        OutlinerAct::AddSelection(g) => {
+            doc.checkpoint("Add to group");
+            let ids = doc.selected_objects();
+            for o in doc.objects.iter_mut().filter(|o| ids.contains(&o.id)) {
+                o.group = Some(g);
+            }
+        }
+        OutlinerAct::ToRoot(id) => {
+            doc.checkpoint("Move to root");
+            if let Some(o) = doc.objects.iter_mut().find(|o| o.id == id) {
+                o.group = None;
+            }
+        }
+        OutlinerAct::Rename(g, name) => {
+            if let Some(x) = doc.groups.iter_mut().find(|x| x.id == g) {
+                x.name = name;
+            }
+            doc.dirty = true;
+        }
+    }
 }
 
 fn properties(app: &mut DuctileApp, ui: &mut egui::Ui) {
