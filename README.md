@@ -22,7 +22,8 @@ code from them.
   the same way but only splits the faces they cross, so the pieces of a
   face can be picked, offset or extruded on their own. Draft (Alt+G) tilts
   selected planar faces about the line where they meet a neutral plane
-  through their base, by a dragged or typed angle.
+  through their base, by a dragged or typed angle. Intersection curves
+  (Alt+N) adds the curves where selected solids cross.
 - Delete faces (Delete in face mode) heals the solid where it can: holes
   and bosses close up, and fillets or chamfers between planes grow back to
   a sharp edge. Otherwise the solid becomes an open sheet. Duplicate

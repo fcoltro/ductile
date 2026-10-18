@@ -828,6 +828,28 @@ pub fn imprint_selected(doc: &Document) -> Result<(Vec<ObjectId>, Vec<Body>), St
     Ok((solids, out))
 }
 
+/// The curves where each pair of selected solids cross, one wire body per
+/// pair that meets.
+pub fn intersection_curves_selected(doc: &Document) -> Result<Vec<Body>, String> {
+    let solids: Vec<std::sync::Arc<Body>> = doc.selected_objects().into_iter().filter_map(|id| doc.object(id).filter(|o| o.body.kind == ductile_brep::BodyKind::Solid).map(|o| o.body.clone())).collect();
+    if solids.len() < 2 {
+        return Err("Intersection curves: select two or more solids".into());
+    }
+    let mut out = Vec::new();
+    for i in 0..solids.len() {
+        for j in i + 1..solids.len() {
+            let w = ductile_brep::ops::cut::intersection_curves(&solids[i], &solids[j]).map_err(|e| format!("Intersection curves failed: {e}"))?;
+            if !w.edges.is_empty() {
+                out.push(w);
+            }
+        }
+    }
+    if out.is_empty() {
+        return Err("Intersection curves: the selected solids do not meet".into());
+    }
+    Ok(out)
+}
+
 /// The selected solids, the selected curve chains, and the direction to
 /// sweep them through the solids: square to the curves' plane, or else
 /// along the construction plane's normal.

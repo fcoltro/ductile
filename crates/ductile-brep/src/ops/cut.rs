@@ -165,6 +165,33 @@ pub fn imprint_curves(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Body
     Ok(body)
 }
 
+/// The curves where the surfaces of solids `a` and `b` cross, as a wire
+/// body: the edges of their common volume that run between a face of `a`
+/// and a face of `b`. Empty when the solids do not overlap.
+pub fn intersection_curves(a: &Body, b: &Body) -> Result<Body, BoolError> {
+    let common = match boolean(a, b, BoolOp::Intersection) {
+        Ok(r) => r,
+        Err(BoolError::Empty) => return Ok(Body::new(BodyKind::Wire)),
+        Err(e) => return Err(e),
+    };
+    let on_a: Vec<_> = a.faces.iter().map(|f| &f.surface).collect();
+    let on_b: Vec<_> = b.faces.iter().map(|f| &f.surface).collect();
+    let mut segs = Vec::new();
+    for e in common.edge_ids() {
+        let fs = common.edge_faces(e);
+        if fs.len() != 2 {
+            continue;
+        }
+        let (s, t) = (&common.face(fs[0].0).surface, &common.face(fs[1].0).surface);
+        let (sa, sb, ta, tb) = (on_a.contains(&s), on_b.contains(&s), on_a.contains(&t), on_b.contains(&t));
+        if (sa && !sb && tb && !ta) || (sb && !sa && ta && !tb) {
+            let ed = common.edge(e);
+            segs.push(Segment { curve: ed.curve.clone(), t0: ed.t0, t1: ed.t1, reversed: false });
+        }
+    }
+    Ok(crate::profile::wire_from_segments(&segs))
+}
+
 /// The solid swept by the region a chain bounds (closed), or cuts off on
 /// one side (open), from `reach` behind its plane to `reach` in front.
 fn cutter(c: &Loop3, d: DVec3, reach: f64) -> Option<Body> {
@@ -248,6 +275,32 @@ mod tests {
         assert_eq!(waved.faces.len(), 10);
         assert_eq!(crate::ops::boolean::open_edges(&waved), 0);
         assert!((vol(&waved) - 24.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn intersection_curves_of_a_box_and_a_cylinder() {
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 4.0, 2.0));
+        let cyl = crate::primitives::make_cylinder(&Frame::new(DVec3::new(2.0, 2.0, -1.0), DVec3::Z, DVec3::X), 1.0, 4.0);
+        let w = intersection_curves(&b, &cyl).unwrap();
+        assert_eq!(w.kind, BodyKind::Wire);
+        let len: f64 = w.edges.iter().map(|e| e.length()).sum();
+        // Two circles where the cylinder passes through top and bottom.
+        assert!((len - 4.0 * PI).abs() < 1e-6, "{len}");
+        let far = make_box(&Frame { origin: DVec3::splat(10.0), ..Frame::WORLD }, DVec3::ONE);
+        assert!(intersection_curves(&b, &far).unwrap().edges.is_empty());
+        // A sphere pierced off-centre by a cylinder: two closed space curves.
+        let ball = crate::primitives::make_sphere(DVec3::ZERO, 2.0);
+        let rod = crate::primitives::make_cylinder(&Frame::new(DVec3::new(0.7, 0.0, -3.0), DVec3::Z, DVec3::X), 0.8, 6.0);
+        let w = intersection_curves(&ball, &rod).unwrap();
+        let chains = crate::profile::wire_chains(&w);
+        assert_eq!(chains.len(), 2);
+        assert!(chains.iter().all(|c| c.is_closed()));
+        for e in &w.edges {
+            for k in 0..=8 {
+                let p = e.curve.point(e.t0 + (e.t1 - e.t0) * k as f64 / 8.0);
+                assert!((p.length() - 2.0).abs() < 1e-4 && ((p.x - 0.7).hypot(p.y) - 0.8).abs() < 1e-4, "{p}");
+            }
+        }
     }
 
     #[test]
