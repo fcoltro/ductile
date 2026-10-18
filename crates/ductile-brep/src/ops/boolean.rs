@@ -124,6 +124,23 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     let na_edges = a.edges.len();
     let mut w = a.clone();
     w.append(b);
+    // B's vertices coinciding with A's vertices become A's.
+    let na_verts = a.vertices.len();
+    let remap: Vec<Option<VertexId>> = (na_verts..w.vertices.len())
+        .map(|i| {
+            let p = w.vertices[i].point;
+            (0..na_verts).map(|j| (w.vertices[j].point.distance(p), j)).filter(|x| x.0 < tol * 10.0).min_by(|x, y| x.0.total_cmp(&y.0)).map(|x| VertexId(x.1 as u32))
+        })
+        .collect();
+    for ed in w.edges.iter_mut().skip(na_edges) {
+        for v in [&mut ed.v0, &mut ed.v1] {
+            if v.idx() >= na_verts {
+                if let Some(t) = remap[v.idx() - na_verts] {
+                    *v = t;
+                }
+            }
+        }
+    }
     let from_a = |f: FaceId| f.idx() < na_faces;
     let face_mesh = |f: FaceId| if f.idx() < na_faces { &mesh_a.faces[f.idx()] } else { &mesh_b.faces[f.idx() - na_faces] };
     let pad = mesh_opts.chord_tol * 4.0 + tol * 20.0;
@@ -168,6 +185,31 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
         }
         let t = edge.curve.closest_param_in(w.vertex(v), edge.t0, edge.t1);
         splits.entry(e).or_default().push((t, v));
+    }
+    // Crossing vertices lying inside other edges (tangent touches, edges
+    // meeting inside coplanar faces) split those edges too.
+    // Vertices of either operand lying inside the other's edges count too.
+    let mut new_verts: Vec<VertexId> = crossing_points.iter().filter_map(|p| find_vertex(&w, *p, tol * 10.0)).collect();
+    new_verts.extend(w.edges.iter().flat_map(|e| [e.v0, e.v1]));
+    new_verts.sort();
+    new_verts.dedup();
+    for e in w.edge_ids() {
+        let edge = w.edge(e).clone();
+        let bb = edge.curve.bbox(edge.t0, edge.t1).expanded(tol * 20.0);
+        for &v in &new_verts {
+            let p = w.vertex(v);
+            if v == edge.v0 || v == edge.v1 || !bb.contains(p) {
+                continue;
+            }
+            let t = edge.curve.closest_param_in(p, edge.t0, edge.t1);
+            if edge.curve.point(t).distance(p) < tol * 10.0 {
+                splits.entry(e).or_default().push((t, v));
+            }
+        }
+    }
+    for list in splits.values_mut() {
+        list.sort_by(|a, b| a.0.total_cmp(&b.0));
+        list.dedup_by_key(|x| x.1);
     }
     apply_splits(&mut w, splits);
 
@@ -242,6 +284,21 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
         }
     }
 
+    // Drop imprints duplicating an edge already imprinted on the same face.
+    for ex in extras.iter_mut() {
+        let mut kept: Vec<EdgeId> = Vec::new();
+        for &e in ex.iter() {
+            let mid = w.edge(e).mid();
+            let dup = kept.iter().any(|&k| {
+                let ed = w.edge(k);
+                edge_key(&w, k) == edge_key(&w, e) && ed.curve.point(ed.curve.closest_param_in(mid, ed.t0, ed.t1)).distance(mid) < tol * 100.0
+            });
+            if !dup {
+                kept.push(e);
+            }
+        }
+        *ex = kept.into_iter().collect();
+    }
     if debug() {
         eprintln!("crossings {} coincident {:?}", crossing_points.len(), coincident);
         for (f, ex) in extras.iter().enumerate() {
@@ -288,6 +345,10 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     let mut keep: Vec<(usize, bool)> = Vec::new();
     for (i, fr) in frags.iter().enumerate() {
         let Some(p) = interior_point(&frag_mesh.faces[i]) else { continue };
+        // Triangle centroids sag below curved surfaces: snap onto the face.
+        let surf = &w.face(fr.orig).surface;
+        let uv = surf.project(p, None);
+        let p = surf.point(uv.x, uv.y);
         let fa = from_a(fr.orig);
         let mut cls = None;
         for &(x, y) in &coincident {
@@ -537,15 +598,30 @@ fn mesh_seeds(m: &FaceMesh, s: &Surface, max: usize) -> Vec<DVec3> {
 
 /// Centroid of the largest triangle of a face mesh.
 fn interior_point(m: &FaceMesh) -> Option<DVec3> {
+    // The centroid farthest from the fragment's boundary: points near the
+    // boundary may sit on (or tangent to) the other operand's surface.
+    let mut count: HashMap<(u32, u32), u32> = HashMap::new();
+    for t in &m.triangles {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            *count.entry((a.min(b), a.max(b))).or_default() += 1;
+        }
+    }
+    let border: Vec<(DVec3, DVec3)> =
+        count.iter().filter(|(_, n)| **n == 1).map(|((a, b), _)| (m.positions[*a as usize], m.positions[*b as usize])).collect();
     let mut best: Option<(f64, DVec3)> = None;
     for t in &m.triangles {
         let [a, b, c] = t.map(|i| m.positions[i as usize]);
-        let area = (b - a).cross(c - a).length();
-        if best.map(|x| area > x.0).unwrap_or(true) {
-            best = Some((area, (a + b + c) / 3.0));
+        if (b - a).cross(c - a).length() <= 1e-14 {
+            continue;
+        }
+        let g = (a + b + c) / 3.0;
+        let d = border.iter().map(|(p, q)| ssi::dist_point_segment3(g, *p, *q)).fold(f64::INFINITY, f64::min);
+        if best.map(|x| d > x.0).unwrap_or(true) {
+            best = Some((d, g));
         }
     }
-    best.filter(|b| b.0 > 0.0).map(|b| b.1)
+    best.map(|b| b.1)
 }
 
 /// Ray-parity point-in-solid test against a closed mesh, by majority vote
@@ -554,7 +630,7 @@ fn point_in_mesh(p: DVec3, mesh: &BodyMesh) -> bool {
     let dirs = [
         DVec3::new(0.5711, 0.6234, 0.5340),
         DVec3::new(-0.3127, 0.8123, -0.4921),
-        DVec3::new(0.7071, -0.4472, 0.5477),
+        DVec3::new(0.7073, -0.4472, 0.5477),
         DVec3::new(-0.6011, -0.5523, 0.5775),
         DVec3::new(0.1937, 0.2711, -0.9428),
     ];
@@ -634,6 +710,11 @@ struct HalfEdge {
     /// Extra (interior) edge this half-edge belongs to.
     extra: Option<EdgeId>,
     twin: Option<usize>,
+    /// Signed curvature (left turn positive) at the start, to order
+    /// half-edges leaving a node with the same tangent.
+    curv_out: f64,
+    /// Same at the end, for the half-edge traversed backwards.
+    curv_in_rev: f64,
     dir_out: f64,
     dir_in_rev: f64,
 }
@@ -675,7 +756,18 @@ fn split_face(w: &Body, f: FaceId, extras: &[EdgeId], samples: &[Vec<(f64, DVec3
     let mut hes: Vec<HalfEdge> = Vec::new();
     let mk = |from: usize, to: usize, uv: Vec<DVec2>, coedge: Option<Coedge>, extra: Option<EdgeId>| -> HalfEdge {
         let (dir_out, dir_in_rev) = polyline_dirs(&uv);
-        HalfEdge { from, to, uv, coedge, extra, twin: None, dir_out, dir_in_rev }
+        HalfEdge {
+            from,
+            to,
+            curv_out: start_curvature(&uv),
+            curv_in_rev: start_curvature(&uv.iter().rev().copied().collect::<Vec<_>>()),
+            uv,
+            coedge,
+            extra,
+            twin: None,
+            dir_out,
+            dir_in_rev,
+        }
     };
     for lp in &boundary {
         let n = lp.len();
@@ -765,12 +857,15 @@ fn split_face(w: &Body, f: FaceId, extras: &[EdgeId], samples: &[Vec<(f64, DVec3
         }
     }
     let next = |h: usize| -> Option<usize> {
-        let r = hes[h].dir_in_rev;
+        // Effective angles: an edge bending left (positive curvature) lies
+        // slightly counter-clockwise of a straight one with the same tangent.
+        let eff = |a: f64, k: f64| a + (k * span).atan() * 1e-6;
+        let r = eff(hes[h].dir_in_rev, hes[h].curv_in_rev);
         out_at[hes[h].to]
             .iter()
             .copied()
             .map(|o| {
-                let mut cw = (r - hes[o].dir_out).rem_euclid(TAU);
+                let mut cw = (r - eff(hes[o].dir_out, hes[o].curv_out)).rem_euclid(TAU);
                 if cw < 1e-9 || hes[h].twin == Some(o) {
                     cw += TAU;
                 }
@@ -790,11 +885,24 @@ fn split_face(w: &Body, f: FaceId, extras: &[EdgeId], samples: &[Vec<(f64, DVec3
         loop {
             used[h] = true;
             cyc.push(h);
-            h = next(h)?;
+            let Some(nh) = next(h) else {
+                if debug() {
+                    eprintln!("  face {} walk: no way out of node {} after half-edge {h}", f.idx(), hes[h].to);
+                }
+                return None;
+            };
+            h = nh;
             if h == start {
                 break;
             }
             if used[h] || cyc.len() > hes.len() {
+                if debug() {
+                    let d: Vec<String> = cyc.iter().map(|&k| format!("{}:{}->{}", k, hes[k].from, hes[k].to)).collect();
+                    eprintln!("  face {} walk: revisits half-edge {h} after {}", f.idx(), d.join(" "));
+                    for (k, he) in hes.iter().enumerate() {
+                        eprintln!("    he {k} {}->{} out {:.3} inrev {:.3} extra {:?} uv0 {:.4} uv1 {:.4}", he.from, he.to, he.dir_out, he.dir_in_rev, he.extra.map(|e| e.0), he.uv[0], he.uv.last().unwrap());
+                    }
+                }
                 return None;
             }
         }
@@ -879,9 +987,28 @@ fn extra_node(nodes: &mut Vec<(VertexId, DVec2)>, hes: &mut Vec<HalfEdge>, v: Ve
         hes[i].uv = vec![a, uv];
         hes[i].dir_out = o1;
         hes[i].dir_in_rev = r1;
-        hes.push(HalfEdge { from: n, to, uv: vec![uv, b], coedge: None, extra: None, twin: None, dir_out: o2, dir_in_rev: r2 });
+        hes.push(HalfEdge { from: n, to, uv: vec![uv, b], coedge: None, extra: None, twin: None, curv_out: 0.0, curv_in_rev: 0.0, dir_out: o2, dir_in_rev: r2 });
     }
     n
+}
+
+/// Signed curvature of a polyline at its start from its first three
+/// distinct points.
+fn start_curvature(uv: &[DVec2]) -> f64 {
+    let mut pts = vec![uv[0]];
+    for p in &uv[1..] {
+        if p.distance(*pts.last().unwrap()) > 1e-12 {
+            pts.push(*p);
+            if pts.len() == 3 {
+                break;
+            }
+        }
+    }
+    if pts.len() < 3 {
+        return 0.0;
+    }
+    let (a, b, c) = (pts[0], pts[1], pts[2]);
+    2.0 * (b - a).perp_dot(c - b) / ((b - a).length() * (c - b).length() * (c - a).length())
 }
 
 /// Directions (angles) leaving the start and arriving back from the end of a polyline.

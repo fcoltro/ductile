@@ -193,7 +193,9 @@ impl Curve3 {
     }
 
     pub fn bbox(&self, t0: f64, t1: f64) -> BBox3 {
-        BBox3::from_points(self.tessellate(t0, t1, 1e-3).into_iter().map(|(_, p)| p))
+        // The curve stays within the chord tolerance of its polyline.
+        let tol = 1e-3;
+        BBox3::from_points(self.tessellate(t0, t1, tol).into_iter().map(|(_, p)| p)).expanded(tol)
     }
 
     /// True if the curve is a straight line (or a degree-1 two-point NURBS).

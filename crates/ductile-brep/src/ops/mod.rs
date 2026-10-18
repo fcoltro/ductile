@@ -4,3 +4,5 @@
 pub mod extrude;
 pub mod boolean;
 pub mod heal;
+pub mod revolve;
+pub mod fillet;
