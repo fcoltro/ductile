@@ -861,6 +861,13 @@ pub fn demo_scene(doc: &mut Document) {
         if let Some(b) = ductile_brep::ops::sweep::sweep(&tube, &[Segment::new(Curve3::Nurbs(path), t0, t1)]) {
             doc.add_body("Tube", b);
         }
+        // A pipe bent through sharp corners, mitred at each one.
+        let bends = [DVec3::new(-16.0, -4.0, 0.6), DVec3::new(-16.0, -10.0, 0.6), DVec3::new(-10.0, -10.0, 0.6), DVec3::new(-10.0, -10.0, 5.0)];
+        let pipe = Loop3 { segments: vec![Segment::new(Curve3::Circle { frame: Frame::new(bends[0], bends[1] - bends[0], DVec3::Z), radius: 0.5 }, 0.0, std::f64::consts::TAU)] };
+        let legs: Vec<Segment> = bends.windows(2).map(|w| Segment::line(w[0], w[1])).collect();
+        if let Some(b) = ductile_brep::ops::sweep::sweep(&pipe, &legs) {
+            doc.add_body("Pipe", b);
+        }
     }
     doc.dirty = false;
 }

@@ -33,7 +33,8 @@ code from them.
   and NURBS surfaces of revolution for splines.
 - Loft (Alt+L) through two or more closed curves, keeping corners as edges
   when the profiles match; Sweep (Alt+W) a closed curve along an open path
-  with a rotation-minimizing frame (exact for straight and circular paths).
+  with a rotation-minimizing frame (exact for straight and circular paths),
+  mitred where the path turns through a sharp corner.
 - Fillets (Shift+F) and chamfers (Shift+K) on edges between planes, on
   circular plane/cylinder edges (boss and hole rims), with spherical corner
   patches where three filleted edges meet. Closed edges between any two
@@ -63,8 +64,8 @@ code from them.
 - Move / rotate / scale / mirror, linear and radial arrays (Alt+A,
   Alt+Shift+A), undo/redo.
 
-In progress: rolling-ball corners where filleted chains meet, mitred sweeps
-around sharp path corners, STEP assemblies.
+In progress: rolling-ball corners where filleted chains meet, STEP
+assemblies.
 
 ## Layout
 

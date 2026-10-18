@@ -100,7 +100,7 @@ fn arc(c: DVec3, a: DVec3, b: DVec3, n: DVec3) -> Segment {
 
 /// Half-space solid on the inner side of the plane through `o` with
 /// outward normal `n`.
-fn half_space(o: DVec3, n: DVec3, size: f64) -> Body {
+pub(crate) fn half_space(o: DVec3, n: DVec3, size: f64) -> Body {
     let f = Frame::new(o, -n, ductile_geom::any_perpendicular(n));
     let corner = o - f.x * size - f.y * size;
     make_box(&Frame { origin: corner, ..f }, DVec3::new(2.0 * size, 2.0 * size, size))

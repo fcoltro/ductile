@@ -13,6 +13,7 @@ use std::f64::consts::TAU;
 pub fn simplify(body: &Body) -> Body {
     let tol = ductile_geom::LINEAR_TOL * (body.bbox().diagonal() / 10.0).max(0.01);
     let mut b = merge_planar_faces(body, tol);
+    while merge_band_faces(&mut b, tol) {}
     while merge_one_vertex(&mut b, tol) {}
     compact(&b)
 }
@@ -115,6 +116,138 @@ fn merge_planar_faces(b: &Body, tol: f64) -> Body {
         }
     }
     out
+}
+
+/// True if two analytic surfaces of revolution are the same surface. Their
+/// normals point away from the axis whichever way it runs, so the axis may
+/// be flipped.
+fn same_revolved_surface(a: &Surface, b: &Surface, tol: f64) -> bool {
+    let axis = |fa: &ductile_geom::Frame, fb: &ductile_geom::Frame| {
+        fa.z.dot(fb.z).abs() > 1.0 - 1e-9 && {
+            let d = fb.origin - fa.origin;
+            (d - fa.z * d.dot(fa.z)).length() < tol
+        }
+    };
+    let centre = |fa: &ductile_geom::Frame, fb: &ductile_geom::Frame| fa.z.dot(fb.z).abs() > 1.0 - 1e-9 && fa.origin.distance(fb.origin) < tol;
+    match (a, b) {
+        (Surface::Cylinder { frame: f1, radius: r1 }, Surface::Cylinder { frame: f2, radius: r2 }) => (r1 - r2).abs() < tol && axis(f1, f2),
+        (Surface::Sphere { frame: f1, radius: r1 }, Surface::Sphere { frame: f2, radius: r2 }) => (r1 - r2).abs() < tol && centre(f1, f2),
+        (Surface::Torus { frame: f1, major: a1, minor: b1 }, Surface::Torus { frame: f2, major: a2, minor: b2 }) => {
+            (a1 - a2).abs() < tol && (b1 - b2).abs() < tol && centre(f1, f2)
+        }
+        _ => false,
+    }
+}
+
+/// Joins two faces on one surface of revolution that share edges, as when a
+/// tube is built from pieces. The joined boundary is chained through the
+/// shared vertices; faces whose chaining would branch are left alone.
+/// Returns true if something changed.
+fn merge_band_faces(b: &mut Body, tol: f64) -> bool {
+    let mut users: HashMap<EdgeId, Vec<FaceId>> = HashMap::new();
+    for f in b.face_ids() {
+        for l in b.face_loops(f) {
+            for c in &l.coedges {
+                let u = users.entry(c.edge).or_default();
+                if !u.contains(&f) {
+                    u.push(f);
+                }
+            }
+        }
+    }
+    let mut pairs: Vec<(FaceId, FaceId)> = users.values().filter_map(|u| if let [f, g] = u[..] { Some((f.min(g), f.max(g))) } else { None }).collect();
+    pairs.sort();
+    pairs.dedup();
+    for (f, g) in pairs {
+        let (fa, fb) = (b.face(f), b.face(g));
+        if fa.reversed != fb.reversed || !same_revolved_surface(&fa.surface, &fb.surface, tol) {
+            continue;
+        }
+        let shared = |e: EdgeId| users[&e].contains(&f) && users[&e].contains(&g);
+        // Kept coedges with their face, the coedge that followed them, and
+        // whether the one before them was shared.
+        let mut bnd: Vec<(Coedge, FaceId, Option<Coedge>, bool)> = Vec::new();
+        // The first face's first loop comes first, so it stays the outer
+        // boundary.
+        for face in [f, g] {
+            for l in b.face_loops(face) {
+                let n = l.coedges.len();
+                for (k, c) in l.coedges.iter().enumerate() {
+                    if !shared(c.edge) {
+                        let next = l.coedges[(k + 1) % n];
+                        let prev = l.coedges[(k + n - 1) % n];
+                        bnd.push((*c, face, (!shared(next.edge)).then_some(next), shared(prev.edge)));
+                    }
+                }
+            }
+        }
+        // Coedges that carried on after a shared edge, by start vertex.
+        let mut resume: HashMap<VertexId, Vec<usize>> = HashMap::new();
+        for (i, c) in bnd.iter().enumerate() {
+            if c.3 {
+                resume.entry(b.coedge_vertices(c.0).0).or_default().push(i);
+            }
+        }
+        // The successor of a kept coedge: its own, or, where that was a
+        // shared edge, the one that carried on after shared edges there.
+        let succ = |i: usize| -> Option<usize> {
+            let (c, face, next, _) = bnd[i];
+            if let Some(n) = next {
+                return bnd.iter().position(|x| x.0 == n && x.1 == face);
+            }
+            match resume.get(&b.coedge_vertices(c).1).map(|v| &v[..]) {
+                Some(&[j]) => Some(j),
+                Some(v) => {
+                    let other: Vec<usize> = v.iter().copied().filter(|&j| bnd[j].1 != face).collect();
+                    if let [j] = other[..] {
+                        Some(j)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        };
+        let mut used = vec![false; bnd.len()];
+        let mut loops: Vec<Vec<Coedge>> = Vec::new();
+        let mut ok = true;
+        'outer: for s in 0..bnd.len() {
+            if used[s] {
+                continue;
+            }
+            let mut cyc = Vec::new();
+            let mut i = s;
+            loop {
+                used[i] = true;
+                cyc.push(bnd[i].0);
+                match succ(i) {
+                    Some(n) if n == s => break,
+                    Some(n) if !used[n] => i = n,
+                    _ => {
+                        ok = false;
+                        break 'outer;
+                    }
+                }
+            }
+            loops.push(cyc);
+        }
+        if !ok {
+            continue;
+        }
+        let (surface, reversed) = (fa.surface.clone(), fa.reversed);
+        let mut out = Body { kind: b.kind, vertices: b.vertices.clone(), edges: b.edges.clone(), loops: vec![], faces: vec![] };
+        for h in b.face_ids() {
+            if h == f {
+                out.add_face(surface.clone(), reversed, loops.clone());
+            } else if h != g {
+                let face = b.face(h);
+                out.add_face(face.surface.clone(), face.reversed, b.face_loops(h).map(|l| l.coedges.clone()).collect());
+            }
+        }
+        *b = compact(&out);
+        return true;
+    }
+    false
 }
 
 /// Loops of the union of a group of co-planar faces.

@@ -161,8 +161,11 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
                 continue;
             }
             let s = &w.face(f).surface;
-            let tm = 0.5 * (edge.t0 + edge.t1);
-            let on = [edge.t0, tm, edge.t1].iter().all(|&t| ssi::distance(s, edge.curve.point(t)) < tol * 10.0);
+            // Uneven fractions, so a closed curve crossing a surface at its
+            // start and half-way round is not mistaken for lying in it.
+            let on = [0.0, 0.173, 0.382, 0.618, 0.851, 1.0]
+                .iter()
+                .all(|&k| ssi::distance(s, edge.curve.point(edge.t0 + (edge.t1 - edge.t0) * k)) < tol * 10.0);
             if on {
                 continue;
             }
