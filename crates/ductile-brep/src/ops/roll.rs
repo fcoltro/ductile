@@ -276,7 +276,7 @@ fn set_section(rows: &mut [Vec<DVec4>; 3], k: usize, p1: DVec3, p2: DVec3, mid: 
 
 /// Middle control point and weight of the rational quadratic arc from `p1`
 /// to `p2` about `c`.
-fn arc_mid(c: DVec3, p1: DVec3, p2: DVec3) -> (DVec3, f64) {
+pub(crate) fn arc_mid(c: DVec3, p1: DVec3, p2: DVec3) -> (DVec3, f64) {
     let (a, b) = (p1 - c, p2 - c);
     let w = (0.5 * a.angle_between(b)).cos();
     (c + (a + b).normalize() * (a.length() / w), w)
@@ -286,7 +286,7 @@ fn arc_mid(c: DVec3, p1: DVec3, p2: DVec3) -> (DVec3, f64) {
 /// the material), in the plane through `q` normal to the edge, with its two
 /// contact points and their surface parameters.
 #[allow(clippy::too_many_arguments)]
-fn ball(
+pub(crate) fn ball(
     body: &Body,
     (f1, s1): (FaceId, &Surface),
     (f2, s2): (FaceId, &Surface),
@@ -319,7 +319,7 @@ fn ball(
 
 /// Moves the end of edge `x` at vertex `v` to the point `p` on its curve,
 /// re-attaching it to vertex `nv`.
-fn move_end(b: &mut Body, x: EdgeId, v: VertexId, p: DVec3, nv: VertexId, size: f64) -> Result<(), FilletError> {
+pub(crate) fn move_end(b: &mut Body, x: EdgeId, v: VertexId, p: DVec3, nv: VertexId, size: f64) -> Result<(), FilletError> {
     let xe = b.edges[x.idx()].clone();
     let t = xe.curve.closest_param_in(p, xe.t0 - (xe.t1 - xe.t0), xe.t1 + (xe.t1 - xe.t0));
     if xe.curve.point(t).distance(p) > 1e-5 * size {

@@ -10,3 +10,4 @@ pub mod fillet;
 pub mod loft;
 pub mod sweep;
 pub mod roll;
+pub mod chain;

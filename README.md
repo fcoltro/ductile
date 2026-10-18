@@ -34,7 +34,10 @@ code from them.
   circular plane/cylinder edges (boss and hole rims), with spherical corner
   patches where three filleted edges meet. Closed edges between any two
   surfaces (a vase lip, a loft's foot, a sphere cut flat) get rolling-ball
-  NURBS fillets and chamfers with exact circular sections.
+  NURBS fillets and chamfers with exact circular sections, and so do
+  chains of tangent edges: round a box's corners, then fillet its whole
+  top rim in one go; or a side edge between a spline face and a plane,
+  closed off by the caps it runs into.
 - STEP (AP214) export of exact solids, checked against OpenCascade; STL and
   OBJ export. Headless: `ductile --demo --export-step out.step`.
 - STEP import (File > Import STEP, or `ductile part.step`): planes,
@@ -44,7 +47,7 @@ code from them.
   (`crates/ductile-io/tests/occ_import.rs`).
 - Move / rotate / scale / mirror, undo/redo.
 
-In progress: rolling-ball fillets on open edge chains, mitred sweeps
+In progress: rolling-ball corners where filleted chains meet, mitred sweeps
 around sharp path corners, shell, STEP assemblies.
 
 ## Layout

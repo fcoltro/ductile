@@ -123,12 +123,19 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     let set: BTreeSet<EdgeId> = edges.iter().copied().collect();
     let mut infos: HashMap<EdgeId, EdgeInfo> = HashMap::new();
     let mut tools: Vec<(EdgeId, Body)> = Vec::new();
-    // Closed edges with no exact tool are blended by rolling the ball
-    // along them directly; that keeps every other id valid until the end.
+    // Chains of tangent edges, and edges with no exact tool, are blended
+    // by rolling the ball along them directly; that keeps every other id
+    // valid until the end.
     let mut base = body.clone();
     let mut rolled = false;
     let mut tooled: BTreeSet<EdgeId> = BTreeSet::new();
-    for &e in &set {
+    for (chain, closed) in super::chain::tangent_chains(body, &set.iter().copied().collect::<Vec<_>>()) {
+        if chain.len() > 1 {
+            base = super::chain::roll_chain(&base, &chain, closed, blend)?;
+            rolled = true;
+            continue;
+        }
+        let e = chain[0].edge;
         let info = edge_info(body, e)?;
         match edge_tool(body, e, &info, blend, size) {
             Ok(t) => {
@@ -136,8 +143,12 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
                 tooled.insert(e);
                 infos.insert(e, info);
             }
-            Err(FilletError::Unsupported) if body.edge(e).is_closed() => {
-                base = super::roll::roll_closed_edge(&base, e, blend)?;
+            Err(FilletError::Unsupported) => {
+                base = if closed {
+                    super::roll::roll_closed_edge(&base, e, blend)?
+                } else {
+                    super::chain::roll_chain(&base, &chain, false, blend)?
+                };
                 rolled = true;
             }
             Err(err) => return Err(err),
@@ -460,5 +471,41 @@ mod tests {
         let (a, c, d) = (4.0 - 2.0 * r, 3.0 - 2.0 * r, 2.0 - 2.0 * r);
         let expect = a * c * d + 2.0 * r * (a * c + c * d + a * d) + PI * r * r * (a + c + d) + 4.0 / 3.0 * PI * r * r * r;
         assert!((vol(&f) - expect).abs() < 5e-3, "{} vs {expect}", vol(&f));
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use crate::ops::boolean::open_edges;
+    use crate::ops::heal::compact;
+    use crate::primitives::*;
+    use crate::tess::{tessellate, TessOptions};
+    use std::f64::consts::PI;
+
+    fn vol(b: &Body) -> f64 {
+        tessellate(b, &TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume()
+    }
+
+    #[test]
+    fn rounded_corners_then_top_edges() {
+        // The classic: round the vertical edges, then fillet the whole top
+        // rim in one go as a tangent chain.
+        let (w, d, h, c, r) = (4.0, 3.0, 2.0, 0.8, 0.3);
+        let b = make_box(&Frame::WORLD, DVec3::new(w, d, h));
+        let vertical: Vec<EdgeId> = b.edge_ids().filter(|e| (b.edge(*e).start() - b.edge(*e).end()).z.abs() > 1.0).collect();
+        let b = compact(&blend_edges(&b, &vertical, Blend::Fillet(c)).unwrap());
+        let top: Vec<EdgeId> = b.edge_ids().filter(|e| {
+            let ed = b.edge(*e);
+            ed.start().z > h - 1e-6 && ed.end().z > h - 1e-6
+        }).collect();
+        assert_eq!(top.len(), 8);
+        let f = blend_edges(&b, &top, Blend::Fillet(r)).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        let spandrel = r * r * (1.0 - PI / 4.0);
+        let dbar = r * (10.0 - 3.0 * PI) / (12.0 - 3.0 * PI);
+        let path = 2.0 * (w - 2.0 * c) + 2.0 * (d - 2.0 * c) + 2.0 * PI * (c - dbar);
+        let expect = vol(&b) - spandrel * path;
+        assert!((vol(&f) - expect).abs() < 2e-3 * spandrel * path, "{} vs {expect}", vol(&f));
     }
 }
