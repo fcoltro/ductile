@@ -1462,6 +1462,15 @@ mod tests {
     }
 
     #[test]
+    fn cylinder_cutting_a_torus_tube_across_both_seams() {
+        // What is left of the torus wraps round its tube, so merging its
+        // pieces must keep one seam to cut it open by.
+        let t = make_torus(&Frame::new(DVec3::new(-0.5, 0.5, 0.4), DVec3::Y, DVec3::Y.any_orthonormal_vector()), 1.2, 0.4);
+        let c = make_cylinder(&Frame::new(DVec3::new(-0.5, 0.2028, -0.3708), DVec3::X, DVec3::X.any_orthonormal_vector()), 0.75, 1.5);
+        identities(&t, &c);
+    }
+
+    #[test]
     fn overlapping_boxes() {
         let a = bx(DVec3::ZERO, DVec3::new(2.0, 2.0, 2.0));
         let b = bx(DVec3::new(1.0, 1.0, 1.0), DVec3::new(2.0, 2.0, 2.0));

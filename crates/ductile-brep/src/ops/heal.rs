@@ -163,77 +163,20 @@ fn merge_band_faces(b: &mut Body, tol: f64) -> bool {
         if fa.reversed != fb.reversed || !same_revolved_surface(&fa.surface, &fb.surface, tol) {
             continue;
         }
-        let shared = |e: EdgeId| users[&e].contains(&f) && users[&e].contains(&g);
-        // Kept coedges with their face, the coedge that followed them, and
-        // whether the one before them was shared.
-        let mut bnd: Vec<(Coedge, FaceId, Option<Coedge>, bool)> = Vec::new();
-        // The first face's first loop comes first, so it stays the outer
-        // boundary.
-        for face in [f, g] {
-            for l in b.face_loops(face) {
-                let n = l.coedges.len();
-                for (k, c) in l.coedges.iter().enumerate() {
-                    if !shared(c.edge) {
-                        let next = l.coedges[(k + 1) % n];
-                        let prev = l.coedges[(k + n - 1) % n];
-                        bnd.push((*c, face, (!shared(next.edge)).then_some(next), shared(prev.edge)));
-                    }
+        // Shared edges go, but a face round a periodic surface needs a cut
+        // to unroll it by: when dropping every shared seam leaves a loop
+        // winding round, keep the seams in one direction or the other.
+        let mut merged = None;
+        for keep in [None, Some(1), Some(0)] {
+            let shared = |e: EdgeId| users[&e].contains(&f) && users[&e].contains(&g) && (keep.is_none() || on_seam(&fa.surface, b, e) != keep);
+            if let Some(loops) = band_loops(b, f, g, &shared) {
+                if loops_unroll(&fa.surface, b, &loops) {
+                    merged = Some(loops);
+                    break;
                 }
             }
         }
-        // Coedges that carried on after a shared edge, by start vertex.
-        let mut resume: HashMap<VertexId, Vec<usize>> = HashMap::new();
-        for (i, c) in bnd.iter().enumerate() {
-            if c.3 {
-                resume.entry(b.coedge_vertices(c.0).0).or_default().push(i);
-            }
-        }
-        // The successor of a kept coedge: its own, or, where that was a
-        // shared edge, the one that carried on after shared edges there.
-        let succ = |i: usize| -> Option<usize> {
-            let (c, face, next, _) = bnd[i];
-            if let Some(n) = next {
-                return bnd.iter().position(|x| x.0 == n && x.1 == face);
-            }
-            match resume.get(&b.coedge_vertices(c).1).map(|v| &v[..]) {
-                Some(&[j]) => Some(j),
-                Some(v) => {
-                    let other: Vec<usize> = v.iter().copied().filter(|&j| bnd[j].1 != face).collect();
-                    if let [j] = other[..] {
-                        Some(j)
-                    } else {
-                        None
-                    }
-                }
-                None => None,
-            }
-        };
-        let mut used = vec![false; bnd.len()];
-        let mut loops: Vec<Vec<Coedge>> = Vec::new();
-        let mut ok = true;
-        'outer: for s in 0..bnd.len() {
-            if used[s] {
-                continue;
-            }
-            let mut cyc = Vec::new();
-            let mut i = s;
-            loop {
-                used[i] = true;
-                cyc.push(bnd[i].0);
-                match succ(i) {
-                    Some(n) if n == s => break,
-                    Some(n) if !used[n] => i = n,
-                    _ => {
-                        ok = false;
-                        break 'outer;
-                    }
-                }
-            }
-            loops.push(cyc);
-        }
-        if !ok {
-            continue;
-        }
+        let Some(loops) = merged else { continue };
         let (surface, reversed) = (fa.surface.clone(), fa.reversed);
         let mut out = Body { kind: b.kind, vertices: b.vertices.clone(), edges: b.edges.clone(), loops: vec![], faces: vec![] };
         for h in b.face_ids() {
@@ -248,6 +191,128 @@ fn merge_band_faces(b: &mut Body, tol: f64) -> bool {
         return true;
     }
     false
+}
+
+/// Loops of faces `f` and `g` joined along the edges `shared` picks.
+fn band_loops(b: &Body, f: FaceId, g: FaceId, shared: &dyn Fn(EdgeId) -> bool) -> Option<Vec<Vec<Coedge>>> {
+    // Kept coedges with their face, the coedge that followed them, and
+    // whether the one before them was shared.
+    let mut bnd: Vec<(Coedge, FaceId, Option<Coedge>, bool)> = Vec::new();
+    // The first face's first loop comes first, so it stays the outer
+    // boundary.
+    for face in [f, g] {
+        for l in b.face_loops(face) {
+            let n = l.coedges.len();
+            for (k, c) in l.coedges.iter().enumerate() {
+                if !shared(c.edge) {
+                    let next = l.coedges[(k + 1) % n];
+                    let prev = l.coedges[(k + n - 1) % n];
+                    bnd.push((*c, face, (!shared(next.edge)).then_some(next), shared(prev.edge)));
+                }
+            }
+        }
+    }
+    // Coedges that carried on after a shared edge, by start vertex.
+    let mut resume: HashMap<VertexId, Vec<usize>> = HashMap::new();
+    for (i, c) in bnd.iter().enumerate() {
+        if c.3 {
+            resume.entry(b.coedge_vertices(c.0).0).or_default().push(i);
+        }
+    }
+    // The successor of a kept coedge: its own, or, where that was a
+    // shared edge, the one that carried on after shared edges there.
+    let succ = |i: usize| -> Option<usize> {
+        let (c, face, next, _) = bnd[i];
+        if let Some(n) = next {
+            return bnd.iter().position(|x| x.0 == n && x.1 == face);
+        }
+        match resume.get(&b.coedge_vertices(c).1).map(|v| &v[..]) {
+            Some(&[j]) => Some(j),
+            Some(v) => {
+                let other: Vec<usize> = v.iter().copied().filter(|&j| bnd[j].1 != face).collect();
+                if let [j] = other[..] {
+                    Some(j)
+                } else {
+                    None
+                }
+            }
+            None => None,
+        }
+    };
+    let mut used = vec![false; bnd.len()];
+    let mut loops: Vec<Vec<Coedge>> = Vec::new();
+    let mut ok = true;
+    'outer: for s in 0..bnd.len() {
+        if used[s] {
+            continue;
+        }
+        let mut cyc = Vec::new();
+        let mut i = s;
+        loop {
+            used[i] = true;
+            cyc.push(bnd[i].0);
+            match succ(i) {
+                Some(n) if n == s => break,
+                Some(n) if !used[n] => i = n,
+                _ => {
+                    ok = false;
+                    break 'outer;
+                }
+            }
+        }
+        loops.push(cyc);
+    }
+    if !ok {
+        return None;
+    }
+    Some(loops)
+}
+
+/// True if edge `e` runs along a seam of the periodic surface `s`: every
+/// point of it sits on the parameter line where u (or v) wraps round.
+fn on_seam(s: &Surface, b: &Body, e: EdgeId) -> Option<usize> {
+    let ed = b.edge(e);
+    let pts: Vec<DVec3> = (0..=4).map(|k| ed.curve.point(ed.t0 + (ed.t1 - ed.t0) * k as f64 / 4.0)).collect();
+    let uvs: Vec<DVec2> = pts.iter().map(|p| s.wrap_periodic(s.project(*p, None), 0.0)).collect();
+    let st = s.period_start();
+    let at_wrap = |x: f64, p: f64| x.abs() < 1e-6 || (x - p).abs() < 1e-6;
+    if s.period_u().is_some_and(|p| uvs.iter().all(|uv| at_wrap(uv.x - st.x, p))) {
+        Some(0)
+    } else if s.period_v().is_some_and(|p| uvs.iter().all(|uv| at_wrap(uv.y - st.y, p))) {
+        Some(1)
+    } else {
+        None
+    }
+}
+
+/// True if every loop, followed round with its parameters kept continuous,
+/// comes back to where it started: the face unrolls flat with no loop
+/// winding round a period.
+fn loops_unroll(s: &Surface, b: &Body, loops: &[Vec<Coedge>]) -> bool {
+    if s.period_u().is_none() && s.period_v().is_none() {
+        return true;
+    }
+    loops.iter().all(|l| {
+        let mut first: Option<DVec2> = None;
+        let mut prev: Option<DVec2> = None;
+        for c in l {
+            let e = b.edge(c.edge);
+            for k in 0..=8 {
+                let t = if c.reversed { e.t1 + (e.t0 - e.t1) * k as f64 / 8.0 } else { e.t0 + (e.t1 - e.t0) * k as f64 / 8.0 };
+                let uv = s.project(e.curve.point(t), prev);
+                let uv = match prev {
+                    Some(p) => s.align_periodic(uv, p),
+                    None => uv,
+                };
+                first.get_or_insert(uv);
+                prev = Some(uv);
+            }
+        }
+        match (first, prev) {
+            (Some(a), Some(z)) => a.distance(z) < 1e-4,
+            _ => true,
+        }
+    })
 }
 
 /// Loops of the union of a group of co-planar faces.
