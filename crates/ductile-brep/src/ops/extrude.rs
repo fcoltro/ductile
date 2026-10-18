@@ -73,7 +73,7 @@ fn extrude_loop(b: &mut Body, lp: &Loop3, d: DVec3, shift: &DMat4) -> (Vec<Coedg
 
 /// Surface swept by segment `s` moving along `d`, and whether the face must
 /// be reversed so its normal points outward (`tangent × d`).
-fn side_surface(s: &Segment, d: DVec3) -> (Surface, bool) {
+pub(crate) fn side_surface(s: &Segment, d: DVec3) -> (Surface, bool) {
     match &s.curve {
         Curve3::Line { origin, dir } => {
             let t = if s.reversed { -*dir } else { *dir };

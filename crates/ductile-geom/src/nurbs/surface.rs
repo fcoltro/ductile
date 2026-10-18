@@ -242,6 +242,40 @@ impl NurbsSurface {
         Self::new(cs[0].degree, 1, cs[0].knots.clone(), vec![0.0, 0.0, 1.0, 1.0], nu, 2, ctrl)
     }
 
+    /// Bilinearly blended Coons patch filling four boundary curves:
+    /// `bottom` (v = 0) and `top` (v = 1) both running in +u, `left`
+    /// (u = 0) and `right` (u = 1) both running in +v, meeting at their
+    /// ends. Exact for polynomial boundaries; rational ones are first
+    /// approximated by cubics, so the patch then meets them within the
+    /// approximation's tolerance.
+    pub fn coons(bottom: &NurbsCurve, right: &NurbsCurve, top: &NurbsCurve, left: &NurbsCurve) -> Self {
+        let poly = |c: &NurbsCurve| {
+            if !c.is_rational() {
+                return c.clone();
+            }
+            let (a, b) = c.domain();
+            let n = 8 * c.ctrl.len().max(4);
+            let pts: Vec<DVec3> = (0..=n).map(|i| c.point(a + (b - a) * i as f64 / n as f64)).collect();
+            NurbsCurve::interpolate(&pts, 3)
+        };
+        let u = make_compatible(&[poly(bottom), poly(top)]);
+        let v = make_compatible(&[poly(left), poly(right)]);
+        let greville = |c: &NurbsCurve| -> Vec<f64> { (0..c.ctrl.len()).map(|i| c.knots[i + 1..=i + c.degree].iter().sum::<f64>() / c.degree as f64).collect() };
+        let (h, g) = (greville(&u[0]), greville(&v[0]));
+        let (p00, p10, p01, p11) = (bottom.point(bottom.domain().0), bottom.point(bottom.domain().1), top.point(top.domain().0), top.point(top.domain().1));
+        let (nu, nv) = (h.len(), g.len());
+        let mut ctrl = Vec::with_capacity(nu * nv);
+        for i in 0..nu {
+            for j in 0..nv {
+                let a = dehom(u[0].ctrl[i]) * (1.0 - g[j]) + dehom(u[1].ctrl[i]) * g[j];
+                let b = dehom(v[0].ctrl[j]) * (1.0 - h[i]) + dehom(v[1].ctrl[j]) * h[i];
+                let c = (p00 * (1.0 - h[i]) + p10 * h[i]) * (1.0 - g[j]) + (p01 * (1.0 - h[i]) + p11 * h[i]) * g[j];
+                ctrl.push(hom(a + b - c, 1.0));
+            }
+        }
+        Self::new(u[0].degree, v[0].degree, u[0].knots.clone(), v[0].knots.clone(), nu, nv, ctrl)
+    }
+
     /// Skinned (lofted) surface interpolating the section curves along v.
     pub fn loft(sections: &[NurbsCurve], degree_v: usize) -> Self {
         assert!(sections.len() >= 2);
@@ -456,5 +490,21 @@ mod tests {
         assert!((p.truncate().length() - 1.0).abs() < 1e-9);
         let p = s.point(0.25, 1.0);
         assert!((p.z - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn coons_patch_meets_its_boundary() {
+        let bottom = NurbsCurve::uniform(3, &[DVec3::ZERO, DVec3::new(1.0, 0.0, 0.5), DVec3::new(2.0, 0.0, -0.3), DVec3::new(3.0, 0.0, 0.0)]);
+        let top = NurbsCurve::uniform(2, &[DVec3::new(0.0, 2.0, 0.0), DVec3::new(1.5, 2.5, 1.0), DVec3::new(3.0, 2.0, 0.0)]);
+        let left = NurbsCurve::line(DVec3::ZERO, DVec3::new(0.0, 2.0, 0.0));
+        let right = NurbsCurve::uniform(2, &[DVec3::new(3.0, 0.0, 0.0), DVec3::new(3.5, 1.0, 0.0), DVec3::new(3.0, 2.0, 0.0)]);
+        let s = NurbsSurface::coons(&bottom, &right, &top, &left);
+        for k in 0..=10 {
+            let t = k as f64 / 10.0;
+            assert!(s.point(t, 0.0).distance(bottom.point(t)) < 1e-12);
+            assert!(s.point(t, 1.0).distance(top.point(t)) < 1e-12);
+            assert!(s.point(0.0, t).distance(left.point(t)) < 1e-12);
+            assert!(s.point(1.0, t).distance(right.point(t)) < 1e-12);
+        }
     }
 }

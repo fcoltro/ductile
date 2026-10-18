@@ -136,7 +136,7 @@ pub fn revolve(profile: &Loop3, origin: DVec3, axis: DVec3, angle: f64) -> Optio
     Some(if full { crate::ops::heal::compact(&b) } else { b })
 }
 
-fn radial(p: DVec3, o: DVec3, a: DVec3) -> DVec3 {
+pub(crate) fn radial(p: DVec3, o: DVec3, a: DVec3) -> DVec3 {
     let d = p - o;
     d - a * d.dot(a)
 }
@@ -144,7 +144,7 @@ fn radial(p: DVec3, o: DVec3, a: DVec3) -> DVec3 {
 /// Surface swept by a profile segment, and whether it is planar. Lines
 /// and arcs in the axis plane give analytic surfaces; anything else is
 /// swept as an exact NURBS surface of revolution.
-fn surface_of(s: &Segment, o: DVec3, a: DVec3, e: DVec3, tol: f64, angle: f64) -> (Surface, bool) {
+pub(crate) fn surface_of(s: &Segment, o: DVec3, a: DVec3, e: DVec3, tol: f64, angle: f64) -> (Surface, bool) {
     analytic_surface_of(s, o, a, e, tol).unwrap_or_else(|| (Surface::Nurbs(NurbsSurface::revolution(&s.curve.to_nurbs(s.t0, s.t1), o, a, angle)), false))
 }
 
