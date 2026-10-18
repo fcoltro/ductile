@@ -328,12 +328,61 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
         }
         rows.push(row);
     }
+    // Where another edge leaves a junction along one side's face (a
+    // cylinder's seam, the edge between two faces of a split surface), the
+    // junction section is the one whose contact point lies on that edge,
+    // so the edge can be cut back to it.
+    {
+        let sgn = if convex.unwrap_or(true) { -1.0 } else { 1.0 };
+        let junctions: Vec<usize> = if closed { (0..k).collect() } else { (1..k).collect() };
+        for j in junctions {
+            let v = verts[j];
+            let (prev, next) = ((j + k - 1) % k, j);
+            for x in others(v) {
+                let faces: Vec<FaceId> = body.edge_faces(x).iter().map(|u| u.0).collect();
+                let on_a = faces.iter().all(|f| *f == sides[prev].0 || *f == sides[next].0);
+                let on_b = faces.iter().all(|f| *f == sides[prev].1 || *f == sides[next].1);
+                if on_a == on_b {
+                    continue;
+                }
+                // The face the edge runs on, and the other side's face.
+                let (fa, fb) = if on_a { (sides[next].0, sides[next].1) } else { (sides[next].1, sides[next].0) };
+                let ctrl;
+                let (p1, p2);
+                if let Blend::Chamfer(d) = blend {
+                    // The chamfer's line starts `d` along the edge; the
+                    // other side keeps its point.
+                    let Some(pa) = point_along(body, x, v, d) else { continue };
+                    let old = &rows[next][0];
+                    (p1, p2) = if on_a { (pa, old.p2) } else { (old.p1, pa) };
+                    ctrl = vec![p1.extend(1.0), ((p1 + p2) * 0.5).extend(1.0), p2.extend(1.0)];
+                } else {
+                    let Some((c, pa, pb)) = ball_on_edge(body, x, v, fa, fb, sgn * reach) else { continue };
+                    (p1, p2) = if on_a { (pa, pb) } else { (pb, pa) };
+                    ctrl = section_ctrl(blend, c, p1, p2);
+                }
+                let deg = ctrl.len() - 1;
+                let mut knots = vec![0.0; deg + 1];
+                knots.extend(std::iter::repeat(1.0).take(deg + 1));
+                let sec = Section { p1, p2, curve: NurbsCurve::new(deg, knots, ctrl) };
+                *rows[prev].last_mut().unwrap() = Section { p1, p2, curve: sec.curve.clone() };
+                rows[next][0] = sec;
+                break;
+            }
+        }
+    }
     if closed {
         // The last section is the first one.
         let first = &rows[0][0];
         let (p1, p2, curve) = (first.p1, first.p2, first.curve.clone());
         let last = rows[k - 1].last_mut().unwrap();
-        if last.p1.distance(p1) > 1e-6 * size || last.p2.distance(p2) > 1e-6 * size {
+        // Fitted intersection curves meet with slightly different
+        // tangents, which tilts the section planes a little.
+        let tol = (1e-6 * size).max(0.02 * reach);
+        if last.p1.distance(p1) > tol || last.p2.distance(p2) > tol {
+            if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+                eprintln!("closed chain sections differ: {:.3e} {:.3e} (p1 {p1:.4} vs {:.4})", last.p1.distance(p1), last.p2.distance(p2), last.p1);
+            }
             return Err(super::fillet::unsupported(line!(), file!()));
         }
         *last = Section { p1, p2, curve };
@@ -441,6 +490,65 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
     Ok(out)
 }
 
+/// The point of edge `x` at distance `d` from its vertex `v`.
+fn point_along(body: &Body, x: EdgeId, v: VertexId, d: f64) -> Option<DVec3> {
+    let xe = body.edge(x);
+    let (s0, dir) = if xe.v0 == v { (xe.t0, 1.0) } else { (xe.t1, -1.0) };
+    let p0 = xe.curve.point(s0);
+    let mut s = s0 + dir * d / xe.curve.tangent(s0).length().max(1e-12);
+    for _ in 0..20 {
+        let p = xe.curve.point(s);
+        let err = p.distance(p0) - d;
+        if err.abs() < 1e-10 * (1.0 + d) {
+            break;
+        }
+        s -= dir * err / xe.curve.tangent(s).length().max(1e-12);
+    }
+    let in_range = s >= xe.t0.min(xe.t1) - 1e-9 && s <= xe.t0.max(xe.t1) + 1e-9;
+    in_range.then(|| xe.curve.point(s))
+}
+
+/// The ball of signed radius `sd` (negative inside the material) touching
+/// face `fa` on edge `x` near its vertex `v`, and touching face `fb`:
+/// centre and the two contact points.
+fn ball_on_edge(body: &Body, x: EdgeId, v: VertexId, fa: FaceId, fb: FaceId, sd: f64) -> Option<(DVec3, DVec3, DVec3)> {
+    let xe = body.edge(x);
+    let (sa, sb) = (&body.face(fa).surface, &body.face(fb).surface);
+    let (s0, dir) = if xe.v0 == v { (xe.t0, 1.0) } else { (xe.t1, -1.0) };
+    let speed = xe.curve.tangent(s0).length().max(1e-12);
+    let hint = std::cell::Cell::new((None, None));
+    // Signed distance of the ball centre over `fb`, less the radius.
+    let g = |s: f64| -> Option<(f64, DVec3, DVec3, DVec3)> {
+        let pa = xe.curve.point(s);
+        let (ha, hb) = hint.get();
+        let uva = sa.project(pa, ha);
+        let c = pa + body.face_normal(fa, uva.x, uva.y) * sd;
+        let uvb = sb.project(c, hb);
+        hint.set((Some(uva), Some(uvb)));
+        let pb = sb.point(uvb.x, uvb.y);
+        Some(((c - pb).dot(body.face_normal(fb, uvb.x, uvb.y)) - sd, c, pa, pb))
+    };
+    // Secant from the vertex into the edge.
+    let (mut a, mut b) = (s0, s0 + dir * sd.abs() / speed);
+    let (mut fa_, mut fb_) = (g(a)?.0, g(b)?.0);
+    for _ in 0..40 {
+        if (fb_ - fa_).abs() < 1e-300 {
+            break;
+        }
+        let c = b - fb_ * (b - a) / (fb_ - fa_);
+        (a, fa_) = (b, fb_);
+        b = c;
+        fb_ = g(b)?.0;
+        if fb_.abs() < 1e-10 * sd.abs().max(1e-9) {
+            break;
+        }
+    }
+    let (res, c, pa, pb) = g(b)?;
+    // Only a nearby solution, on the edge's own run.
+    let reach = 4.0 * sd.abs() / speed;
+    (res.abs() < 1e-7 * (1.0 + sd.abs()) && (b - s0) * dir > -1e-9 && (b - s0).abs() < reach).then_some((c, pa, pb))
+}
+
 /// Whether a blend face's surface normal points into the material: the
 /// outward side is away from the ball centre on convex edges and towards it
 /// on concave ones; for chamfers, away from the edge `q` (or towards it).
@@ -523,6 +631,31 @@ mod tests {
         assert_eq!(chains.len(), 1);
         assert!(chains[0].1);
         assert_eq!(chains[0].0.len(), 8);
+    }
+
+    #[test]
+    fn blends_where_two_drilled_holes_cross() {
+        // The crossing curves run over both holes' seams and split faces,
+        // so other edges leave the chain's junctions at an angle.
+        use crate::ops::boolean::{boolean, BoolOp};
+        use crate::ops::fillet::blend_edges;
+        use crate::primitives::{make_box, make_cylinder};
+        let bx = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let v = make_cylinder(&Frame { origin: DVec3::new(2.0, 1.5, -1.0), ..Frame::WORLD }, 0.5, 4.0);
+        let h = make_cylinder(&Frame::new(DVec3::new(-1.0, 1.7, 1.0), DVec3::X, DVec3::Y), 0.35, 6.0);
+        let a = boolean(&boolean(&bx, &v, BoolOp::Difference).unwrap(), &h, BoolOp::Difference).unwrap();
+        let cross: Vec<EdgeId> = a
+            .edge_ids()
+            .filter(|e| {
+                let cyl = a.edge_faces(*e).iter().filter(|(f, _)| matches!(a.face(*f).surface, Surface::Cylinder { .. })).count();
+                cyl == 2 && (a.edge(*e).mid().x - 2.0).abs() < 0.6
+            })
+            .collect();
+        for blend in [Blend::Fillet(0.08), Blend::Chamfer(0.08)] {
+            let r = blend_edges(&a, &cross, blend).unwrap();
+            assert_eq!(open_edges(&r), 0, "{blend:?}");
+            assert!(vol(&r) < vol(&a), "{blend:?}");
+        }
     }
 
     #[test]

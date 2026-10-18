@@ -49,26 +49,27 @@ fn random_step(rng: &mut Rng, b: &Body, size: DVec3) -> Step {
         let bb = b.bbox();
         (bb.min, bb.max)
     };
-    let x = rng.range(lo.x + 0.3, hi.x - 0.3);
-    let y = rng.range(lo.y + 0.3, hi.y - 0.3);
+    // Features stay clear of the block's sides: a hole grazing a side
+    // leaves slivers no modeler could blend either.
+    let r = rng.range(0.15, 0.6);
+    let x = rng.range(lo.x + r + 0.15, hi.x - r - 0.15);
+    let y = rng.range(lo.y + r + 0.15, hi.y - r - 0.15);
     match rng.pick(6) {
         0 => {
-            let r = rng.range(0.15, 0.6);
             Step::Cut(format!("hole r{r:.3} at ({x:.3}, {y:.3})"), make_cylinder(&at(x, y, lo.z - 1.0), r, hi.z - lo.z + 2.0))
         }
         1 => {
-            let r = rng.range(0.2, 0.6);
             let z = rng.range(lo.z + 0.3 * size.z, hi.z - 0.2);
             Step::Add(format!("boss r{r:.3} at ({x:.3}, {y:.3}, {z:.3})"), make_cylinder(&at(x, y, z), r, hi.z - z + rng.range(0.2, 0.8)))
         }
         2 => {
-            let (w, d) = (rng.range(0.3, 1.2), rng.range(0.3, 1.2));
+            let (w, d) = (2.0 * r, rng.range(0.3, 2.0 * r));
             let depth = rng.range(0.2, 0.7) * size.z;
             Step::Cut(format!("pocket {w:.3}x{d:.3} deep {depth:.3} at ({x:.3}, {y:.3})"), make_box(&at(x - w / 2.0, y - d / 2.0, hi.z - depth), DVec3::new(w, d, depth + 1.0)))
         }
         3 => {
-            let r = rng.range(0.1, 0.5);
-            Step::Cut(format!("side hole r{r:.3} at y {y:.3}"), make_cylinder(&Frame::new(DVec3::new(lo.x - 1.0, y, rng.range(lo.z + 0.6, hi.z - 0.6)), DVec3::X, DVec3::Y), r, hi.x - lo.x + 2.0))
+            let r = r.min(0.45 * (hi.z - lo.z) - 0.15).max(0.05);
+            Step::Cut(format!("side hole r{r:.3} at y {y:.3}"), make_cylinder(&Frame::new(DVec3::new(lo.x - 1.0, y, rng.range(lo.z + r + 0.15, hi.z - r - 0.15)), DVec3::X, DVec3::Y), r, hi.x - lo.x + 2.0))
         }
         k => {
             let edges: Vec<EdgeId> = b.edge_ids().filter(|e| b.edge(*e).length() > 0.4 && b.edge_faces(*e).len() == 2).collect();
