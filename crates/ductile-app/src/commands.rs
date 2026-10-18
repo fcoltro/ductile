@@ -3,7 +3,7 @@
 
 use crate::app::DuctileApp;
 use crate::document::{Document, Pick, SelectMode};
-use crate::tools::{BoxTool, ExtrudeTool, FilletTool, RoundKind, RoundTool, TransformKind, TransformTool};
+use crate::tools::{BoxTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
 use ductile_geom::{DMat4, DVec3, Frame};
@@ -34,7 +34,11 @@ pub enum Command {
     Cone,
     Sphere,
     Torus,
+    Curve,
+    Rectangle,
+    Circle,
     Extrude,
+    Revolve,
     Fillet,
     Chamfer,
     Union,
@@ -85,7 +89,11 @@ impl Command {
         Command::Cone,
         Command::Sphere,
         Command::Torus,
+        Command::Curve,
+        Command::Rectangle,
+        Command::Circle,
         Command::Extrude,
+        Command::Revolve,
         Command::Fillet,
         Command::Chamfer,
         Command::Union,
@@ -137,7 +145,11 @@ impl Command {
             Cone => "Cone",
             Sphere => "Sphere",
             Torus => "Torus",
-            Extrude => "Extrude / push-pull face",
+            Curve => "Curve (polyline)",
+            Rectangle => "Rectangle",
+            Circle => "Circle",
+            Extrude => "Extrude face or curves",
+            Revolve => "Revolve curves",
             Fillet => "Fillet edges",
             Chamfer => "Chamfer edges",
             Union => "Boolean union",
@@ -188,7 +200,11 @@ impl Command {
             Cone => "Shift+C",
             Sphere => "Shift+S",
             Torus => "Shift+T",
+            Curve => "L",
+            Rectangle => "Shift+R",
+            Circle => "Shift+O",
             Extrude => "E",
+            Revolve => "V",
             Fillet => "Shift+F",
             Chamfer => "Shift+K",
             Union => "Shift+U",
@@ -238,6 +254,10 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::S, false, true, false) => Sphere,
         (Key::T, false, true, false) => Torus,
         (Key::E, false, false, false) => Extrude,
+        (Key::L, false, false, false) => Curve,
+        (Key::R, false, true, false) => Rectangle,
+        (Key::O, false, true, false) => Circle,
+        (Key::V, false, false, false) => Revolve,
         (Key::F, false, true, false) => Fillet,
         (Key::K, false, true, false) => Chamfer,
         (Key::U, false, true, false) => Union,
@@ -378,7 +398,14 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Torus => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Torus))),
         Extrude => match ExtrudeTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
-            None => app.status = "Select a planar face to extrude (face mode: 3)".into(),
+            None => app.status = "Select a planar face (face mode: 3) or closed planar curves to extrude".into(),
+        },
+        Curve => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::Polyline))),
+        Rectangle => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::Rectangle))),
+        Circle => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::Circle))),
+        Revolve => match RevolveTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select closed planar curves to revolve".into(),
         },
         Fillet | Chamfer => match FilletTool::new(&app.doc, cmd == Chamfer) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
@@ -574,5 +601,20 @@ pub fn demo_scene(doc: &mut Document) {
     doc.add_body("Ball", ball);
     doc.add_body("Torus", make_torus(&at(14.0, 12.0, 1.0), 3.0, 1.0));
     doc.add_body("Cone", make_frustum(&at(-6.0, 4.0, 0.0), 2.5, 0.0, 5.0));
+    // A pulley revolved three quarters of a turn from its profile curve.
+    {
+        use ductile_brep::profile::{wire_chains, wire_from_segments, Segment};
+        let c = DVec3::new(-8.0, -3.0, 0.0);
+        let pts = [(0.6, 0.0), (3.0, 0.0), (3.0, 0.4), (2.2, 1.0), (3.0, 1.6), (3.0, 2.0), (0.6, 2.0)];
+        let q: Vec<DVec3> = pts.iter().map(|(r, z)| c + DVec3::new(*r, 0.0, *z)).collect();
+        let segs: Vec<Segment> = (0..q.len()).map(|i| Segment::line(q[i], q[(i + 1) % q.len()])).collect();
+        let wire = wire_from_segments(&segs);
+        if let Some(l) = wire_chains(&wire).into_iter().next() {
+            if let Some(b) = ductile_brep::ops::revolve::revolve(&l, c, DVec3::Z, 1.5 * std::f64::consts::PI) {
+                doc.add_body("Pulley", b);
+            }
+        }
+        doc.add_body("Pulley profile", wire.transformed(&ductile_geom::DMat4::from_translation(DVec3::new(0.0, -0.5, 0.0))));
+    }
     doc.dirty = false;
 }

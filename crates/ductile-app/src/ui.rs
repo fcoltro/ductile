@@ -39,8 +39,13 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                     menu_item(app, ui, c);
                 }
             });
+            ui.menu_button("Curve", |ui| {
+                for c in [Command::Curve, Command::Rectangle, Command::Circle] {
+                    menu_item(app, ui, c);
+                }
+            });
             ui.menu_button("Solid", |ui| {
-                for c in [Command::Extrude, Command::Fillet, Command::Chamfer, Command::Union, Command::Subtract, Command::Intersect] {
+                for c in [Command::Extrude, Command::Revolve, Command::Fillet, Command::Chamfer, Command::Union, Command::Subtract, Command::Intersect] {
                     menu_item(app, ui, c);
                 }
             });
@@ -135,8 +140,13 @@ pub fn toolbar(app: &mut DuctileApp, ui: &mut egui::Ui) {
             cmd_button(app, ui, Command::Cone, "Cone");
             cmd_button(app, ui, Command::Sphere, "Sph");
             cmd_button(app, ui, Command::Torus, "Tor");
+            section(ui, "Curve");
+            cmd_button(app, ui, Command::Curve, "Line");
+            cmd_button(app, ui, Command::Rectangle, "Rect");
+            cmd_button(app, ui, Command::Circle, "Circ");
             section(ui, "Model");
             cmd_button(app, ui, Command::Extrude, "Extr");
+            cmd_button(app, ui, Command::Revolve, "Rev");
             cmd_button(app, ui, Command::Fillet, "Fill");
             cmd_button(app, ui, Command::Chamfer, "Chmf");
             cmd_button(app, ui, Command::Union, "Union");

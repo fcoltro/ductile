@@ -605,12 +605,16 @@ fn edge_lines(mesh: &BodyMesh, body: &ductile_brep::Body, id: ObjectId, doc: &Do
         if is_seam(body, e) {
             continue;
         }
-        let sel = doc.selection.contains(&Pick::Edge(id, e));
-        let hov = doc.hover == Some(Pick::Edge(id, e));
+        // Curves are always drawn and highlight with their object.
+        let wire = body.kind == ductile_brep::BodyKind::Wire;
+        let sel = doc.selection.contains(&Pick::Edge(id, e)) || (wire && doc.selection.contains(&Pick::Object(id)));
+        let hov = doc.hover == Some(Pick::Edge(id, e)) || (wire && doc.hover == Some(Pick::Object(id)));
         let (col, w) = if sel {
             ([1.0, 0.75, 0.2, 1.0], 3.0)
         } else if hov {
             ([1.0, 0.9, 0.55, 1.0], 3.0)
+        } else if wire {
+            ([0.75, 0.82, 0.95, 1.0], 2.0)
         } else if show {
             ([0.05, 0.05, 0.06, 1.0], 1.4)
         } else {

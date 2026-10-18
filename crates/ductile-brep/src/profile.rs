@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Profiles: closed chains of curve segments used as input to sweeps.
 
-use crate::topo::{Body, FaceId};
+use crate::topo::{Body, BodyKind, FaceId, VertexId};
 use ductile_geom::{Curve3, DVec3, Frame};
 
 /// A piece of curve traversed from `t0` to `t1` (or backwards if `reversed`).
@@ -180,5 +180,114 @@ impl Region {
             regions.push(Region { plane, outer: loops[i].clone(), holes }.normalized());
         }
         regions
+    }
+}
+
+/// Builds a wire body from segments; segment ends closer than `1e-7`
+/// share a vertex.
+pub fn wire_from_segments(segments: &[Segment]) -> Body {
+    let mut b = Body::new(BodyKind::Wire);
+    let mut vert = |b: &mut Body, p: DVec3| -> VertexId {
+        match b.vertices.iter().position(|v| v.point.distance(p) < 1e-7) {
+            Some(i) => VertexId(i as u32),
+            None => b.add_vertex(p),
+        }
+    };
+    for s in segments {
+        let (p, q) = (s.curve.point(s.t0), s.curve.point(s.t1));
+        let v0 = vert(&mut b, p);
+        let v1 = vert(&mut b, q);
+        b.add_edge(s.curve.clone(), s.t0, s.t1, v0, v1);
+    }
+    b
+}
+
+/// Chains the edges of a body (normally a wire) into maximal paths through
+/// vertices of degree two. Closed chains come back with `is_closed()`.
+pub fn wire_chains(b: &Body) -> Vec<Loop3> {
+    let ne = b.edges.len();
+    let mut incident: Vec<Vec<usize>> = vec![Vec::new(); b.vertices.len()];
+    for (i, e) in b.edges.iter().enumerate() {
+        incident[e.v0.idx()].push(i);
+        if e.v1 != e.v0 {
+            incident[e.v1.idx()].push(i);
+        }
+    }
+    let mut used = vec![false; ne];
+    let mut out = Vec::new();
+    let seg = |i: usize, rev: bool| {
+        let e = &b.edges[i];
+        Segment { curve: e.curve.clone(), t0: e.t0, t1: e.t1, reversed: rev }
+    };
+    // Open chains start at vertices not of degree two; then closed loops.
+    let starts: Vec<usize> = (0..b.vertices.len()).filter(|v| incident[*v].len() != 2).chain(0..b.vertices.len()).collect();
+    for v0 in starts {
+        while let Some(&first) = incident[v0].iter().find(|e| !used[**e]) {
+            let mut segs = Vec::new();
+            let (mut e, mut v) = (first, v0);
+            loop {
+                used[e] = true;
+                let ed = &b.edges[e];
+                let rev = ed.v0.idx() != v;
+                segs.push(seg(e, rev));
+                v = if rev { ed.v0.idx() } else { ed.v1.idx() };
+                if incident[v].len() != 2 {
+                    break;
+                }
+                match incident[v].iter().find(|x| !used[**x]) {
+                    Some(&n) => e = n,
+                    None => break,
+                }
+            }
+            out.push(Loop3 { segments: segs });
+        }
+    }
+    out
+}
+
+/// Plane through planar loops, with the normal of the first loop; `None` if
+/// the loops are not coplanar.
+pub fn loops_plane(loops: &[Loop3]) -> Option<Frame> {
+    let first = loops.first()?;
+    let pts: Vec<DVec3> = loops.iter().flat_map(|l| l.polygon(1e-3)).collect();
+    let mut n = first.normal();
+    if n.length() < 1e-12 {
+        return None;
+    }
+    n = n.normalize();
+    let c = pts.iter().copied().sum::<DVec3>() / pts.len() as f64;
+    let size = pts.iter().map(|p| p.distance(c)).fold(0.0, f64::max).max(1e-9);
+    if pts.iter().any(|p| (*p - c).dot(n).abs() > 1e-6 * size.max(1.0)) {
+        return None;
+    }
+    Some(Frame::new(c, n, ductile_geom::any_perpendicular(n)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chains_rectangle_and_open_polyline() {
+        let p = [DVec3::ZERO, DVec3::new(2.0, 0.0, 0.0), DVec3::new(2.0, 1.0, 0.0), DVec3::new(0.0, 1.0, 0.0)];
+        let mut segs: Vec<Segment> = (0..4).map(|i| Segment::line(p[i], p[(i + 1) % 4])).collect();
+        segs.swap(1, 3);
+        segs.push(Segment::line(DVec3::new(5.0, 0.0, 0.0), DVec3::new(6.0, 0.0, 0.0)));
+        segs.push(Segment::line(DVec3::new(6.0, 1.0, 0.0), DVec3::new(6.0, 0.0, 0.0)));
+        let w = wire_from_segments(&segs);
+        assert_eq!(w.vertices.len(), 7);
+        let chains = wire_chains(&w);
+        assert_eq!(chains.len(), 2);
+        let closed: Vec<&Loop3> = chains.iter().filter(|c| c.is_closed()).collect();
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].segments.len(), 4);
+        assert!((closed[0].normal().length() - 4.0).abs() < 1e-9);
+        let open = chains.iter().find(|c| !c.is_closed()).unwrap();
+        assert_eq!(open.segments.len(), 2);
+        for w2 in open.segments.windows(2) {
+            assert!(w2[0].end().distance(w2[1].start()) < 1e-9);
+        }
+        let plane = loops_plane(&[closed[0].clone()]).unwrap();
+        assert!(plane.z.z.abs() > 0.999);
     }
 }

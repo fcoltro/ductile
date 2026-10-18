@@ -621,11 +621,14 @@ impl Tool for TransformTool {
 
 // -------------------------------------------------------------- Extrude ----
 
-/// Push/pull of a planar face: pulling out adds material, pushing in cuts.
+/// Push/pull of a planar face (pulling out adds material, pushing in cuts),
+/// or extrusion of the regions bounded by selected closed planar curves
+/// into a new solid.
 pub struct ExtrudeTool {
-    target: ObjectId,
-    body: std::sync::Arc<Body>,
-    region: ductile_brep::profile::Region,
+    /// Solid whose face is pushed or pulled; `None` when extruding curves.
+    target: Option<ObjectId>,
+    body: Option<std::sync::Arc<Body>>,
+    regions: Vec<ductile_brep::profile::Region>,
     normal: DVec3,
     base: DVec3,
     start_t: Option<f64>,
@@ -634,22 +637,53 @@ pub struct ExtrudeTool {
     cache: std::cell::RefCell<Option<(f64, Option<Body>, Option<String>)>>,
 }
 
+/// Regions bounded by the closed curves of the selected wire objects.
+pub fn selected_curve_regions(doc: &Document) -> Vec<ductile_brep::profile::Region> {
+    use ductile_brep::profile::{loops_plane, wire_chains, Region};
+    let mut ids: Vec<ObjectId> = doc.selection.iter().map(|p| p.object()).collect();
+    ids.dedup();
+    let loops: Vec<_> = ids
+        .iter()
+        .filter_map(|id| doc.object(*id))
+        .filter(|o| o.body.kind == ductile_brep::BodyKind::Wire)
+        .flat_map(|o| wire_chains(&o.body))
+        .filter(|l| l.is_closed())
+        .collect();
+    match loops_plane(&loops) {
+        Some(plane) => Region::from_loops(plane, loops),
+        None => Vec::new(),
+    }
+}
+
 impl ExtrudeTool {
-    /// Starts on the first selected planar face, if any.
+    /// Starts on the first selected planar face, or else on the regions of
+    /// the selected closed curves.
     pub fn new(doc: &Document) -> Option<Self> {
-        let (id, f) = doc.selection.iter().find_map(|p| match p {
+        let face = doc.selection.iter().find_map(|p| match p {
             Pick::Face(o, f) => Some((*o, *f)),
             _ => None,
-        })?;
-        let o = doc.object(id)?;
-        let region = ductile_brep::profile::Region::from_face(&o.body, f)?;
-        let poly = region.outer.polygon(1e-3);
+        });
+        let (target, body, regions) = match face {
+            Some((id, f)) => {
+                let o = doc.object(id)?;
+                let region = ductile_brep::profile::Region::from_face(&o.body, f)?;
+                (Some(id), Some(o.body.clone()), vec![region])
+            }
+            None => {
+                let regions = selected_curve_regions(doc);
+                if regions.is_empty() {
+                    return None;
+                }
+                (None, None, regions)
+            }
+        };
+        let poly = regions[0].outer.polygon(1e-3);
         let base = poly.iter().copied().sum::<DVec3>() / poly.len().max(1) as f64;
         Some(Self {
-            target: id,
-            body: o.body.clone(),
-            normal: region.plane.z,
-            region,
+            target,
+            body,
+            normal: regions[0].plane.z,
+            regions,
             base,
             start_t: None,
             distance: 0.0,
@@ -663,6 +697,7 @@ impl ExtrudeTool {
     }
 
     fn result(&self) -> (Option<Body>, Option<String>) {
+        use ductile_brep::ops::boolean::{boolean, BoolOp};
         let d = self.value();
         if let Some((cd, b, e)) = &*self.cache.borrow() {
             if *cd == d {
@@ -672,11 +707,24 @@ impl ExtrudeTool {
         let out = if d.abs() < 1e-9 {
             (None, None)
         } else {
-            match ductile_brep::ops::extrude::extrude_region(&self.region, self.normal * d) {
-                None => (None, Some("could not build the extrusion".into())),
-                Some(prism) => {
-                    let op = if d > 0.0 { ductile_brep::ops::boolean::BoolOp::Union } else { ductile_brep::ops::boolean::BoolOp::Difference };
-                    match ductile_brep::ops::boolean::boolean(&self.body, &prism, op) {
+            let mut acc: Result<Option<Body>, String> = Ok(None);
+            for r in &self.regions {
+                let Ok(prev) = acc else { break };
+                acc = match ductile_brep::ops::extrude::extrude_region(r, self.normal * d) {
+                    None => Err("could not build the extrusion".into()),
+                    Some(prism) => match prev {
+                        None => Ok(Some(prism)),
+                        Some(p) => boolean(&p, &prism, BoolOp::Union).map(Some).map_err(|e| e.to_string()),
+                    },
+                };
+            }
+            match (acc, &self.body) {
+                (Err(e), _) => (None, Some(e)),
+                (Ok(None), _) => (None, None),
+                (Ok(Some(prism)), None) => (Some(prism), None),
+                (Ok(Some(prism)), Some(body)) => {
+                    let op = if d > 0.0 { BoolOp::Union } else { BoolOp::Difference };
+                    match boolean(body, &prism, op) {
                         Ok(b) => (Some(b), None),
                         Err(e) => (None, Some(e.to_string())),
                     }
@@ -726,10 +774,9 @@ impl Tool for ExtrudeTool {
         ch
     }
     fn hidden_objects(&self) -> Vec<ObjectId> {
-        if self.result().0.is_some() {
-            vec![self.target]
-        } else {
-            vec![]
+        match self.target {
+            Some(t) if self.result().0.is_some() => vec![t],
+            _ => vec![],
         }
     }
     fn typed_value(&mut self, v: Option<f64>) {
@@ -737,8 +784,193 @@ impl Tool for ExtrudeTool {
     }
     fn commit(&mut self, doc: &mut Document) -> bool {
         let Some(b) = self.result().0 else { return false };
-        doc.replace_body(self.target, b);
         doc.selection.clear();
+        match self.target {
+            Some(t) => doc.replace_body(t, b),
+            None => {
+                let id = doc.add_body("Extrusion", b);
+                doc.selection.insert(Pick::Object(id));
+            }
+        }
+        true
+    }
+}
+
+// --------------------------------------------------------------- Curves ----
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum CurveKind {
+    Polyline,
+    Rectangle,
+    Circle,
+}
+
+/// Draws planar curves on the construction plane as wire objects.
+pub struct CurveTool {
+    kind: CurveKind,
+    points: Vec<DVec3>,
+    cursor: Option<DVec3>,
+    /// Typed size: radius for circles, width/height for rectangles.
+    size: DVec3,
+    closed: bool,
+}
+
+impl CurveTool {
+    pub fn new(kind: CurveKind) -> Self {
+        Self { kind, points: vec![], cursor: None, size: DVec3::ZERO, closed: false }
+    }
+
+    fn segments(&self) -> Vec<ductile_brep::profile::Segment> {
+        use ductile_brep::profile::Segment;
+        let f = current_cplane().frame;
+        let mut pts = self.points.clone();
+        match self.kind {
+            CurveKind::Polyline => {
+                if !self.closed {
+                    pts.extend(self.cursor);
+                }
+                let mut segs: Vec<Segment> = pts.windows(2).filter(|w| w[0].distance(w[1]) > 1e-9).map(|w| Segment::line(w[0], w[1])).collect();
+                if self.closed && pts.len() > 2 {
+                    segs.push(Segment::line(pts[pts.len() - 1], pts[0]));
+                }
+                segs
+            }
+            CurveKind::Rectangle => {
+                let Some(&c) = pts.first() else { return vec![] };
+                let (w, h) = (self.size.x, self.size.y);
+                if w.abs() < 1e-9 || h.abs() < 1e-9 {
+                    return vec![];
+                }
+                let q = [c, c + f.x * w, c + f.x * w + f.y * h, c + f.y * h];
+                (0..4).map(|i| Segment::line(q[i], q[(i + 1) % 4])).collect()
+            }
+            CurveKind::Circle => {
+                let Some(&c) = pts.first() else { return vec![] };
+                if self.size.x < 1e-9 {
+                    return vec![];
+                }
+                let frame = Frame { origin: c, ..f };
+                vec![Segment::new(ductile_geom::Curve3::Circle { frame, radius: self.size.x }, 0.0, std::f64::consts::TAU)]
+            }
+        }
+    }
+}
+
+impl Tool for CurveTool {
+    fn name(&self) -> &'static str {
+        match self.kind {
+            CurveKind::Polyline => "Curve",
+            CurveKind::Rectangle => "Rectangle",
+            CurveKind::Circle => "Circle",
+        }
+    }
+    fn hint(&self) -> String {
+        match (self.kind, self.points.len()) {
+            (CurveKind::Polyline, 0) => "Curve: click the first point".into(),
+            (CurveKind::Polyline, _) => "Curve: click points; click the first point to close, Enter to finish open".into(),
+            (CurveKind::Rectangle, 0) => "Rectangle: click the first corner".into(),
+            (CurveKind::Rectangle, _) => "Rectangle: click the opposite corner or type the size".into(),
+            (CurveKind::Circle, 0) => "Circle: click the center".into(),
+            (CurveKind::Circle, _) => "Circle: click to set the radius or type it".into(),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        let pt = match self.points.first() {
+            Some(c) => p.point.filter(|s| cplane.frame.dir_to_local(*s - *c).z.abs() < 1e-9).or_else(|| p.ray.hit_plane(*c, cplane.frame.z)),
+            None => p.point,
+        };
+        self.cursor = pt;
+        if let (Some(c), Some(q)) = (self.points.first().copied(), pt) {
+            match self.kind {
+                CurveKind::Rectangle => {
+                    let d = cplane.frame.dir_to_local(q - c);
+                    self.size = DVec3::new(d.x, d.y, 0.0);
+                }
+                CurveKind::Circle => self.size.x = snap_len(c.distance(q), p.world_per_px),
+                CurveKind::Polyline => {}
+            }
+        }
+        if !p.clicked {
+            return ToolOutcome::Continue;
+        }
+        let Some(q) = pt else { return ToolOutcome::Continue };
+        match self.kind {
+            CurveKind::Polyline => {
+                if self.points.len() > 2 && q.distance(self.points[0]) < p.world_per_px * 8.0 {
+                    self.closed = true;
+                    return ToolOutcome::Finished;
+                }
+                if self.points.last().map(|l| l.distance(q) > 1e-9).unwrap_or(true) {
+                    self.points.push(q);
+                }
+                ToolOutcome::Continue
+            }
+            _ => {
+                if self.points.is_empty() {
+                    self.points.push(q);
+                    ToolOutcome::Continue
+                } else {
+                    ToolOutcome::Finished
+                }
+            }
+        }
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let segs = self.segments();
+        if segs.is_empty() {
+            return None;
+        }
+        Some(ductile_brep::profile::wire_from_segments(&segs))
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        for p in &self.points {
+            out.push(LineInstance::point(*p, [1.0, 0.85, 0.3, 1.0], 6.0));
+        }
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut ch = false;
+        match self.kind {
+            CurveKind::Rectangle => {
+                ch |= drag_value(ui, "Width", &mut self.size.x, 0.1);
+                ch |= drag_value(ui, "Height", &mut self.size.y, 0.1);
+            }
+            CurveKind::Circle => ch |= drag_value(ui, "Radius", &mut self.size.x, 0.05),
+            CurveKind::Polyline => {
+                ui.label(format!("{} points", self.points.len()));
+            }
+        }
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        if let Some(v) = v {
+            match self.kind {
+                CurveKind::Circle => self.size.x = v.abs(),
+                CurveKind::Rectangle => {
+                    self.size.x = v;
+                    self.size.y = v;
+                }
+                CurveKind::Polyline => {}
+            }
+        }
+    }
+    fn accept(&mut self) -> ToolOutcome {
+        if self.kind == CurveKind::Polyline {
+            // Enter ends the curve at the last clicked point.
+            self.cursor = None;
+        }
+        ToolOutcome::Finished
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        if self.kind == CurveKind::Polyline && !self.closed {
+            self.cursor = None;
+        }
+        let segs = self.segments();
+        if segs.is_empty() {
+            return false;
+        }
+        let id = doc.add_body(self.name(), ductile_brep::profile::wire_from_segments(&segs));
+        doc.selection.clear();
+        doc.selection.insert(Pick::Object(id));
         true
     }
 }
@@ -864,5 +1096,186 @@ impl Tool for FilletTool {
         doc.replace_body(self.target, b);
         doc.selection.clear();
         true
+    }
+}
+
+// -------------------------------------------------------------- Revolve ----
+
+/// Revolves the regions of the selected closed curves about an axis in
+/// their plane: a selected straight edge, or the construction plane's Y
+/// (or X) axis.
+pub struct RevolveTool {
+    regions: Vec<ductile_brep::profile::Region>,
+    edge_axis: Option<(DVec3, DVec3)>,
+    /// 0: selected edge (if any), 1: construction plane X, 2: Y.
+    pub axis_choice: usize,
+    pub degrees: f64,
+    cache: std::cell::RefCell<Option<(usize, f64, Option<Body>, Option<String>)>>,
+}
+
+impl RevolveTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let regions = selected_curve_regions(doc);
+        if regions.is_empty() {
+            return None;
+        }
+        let edge_axis = doc.selected_edges().into_iter().find_map(|(o, e)| {
+            let ed = doc.object(o)?.body.edge(e).clone();
+            ed.curve.is_linear().then(|| (ed.start(), (ed.end() - ed.start()).normalize()))
+        });
+        let axis_choice = if edge_axis.is_some() { 0 } else { 2 };
+        Some(Self { regions, edge_axis, axis_choice, degrees: 360.0, cache: std::cell::RefCell::new(None) })
+    }
+
+    fn axis(&self) -> (DVec3, DVec3) {
+        let f = current_cplane().frame;
+        match (self.axis_choice, self.edge_axis) {
+            (0, Some(a)) => a,
+            (1, _) => (f.origin, f.x),
+            _ => (f.origin, f.y),
+        }
+    }
+
+    fn result(&self) -> (Option<Body>, Option<String>) {
+        use ductile_brep::ops::boolean::{boolean, BoolOp};
+        use ductile_brep::ops::revolve::revolve;
+        if let Some((c, d, b, e)) = &*self.cache.borrow() {
+            if *c == self.axis_choice && *d == self.degrees {
+                return (b.clone(), e.clone());
+            }
+        }
+        let (o, a) = self.axis();
+        let ang = self.degrees.to_radians();
+        let mut out: Result<Option<Body>, String> = Ok(None);
+        'outer: for r in &self.regions {
+            let Some(mut solid) = revolve(&r.outer, o, a, ang) else {
+                out = Err("the profile must lie on one side of an axis in its plane".into());
+                break;
+            };
+            for h in &r.holes {
+                match revolve(h, o, a, ang).map(|hs| boolean(&solid, &hs, BoolOp::Difference)) {
+                    Some(Ok(b)) => solid = b,
+                    _ => {
+                        out = Err("could not cut a hole of the profile".into());
+                        break 'outer;
+                    }
+                }
+            }
+            out = match out {
+                Ok(None) => Ok(Some(solid)),
+                Ok(Some(p)) => boolean(&p, &solid, BoolOp::Union).map(Some).map_err(|e| e.to_string()),
+                e => e,
+            };
+        }
+        let res = match out {
+            Ok(b) => (b, None),
+            Err(e) => (None, Some(e)),
+        };
+        *self.cache.borrow_mut() = Some((self.axis_choice, self.degrees, res.0.clone(), res.1.clone()));
+        res
+    }
+}
+
+impl Tool for RevolveTool {
+    fn name(&self) -> &'static str {
+        "Revolve"
+    }
+    fn hint(&self) -> String {
+        match self.cache.borrow().as_ref().and_then(|c| c.3.clone()) {
+            Some(e) => format!("Revolve failed: {e}"),
+            None => format!("Revolve: type an angle ({:.1}°), choose the axis in the panel, click or Enter to finish", self.degrees),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if p.clicked {
+            ToolOutcome::Finished
+        } else {
+            ToolOutcome::Continue
+        }
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        self.result().0
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        let (o, a) = self.axis();
+        let l = self.regions.iter().flat_map(|r| r.outer.polygon(1e-2)).map(|p| (p - o).length()).fold(1.0, f64::max) * 1.5;
+        out.push(LineInstance::new(o - a * l, o + a * l, [0.3, 0.9, 1.0, 1.0], 1.5));
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut ch = drag_value(ui, "Angle", &mut self.degrees, 1.0);
+        ui.horizontal(|ui| {
+            ui.label("Axis");
+            if self.edge_axis.is_some() {
+                ch |= ui.radio_value(&mut self.axis_choice, 0, "Edge").changed();
+            }
+            ch |= ui.radio_value(&mut self.axis_choice, 1, "X").changed();
+            ch |= ui.radio_value(&mut self.axis_choice, 2, "Y").changed();
+        });
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.degrees = v.unwrap_or(360.0);
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let Some(b) = self.result().0 else { return false };
+        let id = doc.add_body("Revolve", b);
+        doc.selection.clear();
+        doc.selection.insert(Pick::Object(id));
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A click straight down onto the construction plane at `p`.
+    fn click(t: &mut dyn Tool, doc: &Document, p: DVec3, clicked: bool) -> bool {
+        let info = PointerInfo { ray: Ray { origin: p + DVec3::Z * 10.0, dir: -DVec3::Z }, point: Some(p), plane_point: Some(p), clicked, world_per_px: 0.01 };
+        matches!(t.pointer(doc, &CPlane::default(), &info), ToolOutcome::Finished)
+    }
+
+    fn volume(b: &Body) -> f64 {
+        ductile_brep::tessellate(b, &ductile_brep::TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume()
+    }
+
+    #[test]
+    fn rectangle_with_circle_hole_extrudes() {
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        let mut r = CurveTool::new(CurveKind::Rectangle);
+        click(&mut r, &doc, DVec3::ZERO, true);
+        assert!(click(&mut r, &doc, DVec3::new(4.0, 3.0, 0.0), true));
+        assert!(r.commit(&mut doc));
+        let rect = doc.objects[0].id;
+        let mut c = CurveTool::new(CurveKind::Circle);
+        click(&mut c, &doc, DVec3::new(2.0, 1.5, 0.0), true);
+        c.typed_value(Some(1.0));
+        assert!(c.commit(&mut doc));
+        doc.selection.insert(Pick::Object(rect));
+        assert_eq!(selected_curve_regions(&doc).len(), 1);
+        let mut e = ExtrudeTool::new(&doc).unwrap();
+        e.typed_value(Some(2.0));
+        assert!(e.commit(&mut doc));
+        let solid = doc.objects.last().unwrap();
+        let expect = (12.0 - std::f64::consts::PI) * 2.0;
+        assert!((volume(&solid.body).abs() - expect).abs() < 1e-2, "{}", volume(&solid.body));
+    }
+
+    #[test]
+    fn closed_polyline_revolves_about_y() {
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        let mut l = CurveTool::new(CurveKind::Polyline);
+        for p in [DVec3::new(1.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0), DVec3::new(2.0, 3.0, 0.0), DVec3::new(1.0, 3.0, 0.0)] {
+            assert!(!click(&mut l, &doc, p, true));
+        }
+        assert!(click(&mut l, &doc, DVec3::new(1.0, 0.0, 0.0), true));
+        assert!(l.commit(&mut doc));
+        let mut r = RevolveTool::new(&doc).unwrap();
+        r.typed_value(Some(180.0));
+        assert!(r.commit(&mut doc));
+        let expect = std::f64::consts::PI / 2.0 * 3.0 * 3.0;
+        assert!((volume(&doc.objects.last().unwrap().body) - expect).abs() < 1e-2);
     }
 }

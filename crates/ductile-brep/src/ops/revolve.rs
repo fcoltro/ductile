@@ -3,7 +3,7 @@
 
 use crate::profile::{Loop3, Segment};
 use crate::topo::{Body, BodyKind, Coedge, EdgeId, VertexId};
-use ductile_geom::{Curve3, DVec3, Frame, Surface};
+use ductile_geom::{Curve3, DMat4, DQuat, DVec3, Frame, Surface};
 use std::f64::consts::TAU;
 
 /// Revolves a closed profile a full turn about the axis through `origin`
@@ -11,7 +11,20 @@ use std::f64::consts::TAU;
 /// one side of it; segments may touch the axis. Lines and circular arcs
 /// produce exact planes, cylinders, cones, spheres and tori.
 pub fn revolve_loop(profile: &Loop3, origin: DVec3, axis: DVec3) -> Option<Body> {
-    let a = axis.normalize();
+    revolve(profile, origin, axis, TAU)
+}
+
+/// Revolves a closed profile by `angle` radians (right-handed about `axis`;
+/// negative angles turn the other way). Partial turns are capped by the
+/// profile at both ends.
+pub fn revolve(profile: &Loop3, origin: DVec3, axis: DVec3, angle: f64) -> Option<Body> {
+    let (axis, angle) = if angle < 0.0 { (-axis, -angle) } else { (axis, angle) };
+    if angle < 1e-9 {
+        return None;
+    }
+    let full = angle >= TAU - 1e-9;
+    let angle = angle.min(TAU);
+    let a = axis.try_normalize()?;
     let tol = 1e-9 * (1.0 + profile.polygon(1e-2).iter().map(|p| p.length()).fold(0.0, f64::max));
     let n = profile.segments.len();
     if n < 2 || !profile.is_closed() {
@@ -25,11 +38,17 @@ pub fn revolve_loop(profile: &Loop3, origin: DVec3, axis: DVec3) -> Option<Body>
     // Make the profile counter-clockwise about np so that s x phi is outward.
     let profile = if profile.normal().dot(np) < 0.0 { profile.reversed() } else { profile.clone() };
     let on_axis = |p: DVec3| radial(p, origin, a).length() < tol.max(1e-9);
+    let rot = DMat4::from_translation(origin) * DMat4::from_quat(DQuat::from_axis_angle(a, angle)) * DMat4::from_translation(-origin);
 
     let mut b = Body::new(BodyKind::Solid);
     let starts: Vec<DVec3> = profile.segments.iter().map(|s| s.start()).collect();
     let verts: Vec<VertexId> = starts.iter().map(|p| b.add_vertex(*p)).collect();
-    // Circle edge for every profile vertex off the axis.
+    let verts_end: Vec<VertexId> = starts
+        .iter()
+        .enumerate()
+        .map(|(i, p)| if full || on_axis(*p) { verts[i] } else { b.add_vertex(rot.transform_point3(*p)) })
+        .collect();
+    // Circle (or arc) edge swept by every profile vertex off the axis.
     let circles: Vec<Option<EdgeId>> = starts
         .iter()
         .enumerate()
@@ -39,14 +58,33 @@ pub fn revolve_loop(profile: &Loop3, origin: DVec3, axis: DVec3) -> Option<Body>
             }
             let c = origin + a * (*p - origin).dot(a);
             let frame = Frame::new(c, a, *p - c);
-            Some(b.add_edge(Curve3::Circle { frame, radius: p.distance(c) }, 0.0, TAU, verts[i], verts[i]))
+            Some(b.add_edge(Curve3::Circle { frame, radius: p.distance(c) }, 0.0, angle, verts[i], verts_end[i]))
         })
         .collect();
+    // Profile edges at the start angle and (for partial turns) the end angle.
+    let mut start_edges: Vec<Option<(EdgeId, bool)>> = vec![None; n];
+    let mut end_edges: Vec<Option<(EdgeId, bool)>> = vec![None; n];
     for (i, s) in profile.segments.iter().enumerate() {
         let j = (i + 1) % n;
-        let (pi, pj) = (starts[i], starts[j]);
-        if on_axis(pi) && on_axis(pj) && on_axis(s.curve.point(0.5 * (s.t0 + s.t1))) {
+        let axial = on_axis(starts[i]) && on_axis(starts[j]) && on_axis(s.curve.point(0.5 * (s.t0 + s.t1)));
+        if full && axial {
             continue;
+        }
+        let (v0, v1) = if s.reversed { (verts[j], verts[i]) } else { (verts[i], verts[j]) };
+        let e0 = b.add_edge(s.curve.clone(), s.t0, s.t1, v0, v1);
+        start_edges[i] = Some((e0, s.reversed));
+        end_edges[i] = Some(if full || axial {
+            (e0, s.reversed)
+        } else {
+            let (w0, w1) = if s.reversed { (verts_end[j], verts_end[i]) } else { (verts_end[i], verts_end[j]) };
+            (b.add_edge(s.curve.transformed(&rot), s.t0, s.t1, w0, w1), s.reversed)
+        });
+    }
+    for (i, s) in profile.segments.iter().enumerate() {
+        let j = (i + 1) % n;
+        let (Some((e0, r0)), Some((e1, r1))) = (start_edges[i], end_edges[i]) else { continue };
+        if e0 == e1 && !full {
+            continue; // on the axis: bounded by the caps only
         }
         let Some((surface, flat)) = surface_of(s, origin, a, e, tol) else { return None };
         // Outward normal at the segment midpoint (profile is CCW about np).
@@ -55,7 +93,7 @@ pub fn revolve_loop(profile: &Loop3, origin: DVec3, axis: DVec3) -> Option<Body>
         let out = s.tangent_at(tm).cross(np);
         let uv = surface.project(mid, None);
         let reversed = surface.normal(uv.x, uv.y).dot(out) < 0.0;
-        let loops = if flat {
+        let loops = if flat && full {
             // Annulus or disk: the circles alone.
             let mut ls = vec![];
             if let Some(c) = circles[j] {
@@ -65,26 +103,33 @@ pub fn revolve_loop(profile: &Loop3, origin: DVec3, axis: DVec3) -> Option<Body>
                 ls.push(vec![Coedge::new(c, true)]);
             }
             // Outer loop (larger radius) first.
-            let rj = radial(pj, origin, a).length();
-            let ri = radial(pi, origin, a).length();
+            let rj = radial(starts[j], origin, a).length();
+            let ri = radial(starts[i], origin, a).length();
             if ri > rj {
                 ls.reverse();
             }
             ls
         } else {
-            let (v0, v1) = if s.reversed { (verts[j], verts[i]) } else { (verts[i], verts[j]) };
-            let seam = b.add_edge(s.curve.clone(), s.t0, s.t1, v0, v1);
-            let mut l = vec![Coedge::new(seam, s.reversed)];
+            let mut l = vec![Coedge::new(e0, r0)];
             if let Some(c) = circles[j] {
                 l.push(Coedge::new(c, false));
             }
-            l.push(Coedge::new(seam, !s.reversed));
+            l.push(Coedge::new(e1, !r1));
             if let Some(c) = circles[i] {
                 l.push(Coedge::new(c, true));
             }
             vec![l]
         };
         b.add_face(surface, reversed, loops);
+    }
+    if !full {
+        // Start cap faces -np (reversed profile order), end cap faces the
+        // rotated np.
+        let pf = Frame::new(starts[0], np, e);
+        let cap0: Vec<Coedge> = (0..n).rev().filter_map(|i| start_edges[i].map(|(e, r)| Coedge::new(e, !r))).collect();
+        b.add_face(Surface::Plane { frame: pf }, true, vec![cap0]);
+        let cap1: Vec<Coedge> = (0..n).filter_map(|i| end_edges[i].map(|(e, r)| Coedge::new(e, r))).collect();
+        b.add_face(Surface::Plane { frame: pf.transformed(&rot) }, false, vec![cap1]);
     }
     Some(b)
 }
@@ -186,5 +231,21 @@ mod tests {
         let rho = 2.0 + (r * r * r / 6.0) / area;
         let expect = area * TAU * rho;
         assert!((vol(&b) - expect).abs() < 1e-3, "{} vs {expect}", vol(&b));
+    }
+
+    #[test]
+    fn partial_revolves() {
+        let l = poly(&[DVec3::new(1.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 3.0), DVec3::new(1.0, 0.0, 3.0)]);
+        for (ang, sign) in [(PI / 2.0, 1.0), (PI, -1.0), (1.5 * PI, 1.0)] {
+            let b = revolve(&l, DVec3::ZERO, DVec3::Z, ang * sign).unwrap();
+            assert_eq!(crate::ops::boolean::open_edges(&b), 0);
+            let expect = ang / 2.0 * (4.0 - 1.0) * 3.0;
+            assert!((vol(&b) - expect).abs() < 3e-3, "{ang}: {} vs {expect}", vol(&b));
+        }
+        // Profile touching the axis: a quarter cone.
+        let t = poly(&[DVec3::ZERO, DVec3::new(0.0, 2.0, 0.0), DVec3::new(0.0, 0.0, 3.0)]);
+        let b = revolve(&t, DVec3::ZERO, DVec3::Z, PI / 2.0).unwrap();
+        assert_eq!(crate::ops::boolean::open_edges(&b), 0);
+        assert!((vol(&b) - PI * 4.0 * 3.0 / 12.0).abs() < 1e-3, "{}", vol(&b));
     }
 }
