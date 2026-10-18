@@ -336,7 +336,7 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
                     }
                     let verts: Vec<VertexId> = verts.into_iter().collect();
                     for (c, c0, c1) in curves {
-                        for (ta, tb, va, vb) in curve_pieces(&mut w, &c, c0, c1, &verts, tol) {
+                        for (ta, tb, va, vb) in curve_pieces(&mut w, &c, c0, c1, &verts, (&sa, &sb), tol) {
                             // The traced curve only approximates the section;
                             // classify a point brought onto both surfaces.
                             let mid = onto_both(&sa, &sb, c.point(0.5 * (ta + tb)));
@@ -808,15 +808,20 @@ pub(crate) fn apply_splits(w: &mut Body, splits: HashMap<EdgeId, Vec<(f64, Verte
 /// Splits an intersection curve at the vertices lying on it. Returns
 /// increasing parameter intervals with their end vertices; closed curves
 /// without vertices get a new vertex at their start.
-fn curve_pieces(w: &mut Body, c: &Curve3, c0: f64, c1: f64, verts: &[VertexId], tol: f64) -> Vec<(f64, f64, VertexId, VertexId)> {
+fn curve_pieces(w: &mut Body, c: &Curve3, c0: f64, c1: f64, verts: &[VertexId], surfs: (&Surface, &Surface), tol: f64) -> Vec<(f64, f64, VertexId, VertexId)> {
     let periodic = c.period().filter(|p| (c1 - c0 - p).abs() < 1e-9);
     let closed = periodic.is_some() || c.point(c0).distance(c.point(c1)) < tol * 10.0;
+    // A traced section only passes near the true one between its points;
+    // a vertex on both surfaces a little off it still lies on the section.
+    let loose = (c.bbox(c0, c1).diagonal() * 1e-4).max(tol * 10.0);
+    let on_both = |p: DVec3| ssi::distance(surfs.0, p) < tol * 10.0 && ssi::distance(surfs.1, p) < tol * 10.0;
     let mut cuts: Vec<(f64, VertexId)> = verts
         .iter()
         .filter_map(|&v| {
             let p = w.vertex(v);
             let t = c.closest_param_in(p, c0, c1);
-            (c.point(t).distance(p) < tol * 10.0).then_some((t, v))
+            let d = c.point(t).distance(p);
+            (d < tol * 10.0 || (d < loose && !c.is_linear() && on_both(p))).then_some((t, v))
         })
         .collect();
     if let Some(p) = periodic {
@@ -1527,6 +1532,15 @@ mod tests {
         let a = make_cylinder(&Frame::new(DVec3::new(-1.0, 0.0, -0.40012521063672857), DVec3::Y, DVec3::Y.any_orthonormal_vector()), 0.75, 1.5);
         let b = make_cylinder(&Frame::new(DVec3::new(-0.5, 0.5, -0.4522784852919963), DVec3::Z, DVec3::Z.any_orthonormal_vector()), 1.25, 2.5);
         identities(&a, &b);
+    }
+
+    #[test]
+    fn box_cutting_a_cone_parallel_to_its_axis() {
+        // The box's bottom plane cuts the cone in a hyperbola, which is
+        // traced; its ends meet the box edges only to within the fit.
+        let c = make_frustum(&Frame::new(DVec3::new(-0.5, -0.3252664789699078, -0.15727473618939336), DVec3::X, DVec3::X.any_orthonormal_vector()), 1.0, 0.4, 2.0);
+        let b = make_box(&Frame::new(DVec3::new(1.0, 0.0, 1.0), DVec3::Y, DVec3::Y.any_orthonormal_vector()), DVec3::new(2.0, 1.5, 1.5));
+        identities(&c, &b);
     }
 
     #[test]
