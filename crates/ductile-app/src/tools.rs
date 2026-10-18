@@ -1334,8 +1334,20 @@ impl Tool for FilletTool {
 
 // ---------------------------------------------------------------- Shell ----
 
+/// What the shell tool does with its distance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OffsetMode {
+    /// Hollow the solid, opening the selected faces.
+    Shell,
+    /// Move every face.
+    Solid,
+    /// Move the selected faces; their neighbours stretch to follow.
+    Faces,
+}
+
 /// Shell (hollow) a solid with walls of a given thickness, opening the
-/// selected faces; or offset the whole solid by a signed distance.
+/// selected faces; or offset the whole solid, or just the selected faces,
+/// by a signed distance.
 pub struct ShellTool {
     target: ObjectId,
     body: std::sync::Arc<Body>,
@@ -1344,19 +1356,23 @@ pub struct ShellTool {
     dir: DVec3,
     start_t: Option<f64>,
     pub value: f64,
-    pub offset: bool,
+    pub mode: OffsetMode,
     typed: Option<f64>,
-    cache: std::cell::RefCell<Option<(f64, bool, Option<Body>, Option<String>)>>,
+    cache: std::cell::RefCell<Option<(f64, OffsetMode, Option<Body>, Option<String>)>>,
 }
 
 impl ShellTool {
     /// Starts on the selected faces' solid, or on the first selected solid.
-    pub fn new(doc: &Document, offset: bool) -> Option<Self> {
+    pub fn new(doc: &Document, mode: OffsetMode) -> Option<Self> {
+        let offset = mode != OffsetMode::Shell;
         let faces = doc.selected_faces();
         let (target, open) = match faces.first() {
             Some((o, _)) => (*o, faces.iter().filter(|(x, _)| x == o).map(|(_, f)| *f).collect::<Vec<_>>()),
             None => (*doc.selected_solids().first()?, vec![]),
         };
+        if mode == OffsetMode::Faces && open.is_empty() {
+            return None;
+        }
         let o = doc.object(target)?;
         let b = &o.body;
         if b.kind == ductile_brep::BodyKind::Wire {
@@ -1369,7 +1385,7 @@ impl ShellTool {
         let uv = b.face(f).surface.project(base, None);
         let n = b.face_normal(f, uv.x, uv.y);
         let dir = if offset { n } else { -n };
-        Some(Self { target, body: o.body.clone(), open: if offset { vec![] } else { open }, base, dir, start_t: None, value: 0.0, offset, typed: None, cache: std::cell::RefCell::new(None) })
+        Some(Self { target, body: o.body.clone(), open: if mode == OffsetMode::Solid { vec![] } else { open }, base, dir, start_t: None, value: 0.0, mode, typed: None, cache: std::cell::RefCell::new(None) })
     }
 
     fn amount(&self) -> f64 {
@@ -1380,36 +1396,40 @@ impl ShellTool {
         use ductile_brep::ops::offset::{offset_body, shell};
         let t = self.amount();
         if let Some((ct, co, b, e)) = &*self.cache.borrow() {
-            if *ct == t && *co == self.offset {
+            if *ct == t && *co == self.mode {
                 return (b.clone(), e.clone());
             }
         }
-        let out = if t.abs() <= 1e-9 || (!self.offset && t < 0.0) {
+        let out = if t.abs() <= 1e-9 || (self.mode == OffsetMode::Shell && t < 0.0) {
             (None, None)
         } else {
-            let r = if self.offset { offset_body(&self.body, &|_| t) } else { shell(&self.body, &self.open, t) };
+            let r = match self.mode {
+                OffsetMode::Shell => shell(&self.body, &self.open, t),
+                OffsetMode::Solid => offset_body(&self.body, &|_| t),
+                OffsetMode::Faces => offset_body(&self.body, &|f| if self.open.contains(&f) { t } else { 0.0 }),
+            };
             match r {
                 Ok(b) => (Some(b), None),
                 Err(e) => (None, Some(e.to_string())),
             }
         };
-        *self.cache.borrow_mut() = Some((t, self.offset, out.0.clone(), out.1.clone()));
+        *self.cache.borrow_mut() = Some((t, self.mode, out.0.clone(), out.1.clone()));
         out
     }
 }
 
 impl Tool for ShellTool {
     fn name(&self) -> &'static str {
-        if self.offset {
-            "Offset solid"
-        } else {
-            "Shell"
+        match self.mode {
+            OffsetMode::Shell => "Shell",
+            OffsetMode::Solid => "Offset solid",
+            OffsetMode::Faces => "Offset faces",
         }
     }
     fn hint(&self) -> String {
         match self.cache.borrow().as_ref().and_then(|c| c.3.clone()) {
             Some(e) => format!("{} failed: {e}", self.name()),
-            None => format!("{}: drag or type a {} ({:.4}), click or Enter to finish", self.name(), if self.offset { "distance" } else { "thickness" }, self.amount()),
+            None => format!("{}: drag or type a {} ({:.4}), click or Enter to finish", self.name(), if (self.mode != OffsetMode::Shell) { "distance" } else { "thickness" }, self.amount()),
         }
     }
     fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
@@ -1417,7 +1437,7 @@ impl Tool for ShellTool {
         let t0 = *self.start_t.get_or_insert(t);
         if self.typed.is_none() {
             let d = t - t0;
-            self.value = if self.offset { snap_len(d.abs(), p.world_per_px).copysign(d) } else { snap_len(d.max(0.0), p.world_per_px) };
+            self.value = if (self.mode != OffsetMode::Shell) { snap_len(d.abs(), p.world_per_px).copysign(d) } else { snap_len(d.max(0.0), p.world_per_px) };
         }
         if p.clicked {
             return ToolOutcome::Finished;
@@ -1434,9 +1454,9 @@ impl Tool for ShellTool {
     }
     fn panel(&mut self, ui: &mut egui::Ui) -> bool {
         let mut t = self.amount();
-        let ch = drag_value(ui, if self.offset { "Distance" } else { "Thickness" }, &mut t, 0.01);
+        let ch = drag_value(ui, if (self.mode != OffsetMode::Shell) { "Distance" } else { "Thickness" }, &mut t, 0.01);
         if ch {
-            self.typed = Some(if self.offset { t } else { t.max(0.0) });
+            self.typed = Some(if (self.mode != OffsetMode::Shell) { t } else { t.max(0.0) });
         }
         ch
     }
@@ -1448,7 +1468,7 @@ impl Tool for ShellTool {
         }
     }
     fn typed_value(&mut self, v: Option<f64>) {
-        self.typed = v.map(|x| if self.offset { x } else { x.abs() });
+        self.typed = v.map(|x| if (self.mode != OffsetMode::Shell) { x } else { x.abs() });
     }
     fn commit(&mut self, doc: &mut Document) -> bool {
         let Some(b) = self.result().0 else { return false };
@@ -1605,16 +1625,31 @@ mod tests {
         let b = doc.object(id).unwrap().body.clone();
         let top = b.face_ids().find(|f| b.face_edges(*f).iter().all(|e| b.edge(*e).start().z > 1.9 && b.edge(*e).end().z > 1.9)).unwrap();
         doc.selection.insert(Pick::Face(id, top));
-        let mut t = ShellTool::new(&doc, false).unwrap();
+        let mut t = ShellTool::new(&doc, OffsetMode::Shell).unwrap();
         t.typed_value(Some(0.25));
         assert!(t.commit(&mut doc));
         let v = ductile_brep::tessellate(&doc.object(id).unwrap().body, &ductile_brep::TessOptions::default()).volume();
         assert!((v - (24.0 - 3.5 * 2.5 * 1.75)).abs() < 1e-6, "{v}");
         // Offset the result outward.
         doc.selection.insert(Pick::Object(id));
-        let mut o = ShellTool::new(&doc, true).unwrap();
+        let mut o = ShellTool::new(&doc, OffsetMode::Solid).unwrap();
         o.typed_value(Some(0.1));
         assert!(o.commit(&mut doc));
+    }
+
+    #[test]
+    fn offset_a_cylinder_side() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Cyl", ductile_brep::primitives::make_cylinder(&ductile_geom::Frame::WORLD, 1.0, 2.0));
+        let b = doc.object(id).unwrap().body.clone();
+        let side = b.face_ids().find(|f| matches!(b.face(*f).surface, ductile_geom::Surface::Cylinder { .. })).unwrap();
+        doc.selection.insert(Pick::Face(id, side));
+        assert!(ExtrudeTool::new(&doc).is_none());
+        let mut t = ShellTool::new(&doc, OffsetMode::Faces).unwrap();
+        t.typed_value(Some(0.5));
+        assert!(t.commit(&mut doc));
+        let v = ductile_brep::tessellate(&doc.object(id).unwrap().body, &ductile_brep::TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume();
+        assert!((v - std::f64::consts::PI * 2.25 * 2.0).abs() < 2e-3, "{v}");
     }
 
     #[test]

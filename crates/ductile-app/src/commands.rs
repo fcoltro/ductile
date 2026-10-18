@@ -3,7 +3,7 @@
 
 use crate::app::DuctileApp;
 use crate::document::{Document, Pick, SelectMode};
-use crate::tools::{BoxTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, TransformKind, TransformTool};
+use crate::tools::{BoxTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
 use ductile_geom::{DMat4, DVec3, Frame};
@@ -51,6 +51,7 @@ pub enum Command {
     Chamfer,
     Shell,
     OffsetSolid,
+    OffsetFaces,
     Union,
     Subtract,
     Intersect,
@@ -117,6 +118,7 @@ impl Command {
         Command::Chamfer,
         Command::Shell,
         Command::OffsetSolid,
+        Command::OffsetFaces,
         Command::Union,
         Command::Subtract,
         Command::Intersect,
@@ -184,6 +186,7 @@ impl Command {
             Chamfer => "Chamfer edges",
             Shell => "Shell (hollow, open selected faces)",
             OffsetSolid => "Offset solid",
+            OffsetFaces => "Offset faces",
             Union => "Boolean union",
             Subtract => "Boolean subtract",
             Intersect => "Boolean intersect",
@@ -246,6 +249,7 @@ impl Command {
             Chamfer => "Shift+K",
             Shell => "Alt+S",
             OffsetSolid => "Alt+O",
+            OffsetFaces => "Alt+F",
             Union => "Shift+U",
             Loft => "Alt+L",
             Sweep => "Alt+W",
@@ -310,6 +314,7 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::K, false, true, false) => Chamfer,
         (Key::S, false, false, true) => Shell,
         (Key::O, false, false, true) => OffsetSolid,
+        (Key::F, false, false, true) => OffsetFaces,
         (Key::U, false, true, false) => Union,
         (Key::D, false, true, false) => Subtract,
         (Key::I, false, true, false) => Intersect,
@@ -472,7 +477,11 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Torus => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Torus))),
         Extrude => match ExtrudeTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
-            None => app.status = "Select a planar face (face mode: 3) or closed planar curves to extrude".into(),
+            // Curved faces push and pull by offsetting.
+            None => match ShellTool::new(&app.doc, OffsetMode::Faces) {
+                Some(t) => app.start_tool(std::boxed::Box::new(t)),
+                None => app.status = "Select a face (face mode: 3) or closed planar curves to extrude".into(),
+            },
         },
         Curve => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::Polyline))),
         Rectangle => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::Rectangle))),
@@ -489,10 +498,18 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Select edges to blend (edge mode: 2)".into(),
         },
-        Shell | OffsetSolid => match ShellTool::new(&app.doc, cmd == OffsetSolid) {
-            Some(t) => app.start_tool(std::boxed::Box::new(t)),
-            None => app.status = "Select a solid, or the faces to open (face mode: 3)".into(),
-        },
+        Shell | OffsetSolid | OffsetFaces => {
+            let mode = match cmd {
+                Shell => OffsetMode::Shell,
+                OffsetSolid => OffsetMode::Solid,
+                _ => OffsetMode::Faces,
+            };
+            match ShellTool::new(&app.doc, mode) {
+                Some(t) => app.start_tool(std::boxed::Box::new(t)),
+                None if mode == OffsetMode::Faces => app.status = "Select the faces to offset (face mode: 3)".into(),
+                None => app.status = "Select a solid, or the faces to open (face mode: 3)".into(),
+            }
+        }
         Union => boolean_selected(app, BoolOp::Union),
         Loft | Sweep => {
             let (name, res) = if cmd == Loft { ("Loft", crate::tools::loft_selected(&app.doc)) } else { ("Sweep", crate::tools::sweep_selected(&app.doc)) };
