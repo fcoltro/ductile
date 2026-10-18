@@ -48,6 +48,7 @@ thread_local! {
     /// Set while retrying a blend with edges between planes and cylinders
     /// rolled rather than given exact tools.
     static ROLL_EXTRUSIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CURVED_CAPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// `FilletError::Unsupported`, noting where with `DUCTILE_DEBUG_FILLET`.
@@ -151,6 +152,15 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     ROLL_EXTRUSIONS.set(false);
     if rolled.is_ok() {
         return rolled;
+    }
+    // Straight tools stop at the tangent plane of a curved end face, which
+    // pokes into a hole the edge runs into; stop at the face itself
+    // instead (second, as meeting the face exactly is harder on booleans).
+    CURVED_CAPS.set(true);
+    let capped = blend_selected(body, edges, blend);
+    CURVED_CAPS.set(false);
+    if capped.is_ok() {
+        return capped;
     }
     // An edge running on tangentially into others (into an earlier
     // fillet's arc, say) may have no sensible end on its own: blend the
@@ -523,7 +533,18 @@ fn cap_line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, mut tool: Body, size: f64
             // Only cap when the end face actually faces away along the edge.
             let along = if p.distance(p1) < p.distance(p0) { t } else { -t };
             if n.dot(along) > 1e-6 {
-                tool = boolean(&tool, &half_space(p, n, size), BoolOp::Intersection)?;
+                tool = match &b.face(others[0]).surface {
+                    // A curved end face (a hole the edge runs into) bends
+                    // away from its tangent plane: stop at the face itself.
+                    Surface::Cylinder { frame, radius } if CURVED_CAPS.get() => {
+                        let axis = frame.z;
+                        let radial = p - frame.origin - axis * (p - frame.origin).dot(axis);
+                        let solid = crate::primitives::make_cylinder(&Frame::new(frame.origin - axis * size, axis, frame.x), *radius, 2.0 * size);
+                        let inside = n.dot(radial) > 0.0;
+                        boolean(&tool, &solid, if inside { BoolOp::Intersection } else { BoolOp::Difference })?
+                    }
+                    _ => boolean(&tool, &half_space(p, n, size), BoolOp::Intersection)?,
+                };
             }
         }
     }
@@ -889,6 +910,32 @@ mod tests {
             assert_eq!(open_edges(&r), 0, "{blend:?}");
             let removed = vol(&h) - vol(&r);
             assert!(removed > 0.0 && removed < 2.0 * 0.01 * 4.0, "{blend:?} removed {removed}");
+        }
+    }
+
+    #[test]
+    fn stops_a_pocket_edge_blend_at_the_hole_it_runs_into() {
+        // A side hole breaks through the pocket's floor; the floor's inner
+        // edges end on the hole's curved wall.
+        use crate::ops::boolean::{boolean, BoolOp};
+        let b = make_box(&Frame::WORLD, DVec3::new(3.0, 2.0, 2.0));
+        let pocket = make_box(&Frame { origin: DVec3::new(1.0, 0.3, 1.0), ..Frame::WORLD }, DVec3::new(1.0, 1.4, 2.0));
+        let hole = make_cylinder(&Frame::new(DVec3::new(-1.0, 1.2, 0.8), DVec3::X, DVec3::Y), 0.3, 5.0);
+        let h = boolean(&boolean(&b, &pocket, BoolOp::Difference).unwrap(), &hole, BoolOp::Difference).unwrap();
+        let inner: Vec<EdgeId> = h
+            .edge_ids()
+            .filter(|e| {
+                let ed = h.edge(*e);
+                let (p, q) = (ed.start(), ed.end());
+                (p.z - 1.0).abs() < 1e-9 && (q.z - 1.0).abs() < 1e-9 && (p.x - q.x).abs() < 1e-9 && p.y.min(q.y) < 0.31
+            })
+            .collect();
+        assert_eq!(inner.len(), 2);
+        for blend in [Blend::Fillet(0.1), Blend::Chamfer(0.1)] {
+            let r = blend_edges(&h, &inner, blend).unwrap();
+            assert_eq!(open_edges(&r), 0, "{blend:?}");
+            let added = vol(&r) - vol(&h);
+            assert!(added > 0.0 && added < 2.0 * 0.01 * 0.7, "{blend:?} added {added}");
         }
     }
 
