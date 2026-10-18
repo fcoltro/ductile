@@ -49,6 +49,7 @@ pub enum Command {
     Patch,
     Thicken,
     Cut,
+    Imprint,
     Sweep,
     Fillet,
     Chamfer,
@@ -125,6 +126,7 @@ impl Command {
         Command::Patch,
         Command::Thicken,
         Command::Cut,
+        Command::Imprint,
         Command::Sweep,
         Command::Fillet,
         Command::Chamfer,
@@ -202,6 +204,7 @@ impl Command {
             Patch => "Patch surface",
             Thicken => "Thicken surface",
             Cut => "Cut solid with curves",
+            Imprint => "Imprint curves onto faces",
             Sweep => "Sweep",
             Fillet => "Fillet edges",
             Chamfer => "Chamfer edges",
@@ -286,6 +289,7 @@ impl Command {
             Patch => "Alt+P",
             Thicken => "Alt+K",
             Cut => "Alt+D",
+            Imprint => "Alt+I",
             Sweep => "Alt+W",
             Subtract => "Shift+D",
             Intersect => "Shift+I",
@@ -348,6 +352,7 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::P, false, false, true) => Patch,
         (Key::K, false, false, true) => Thicken,
         (Key::D, false, false, true) => Cut,
+        (Key::I, false, false, true) => Imprint,
         (Key::W, false, false, true) => Sweep,
         (Key::F, false, true, false) => Fillet,
         (Key::K, false, true, false) => Chamfer,
@@ -555,6 +560,16 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                     }
                 }
                 app.status = "Cut done".into();
+            }
+            Err(e) => app.status = e,
+        },
+        Imprint => match crate::tools::imprint_selected(&app.doc) {
+            Ok((ids, bodies)) => {
+                app.doc.checkpoint("Imprint");
+                for (id, b) in ids.into_iter().zip(bodies) {
+                    app.doc.replace_body(id, b);
+                }
+                app.status = "Imprinted; the split faces can now be picked on their own".into();
             }
             Err(e) => app.status = e,
         },

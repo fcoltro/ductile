@@ -18,7 +18,9 @@ code from them.
 - Exact booleans: union, subtract, intersect (Shift+U / Shift+D / Shift+I),
   including coplanar, tangent and pole cases. Cut (Alt+D) splits solids
   along curves swept straight through them: a closed curve cuts out a
-  plug, an open one splits the solid in two.
+  plug, an open one splits the solid in two. Imprint (Alt+I) sweeps curves
+  the same way but only splits the faces they cross, so the pieces of a
+  face can be picked, offset or extruded on their own.
 - Delete faces (Delete in face mode) heals the solid where it can: holes
   and bosses close up, and fillets or chamfers between planes grow back to
   a sharp edge. Otherwise the solid becomes an open sheet. Duplicate

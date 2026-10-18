@@ -3,6 +3,7 @@
 //! connected pieces.
 
 use super::boolean::{boolean, BoolError, BoolOp};
+use super::sheet::Sewer;
 use crate::curves::{extend_segment, Extension};
 use crate::ops::extrude::extrude_region;
 use crate::profile::{loops_plane, Loop3, Region, Segment};
@@ -108,6 +109,62 @@ pub fn cut_with_curves(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Vec
     Ok(pieces)
 }
 
+/// Imprints each curve chain onto the faces of `solid`, swept straight
+/// through it along `dir` like [`cut_with_curves`], but leaves the solid
+/// in one piece: the faces it crosses are split along the curve.
+pub fn imprint_curves(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Body, BoolError> {
+    let Some(d) = dir.try_normalize() else { return Ok(solid.clone()) };
+    let bb = solid.bbox();
+    let mut body = solid.clone();
+    for c in chains {
+        if c.segments.is_empty() {
+            continue;
+        }
+        let reach = 2.0 * (bb.diagonal() + c.segments[0].start().distance(bb.center()));
+        let Some(prism) = cutter(c, d, reach) else { continue };
+        let tool: Vec<_> = prism.faces.iter().map(|f| f.surface.clone()).collect();
+        let tol = 1e-6 * bb.diagonal().max(1.0);
+        let mut sewer = Sewer::new(body.kind, tol);
+        let mut pieces = 0;
+        for op in [BoolOp::Intersection, BoolOp::Difference] {
+            let part = match boolean(&body, &prism, op) {
+                Ok(r) => r,
+                Err(BoolError::Empty) => continue,
+                Err(e) => return Err(e),
+            };
+            pieces += 1;
+            for f in part.face_ids() {
+                let face = part.face(f);
+                if tool.contains(&face.surface) {
+                    continue;
+                }
+                let loops: Vec<Vec<Segment>> = part
+                    .face_loops(f)
+                    .map(|l| {
+                        l.coedges
+                            .iter()
+                            .map(|c| {
+                                let e = part.edge(c.edge);
+                                Segment { curve: e.curve.clone(), t0: e.t0, t1: e.t1, reversed: c.reversed }
+                            })
+                            .collect()
+                    })
+                    .collect();
+                if let Some((outer, holes)) = loops.split_first() {
+                    sewer.face(face.surface.clone(), face.reversed, outer, holes);
+                } else {
+                    sewer.body.add_face(face.surface.clone(), face.reversed, Vec::new());
+                }
+            }
+        }
+        // A curve that missed the solid leaves it as it was.
+        if pieces == 2 {
+            body = sewer.body;
+        }
+    }
+    Ok(body)
+}
+
 /// The solid swept by the region a chain bounds (closed), or cuts off on
 /// one side (open), from `reach` behind its plane to `reach` in front.
 fn cutter(c: &Loop3, d: DVec3, reach: f64) -> Option<Body> {
@@ -166,6 +223,31 @@ mod tests {
         parts.sort_by(|x, y| vol(x).total_cmp(&vol(y)));
         assert_eq!(parts.len(), 2);
         assert!((vol(&parts[0]) - 2.0 * PI).abs() < 1e-3 && (vol(&parts[1]) - (24.0 - 2.0 * PI)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn imprints_a_line_and_a_circle() {
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let line = Loop3 { segments: vec![Segment::line(DVec3::new(1.0, 0.5, 5.0), DVec3::new(1.0, 2.5, 5.0))] };
+        let split = imprint_curves(&b, &[line], DVec3::Z).unwrap();
+        // Top, bottom and both long sides split in two.
+        assert_eq!(split.faces.len(), 10);
+        assert_eq!(crate::ops::boolean::open_edges(&split), 0);
+        assert!((vol(&split) - 24.0).abs() < 1e-9);
+        let circle = Loop3 { segments: vec![Segment::new(Curve3::Circle { frame: Frame::new(DVec3::new(2.0, 1.5, 2.0), DVec3::Z, DVec3::X), radius: 1.0 }, 0.0, 2.0 * PI)] };
+        let disc = imprint_curves(&b, &[circle], DVec3::Z).unwrap();
+        // Top and bottom each gain a disc inside a ring.
+        assert_eq!(disc.faces.len(), 8);
+        assert_eq!(crate::ops::boolean::open_edges(&disc), 0);
+        assert!((vol(&disc) - 24.0).abs() < 1e-6);
+        // A wavy spline across the top.
+        let n = ductile_geom::NurbsCurve::interpolate(&[DVec3::new(1.0, -0.5, 2.0), DVec3::new(1.8, 1.0, 2.0), DVec3::new(1.2, 2.0, 2.0), DVec3::new(2.0, 3.5, 2.0)], 3);
+        let (t0, t1) = n.domain();
+        let wave = Loop3 { segments: vec![Segment::new(Curve3::Nurbs(n), t0, t1)] };
+        let waved = imprint_curves(&b, &[wave], DVec3::Z).unwrap();
+        assert_eq!(waved.faces.len(), 10);
+        assert_eq!(crate::ops::boolean::open_edges(&waved), 0);
+        assert!((vol(&waved) - 24.0).abs() < 1e-6);
     }
 
     #[test]
