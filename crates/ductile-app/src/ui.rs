@@ -40,7 +40,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 }
             });
             ui.menu_button("Curve", |ui| {
-                for c in [Command::Curve, Command::Spline, Command::Arc, Command::Rectangle, Command::Circle, Command::Ellipse, Command::Polygon, Command::OffsetCurve, Command::Trim, Command::BridgeCurve, Command::ExtendCurve, Command::IntersectionCurve] {
+                for c in [Command::Curve, Command::Spline, Command::Arc, Command::Rectangle, Command::Circle, Command::Ellipse, Command::Polygon, Command::OffsetCurve, Command::Trim, Command::BridgeCurve, Command::ExtendCurve, Command::IntersectionCurve, Command::ProjectCurve] {
                     menu_item(app, ui, c);
                 }
             });

@@ -847,6 +847,26 @@ pub fn imprint_selected(doc: &Document) -> Result<(Vec<ObjectId>, Vec<Body>), St
     Ok((solids, out))
 }
 
+/// Projects the selected curves onto the selected solids, square to the
+/// curves' plane (or along the construction plane's normal); one wire body
+/// per solid the curves land on.
+pub fn project_selected(doc: &Document) -> Result<Vec<Body>, String> {
+    let (solids, cutter) = cut_inputs(doc, "Project")?;
+    let Cutter::Curves(chains, dir) = cutter else { return Err("Project: select curves to project, not surfaces".into()) };
+    let mut out = Vec::new();
+    for id in &solids {
+        let b = &doc.object(*id).ok_or("Project: missing object")?.body;
+        let w = ductile_brep::ops::cut::project_curves(b, &chains, dir).map_err(|e| format!("Project failed: {e}"))?;
+        if !w.edges.is_empty() {
+            out.push(w);
+        }
+    }
+    if out.is_empty() {
+        return Err("Project: the curves miss the selected solids".into());
+    }
+    Ok(out)
+}
+
 /// What the selected solids are cut or imprinted with.
 enum Cutter {
     /// Curve chains swept through the solids along a direction.

@@ -169,6 +169,78 @@ pub fn imprint_curves(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Body
     Ok(body)
 }
 
+/// Projects each curve chain onto the faces of `solid` along `dir` (both
+/// ways), as a wire body of the curves it traces on them.
+pub fn project_curves(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Body, BoolError> {
+    let Some(d) = dir.try_normalize() else { return Ok(Body::new(BodyKind::Wire)) };
+    let bb = solid.bbox();
+    let mut segs = Vec::new();
+    for c in chains {
+        if c.segments.is_empty() {
+            continue;
+        }
+        let reach = 2.0 * (bb.diagonal() + c.segments[0].start().distance(bb.center()));
+        let Some(prism) = cutter(c, d, reach) else { continue };
+        let w = intersection_curves(solid, &prism)?;
+        // An open chain was extended past its ends to build the prism:
+        // keep only the curves traced by the chain itself.
+        let flat = |p: DVec3| p - d * p.dot(d);
+        let tol = 1e-7 * bb.diagonal().max(1.0);
+        let mut poly: Vec<DVec3> = c.polygon(tol);
+        if let Some(last) = c.segments.last() {
+            poly.push(last.end());
+        }
+        let poly: Vec<DVec3> = poly.into_iter().map(flat).collect();
+        let near = |p: DVec3| poly.windows(2).any(|s| {
+            let (a, b) = (s[0], s[1]);
+            let t = ((p - a).dot(b - a) / (b - a).length_squared().max(1e-30)).clamp(0.0, 1.0);
+            p.distance(a + (b - a) * t) < tol * 10.0
+        });
+        for e in &w.edges {
+            if c.is_closed() {
+                segs.push(Segment { curve: e.curve.clone(), t0: e.t0, t1: e.t1, reversed: false });
+                continue;
+            }
+            // The stretches of the edge that lie over the chain, their ends
+            // found by bisection.
+            let inside = |t: f64| near(flat(e.curve.point(t)));
+            let n = 64;
+            let ts: Vec<f64> = (0..=n).map(|k| e.t0 + (e.t1 - e.t0) * k as f64 / n as f64).collect();
+            let edge_of = |mut a: f64, mut b: f64| {
+                // inside(a) != inside(b); returns the switch point.
+                let ia = inside(a);
+                for _ in 0..40 {
+                    let m = 0.5 * (a + b);
+                    if inside(m) == ia {
+                        a = m;
+                    } else {
+                        b = m;
+                    }
+                }
+                0.5 * (a + b)
+            };
+            let mut start: Option<f64> = if inside(ts[0]) { Some(ts[0]) } else { None };
+            for k in 1..=n {
+                let (was, is) = (inside(ts[k - 1]), inside(ts[k]));
+                if was != is {
+                    let t = edge_of(ts[k - 1], ts[k]);
+                    if is {
+                        start = Some(t);
+                    } else if let Some(s0) = start.take() {
+                        segs.push(Segment { curve: e.curve.clone(), t0: s0, t1: t, reversed: false });
+                    }
+                }
+            }
+            if let Some(s0) = start {
+                if e.t1 - s0 > 1e-12 {
+                    segs.push(Segment { curve: e.curve.clone(), t0: s0, t1: e.t1, reversed: false });
+                }
+            }
+        }
+    }
+    Ok(crate::profile::wire_from_segments(&segs))
+}
+
 /// The curves where the surfaces of solids `a` and `b` cross, as a wire
 /// body: the edges of their common volume that run between a face of `a`
 /// and a face of `b`. Empty when the solids do not overlap.
@@ -372,6 +444,25 @@ mod tests {
         let split = imprint_sheet(&b, &wavy).unwrap();
         assert_eq!(split.faces.len(), 10);
         assert_eq!(crate::ops::boolean::open_edges(&split), 0);
+    }
+
+    #[test]
+    fn projects_curves_onto_a_sphere() {
+        let ball = crate::primitives::make_sphere(DVec3::ZERO, 2.0);
+        let line = Loop3 { segments: vec![Segment::line(DVec3::new(-1.0, 0.5, 5.0), DVec3::new(1.0, 0.5, 5.0))] };
+        let w = project_curves(&ball, &[line], DVec3::Z).unwrap();
+        // Two arcs, one on top and one underneath, each over x in [-1, 1].
+        assert_eq!(w.edges.len(), 2, "{:?}", w.edges.iter().map(|e| (e.start(), e.end())).collect::<Vec<_>>());
+        for e in &w.edges {
+            for k in 0..=8 {
+                let p = e.curve.point(e.t0 + (e.t1 - e.t0) * k as f64 / 8.0);
+                assert!((p.length() - 2.0).abs() < 1e-6 && (p.y - 0.5).abs() < 1e-9 && p.x.abs() <= 1.0 + 1e-5, "{p}");
+            }
+        }
+        let circle = Loop3 { segments: vec![Segment::new(Curve3::Circle { frame: Frame::new(DVec3::new(0.0, 0.0, 5.0), DVec3::Z, DVec3::X), radius: 1.0 }, 0.0, 2.0 * PI)] };
+        let w = project_curves(&ball, &[circle], DVec3::Z).unwrap();
+        let len: f64 = w.edges.iter().map(|e| e.length()).sum();
+        assert!((len - 4.0 * PI).abs() < 1e-6, "{len}");
     }
 
     #[test]

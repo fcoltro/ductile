@@ -24,7 +24,8 @@ code from them.
   surface (sheet) that reaches across the solid in place of curves. Draft (Alt+G) tilts
   selected planar faces about the line where they meet a neutral plane
   through their base, by a dragged or typed angle. Intersection curves
-  (Alt+N) adds the curves where selected solids cross.
+  (Alt+N) adds the curves where selected solids cross; Project (Alt+J)
+  traces curves onto solids along the construction plane's normal.
 - Delete faces (Delete in face mode) heals the solid where it can: holes
   and bosses close up, and fillets or chamfers between planes grow back to
   a sharp edge. Otherwise the solid becomes an open sheet. Duplicate

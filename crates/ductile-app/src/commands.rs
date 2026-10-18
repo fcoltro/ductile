@@ -62,6 +62,7 @@ pub enum Command {
     BridgeCurve,
     ExtendCurve,
     IntersectionCurve,
+    ProjectCurve,
     Union,
     Subtract,
     Intersect,
@@ -142,6 +143,7 @@ impl Command {
         Command::BridgeCurve,
         Command::ExtendCurve,
         Command::IntersectionCurve,
+        Command::ProjectCurve,
         Command::Union,
         Command::Subtract,
         Command::Intersect,
@@ -223,6 +225,7 @@ impl Command {
             BridgeCurve => "Bridge curves",
             ExtendCurve => "Extend curve",
             IntersectionCurve => "Intersection curves",
+            ProjectCurve => "Project curves onto solids",
             Union => "Boolean union",
             Subtract => "Boolean subtract",
             Intersect => "Boolean intersect",
@@ -294,6 +297,7 @@ impl Command {
             BridgeCurve => "Alt+B",
             ExtendCurve => "Alt+X",
             IntersectionCurve => "Alt+N",
+            ProjectCurve => "Alt+J",
             Union => "Shift+U",
             Loft => "Alt+L",
             Patch => "Alt+P",
@@ -378,6 +382,7 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::B, false, false, true) => BridgeCurve,
         (Key::X, false, false, true) => ExtendCurve,
         (Key::N, false, false, true) => IntersectionCurve,
+        (Key::J, false, false, true) => ProjectCurve,
         (Key::U, false, true, false) => Union,
         (Key::D, false, true, false) => Subtract,
         (Key::I, false, true, false) => Intersect,
@@ -581,6 +586,19 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Draft => match crate::tools::DraftTool::new(&app.doc, crate::tools::current_cplane().frame.z) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Draft: select planar faces of a solid (face mode, 3)".into(),
+        },
+        ProjectCurve => match crate::tools::project_selected(&app.doc) {
+            Ok(wires) => {
+                app.doc.checkpoint("Project curves");
+                app.doc.selection.clear();
+                for w in wires {
+                    let id = app.doc.add_body("Projected curve", w);
+                    app.doc.selection.insert(Pick::Object(id));
+                }
+                app.set_mode(SelectMode::Object);
+                app.status = "Projected curves added".into();
+            }
+            Err(e) => app.status = e,
         },
         IntersectionCurve => match crate::tools::intersection_curves_selected(&app.doc) {
             Ok(wires) => {
