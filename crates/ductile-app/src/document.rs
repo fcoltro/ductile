@@ -115,7 +115,25 @@ impl Default for Document {
 
 pub fn mesh_body(body: &Body) -> BodyMesh {
     let diag = body.bbox().diagonal().max(1e-3);
-    tessellate(body, &TessOptions::for_size(diag.min(1e4)))
+    let mut m = tessellate(body, &TessOptions::for_size(diag.min(1e4)));
+    // Seams (an edge with the same face on both sides, where a closed
+    // surface meets itself) are not shown or picked, as in Plasticity.
+    let mut sides: Vec<Vec<u32>> = vec![vec![]; body.edges.len()];
+    for (fi, f) in body.faces.iter().enumerate() {
+        for l in &f.loops {
+            for c in &body.loops[l.idx()].coedges {
+                sides[c.edge.idx()].push(fi as u32);
+            }
+        }
+    }
+    for (e, s) in sides.iter().enumerate() {
+        if s.len() == 2 && s[0] == s[1] {
+            if let Some(p) = m.edges.get_mut(e) {
+                p.clear();
+            }
+        }
+    }
+    m
 }
 
 impl Document {

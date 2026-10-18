@@ -140,6 +140,12 @@ fn vertex_faces(b: &Body, v: VertexId) -> BTreeSet<FaceId> {
 /// together, the edges are blended one after another instead, each found
 /// again on the body the earlier ones left.
 pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, FilletError> {
+    // Seams and edges between tangent faces have nothing to blend; picked
+    // along with others (a whole face's outline, say) they are left out.
+    let blendable: Vec<EdgeId> = edges.iter().copied().filter(|e| !matches!(edge_info(body, *e), Err(FilletError::NotManifold | FilletError::Smooth))).collect();
+    if !blendable.is_empty() && blendable.len() < edges.len() {
+        return blend_edges(body, &blendable, blend);
+    }
     let first = blend_selected(body, edges, blend);
     if first.is_ok() || edges.is_empty() {
         return first;
