@@ -82,7 +82,9 @@ code from them.
   scale; neighbouring faces stay joined. Thicken (Alt+K) turns surfaces into
   solids of a given thickness on either side. Bridge surface spans two
   selected edges with a sheet meeting the faces beyond them with G0, G1 or
-  G2 continuity, chosen per side, with a tension per side. Back faces show
+  G2 continuity, chosen per side, with a tension per side. Extend with
+  open surface edges selected grows the surface past them, naturally (its
+  own shape continued) or straight along the tangent. Back faces show
   tinted.
 - Fillets (B) and chamfers (Shift+K) on edges between planes, on
   circular plane/cylinder edges (boss and hole rims), with spherical corner

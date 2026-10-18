@@ -2729,10 +2729,139 @@ impl Tool for ExtendTool {
     }
 }
 
-// -------------------------------------------------------------- Thicken ----
+// ------------------------------------------------------- Sheet edges ----
 
-/// Thicken: turn the selected surfaces into solids by giving them a
-/// thickness, along their normals or (negative) against them.
+/// Extend sheet: grows surfaces past their selected open edges.
+pub struct ExtendSheetTool {
+    targets: Vec<(ObjectId, std::sync::Arc<Body>, ductile_brep::EdgeId)>,
+    base: DVec3,
+    dir: DVec3,
+    pub natural: bool,
+    pub value: f64,
+    start_t: Option<f64>,
+    typed: Option<f64>,
+    cache: std::cell::RefCell<Option<(f64, bool, Vec<Option<Body>>, Option<String>)>>,
+}
+
+impl ExtendSheetTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let mut targets: Vec<(ObjectId, std::sync::Arc<Body>, ductile_brep::EdgeId)> = Vec::new();
+        for (o, e) in doc.selected_edges() {
+            let ob = doc.object(o)?;
+            if ob.body.kind != ductile_brep::BodyKind::Sheet || ob.body.edge_faces(e).len() != 1 || targets.iter().any(|t| t.0 == o) {
+                continue;
+            }
+            targets.push((o, ob.body.clone(), e));
+        }
+        let (_, b, e) = targets.first()?;
+        // Drag across the first edge, away from its face.
+        let ed = b.edge(*e);
+        let (f, c) = b.edge_faces(*e)[0];
+        let tm = 0.5 * (ed.t0 + ed.t1);
+        let base = ed.curve.point(tm);
+        let uv = b.face(f).surface.project(base, None);
+        let n = b.face_normal(f, uv.x, uv.y);
+        let along = ed.curve.tangent(tm) * if c.reversed { -1.0 } else { 1.0 };
+        let dir = along.cross(n).try_normalize()?;
+        Some(Self { targets, base, dir, natural: true, value: 0.0, start_t: None, typed: None, cache: Default::default() })
+    }
+
+    fn amount(&self) -> f64 {
+        self.typed.unwrap_or(self.value).max(0.0)
+    }
+
+    fn results(&self) -> (Vec<Option<Body>>, Option<String>) {
+        use ductile_brep::curves::Extension;
+        let (len, nat) = (self.amount(), self.natural);
+        if let Some((cl, cn, r, e)) = &*self.cache.borrow() {
+            if *cl == len && *cn == nat {
+                return (r.clone(), e.clone());
+            }
+        }
+        let how = if nat { Extension::Natural } else { Extension::Linear };
+        let mut err = None;
+        let res = self
+            .targets
+            .iter()
+            .map(|(_, b, e)| {
+                if len < 1e-9 {
+                    return None;
+                }
+                ductile_brep::ops::extend::extend_sheet(b, *e, len, how).map_err(|x| err = Some(x)).ok()
+            })
+            .collect::<Vec<_>>();
+        *self.cache.borrow_mut() = Some((len, nat, res.clone(), err.clone()));
+        (res, err)
+    }
+}
+
+impl Tool for ExtendSheetTool {
+    fn name(&self) -> &'static str {
+        "Extend surface"
+    }
+    fn hint(&self) -> String {
+        match self.cache.borrow().as_ref().and_then(|c| c.3.clone()) {
+            Some(e) => format!("Extend surface: {e}"),
+            None => format!("Extend surface: drag or type a length ({:.4}), click or Enter to finish", self.amount()),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if self.typed.is_none() {
+            let t = height_from_ray(self.base, self.dir, &p.ray);
+            let t0 = *self.start_t.get_or_insert(t);
+            self.value = snap_len((t - t0).max(0.0), p.world_per_px);
+        }
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let mut out: Option<Body> = None;
+        for b in self.results().0.into_iter().flatten() {
+            match &mut out {
+                None => out = Some(b),
+                Some(o) => o.append(&b),
+            }
+        }
+        out
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        let tip = self.base + self.dir * self.amount();
+        out.push(LineInstance::new(self.base, tip, [1.0, 0.85, 0.3, 1.0], 2.0));
+        out.push(LineInstance::point(tip, [1.0, 0.85, 0.3, 1.0], 7.0));
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut v = self.amount();
+        let mut ch = drag_value(ui, "Length", &mut v, 0.01);
+        if ch {
+            self.typed = Some(v);
+        }
+        ch |= ui.horizontal(|ui| ui.radio_value(&mut self.natural, true, "Natural").changed() | ui.radio_value(&mut self.natural, false, "Linear").changed()).inner;
+        ch
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        if self.amount() < 1e-9 {
+            return vec![];
+        }
+        self.targets.iter().zip(self.results().0).filter(|(_, r)| r.is_some()).map(|(t, _)| t.0).collect()
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v;
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let mut any = false;
+        let res = self.results().0;
+        for ((id, _, _), r) in self.targets.iter().zip(res) {
+            if let Some(b) = r {
+                doc.replace_body(*id, b);
+                any = true;
+            }
+        }
+        any
+    }
+}
+
 /// A sheet spanning two selected edges, meeting the faces beyond them
 /// with the continuity chosen per side.
 pub struct BridgeSurfaceTool {
@@ -2816,6 +2945,10 @@ impl Tool for BridgeSurfaceTool {
     }
 }
 
+// -------------------------------------------------------------- Thicken ----
+
+/// Thicken: turn the selected surfaces into solids by giving them a
+/// thickness, along their normals or (negative) against them.
 pub struct ThickenTool {
     targets: Vec<(ObjectId, std::sync::Arc<Body>)>,
     base: DVec3,

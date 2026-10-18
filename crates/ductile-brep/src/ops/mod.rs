@@ -18,3 +18,4 @@ pub mod cut;
 pub mod delete;
 pub mod draft;
 pub mod bridge;
+pub mod extend;

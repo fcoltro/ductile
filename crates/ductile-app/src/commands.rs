@@ -272,7 +272,7 @@ impl Command {
             JoinCurves => "Join curves",
             Trim => "Trim curves",
             BridgeCurve => "Bridge curves",
-            ExtendCurve => "Extend curve",
+            ExtendCurve => "Extend curve or surface",
             IntersectionCurve => "Intersection curves",
             ProjectCurve => "Project curves onto solids",
             Union => "Boolean union",
@@ -622,9 +622,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Select two curves (or two curve ends in vertex mode) to bridge".into(),
         },
+        ExtendCurve if crate::tools::ExtendSheetTool::new(&app.doc).is_some() => app.start_tool(std::boxed::Box::new(crate::tools::ExtendSheetTool::new(&app.doc).unwrap())),
         ExtendCurve => match ExtendTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
-            None => app.status = "Select open curves (or their ends in vertex mode) to extend".into(),
+            None => app.status = "Select open curves (or their ends in vertex mode), or open edges of surfaces, to extend".into(),
         },
         OffsetCurve => match CurveEditTool::new(&app.doc, true) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
