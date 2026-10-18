@@ -252,6 +252,8 @@ pub enum RoundKind {
     Cone,
     Sphere,
     Torus,
+    /// A helix curve round the axis, `turns` turns up the height.
+    Helix,
 }
 
 pub struct RoundTool {
@@ -260,12 +262,13 @@ pub struct RoundTool {
     radius: f64,
     radius2: f64,
     height: f64,
+    turns: f64,
     stage: u8,
 }
 
 impl RoundTool {
     pub fn new(kind: RoundKind) -> Self {
-        Self { kind, center: None, radius: 0.0, radius2: 0.0, height: 0.0, stage: 0 }
+        Self { kind, center: None, radius: 0.0, radius2: 0.0, height: 0.0, turns: 5.0, stage: 0 }
     }
     fn stages(&self) -> u8 {
         match self.kind {
@@ -282,6 +285,7 @@ impl Tool for RoundTool {
             RoundKind::Cone => "Cone",
             RoundKind::Sphere => "Sphere",
             RoundKind::Torus => "Torus",
+            RoundKind::Helix => "Helix",
         }
     }
     fn hint(&self) -> String {
@@ -351,6 +355,11 @@ impl Tool for RoundTool {
             RoundKind::Cone => make_frustum(&f, self.radius, self.radius2.max(0.0), h),
             RoundKind::Sphere => make_sphere_in(&f, self.radius),
             RoundKind::Torus => make_torus(&f, self.radius, self.radius2.max(self.radius * 0.05)),
+            RoundKind::Helix => {
+                let c = ductile_brep::curves::helix(&f, self.radius, h, self.turns);
+                let (t0, t1) = c.domain();
+                ductile_brep::profile::wire_from_segments(&[ductile_brep::profile::Segment::new(ductile_geom::Curve3::Nurbs(c), t0, t1)])
+            }
         })
     }
     fn guides(&self, out: &mut Vec<LineInstance>) {
@@ -367,6 +376,10 @@ impl Tool for RoundTool {
                 ch |= drag_value(ui, "Height", &mut self.height, 0.1);
             }
             RoundKind::Torus => ch |= drag_value(ui, "Tube radius", &mut self.radius2, 0.05),
+            RoundKind::Helix => {
+                ch |= drag_value(ui, "Height", &mut self.height, 0.1);
+                ch |= drag_value(ui, "Turns", &mut self.turns, 0.1);
+            }
             RoundKind::Sphere => {}
         }
         if ch && self.center.is_some() && self.stage < self.stages() - 1 {

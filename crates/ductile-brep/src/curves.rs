@@ -26,6 +26,32 @@ fn trimmed(seg: &Segment, a: f64, b: f64) -> Segment {
     Segment { t0, t1, ..seg.clone() }
 }
 
+/// A helix about `frame`'s z axis starting on its x axis: `turns` turns
+/// (negative for left-handed) of `radius`, rising `height`. Cubic pieces
+/// of 15 degrees each, tangent to the helix at every joint and off it by
+/// under 1e-7 of the radius.
+pub fn helix(frame: &Frame, radius: f64, height: f64, turns: f64) -> NurbsCurve {
+    let n = ((turns.abs() * 24.0).ceil() as usize).max(1);
+    let w = turns * std::f64::consts::TAU;
+    let at = |s: f64| frame.to_world(DVec3::new(radius * (s * w).cos(), radius * (s * w).sin(), height * s));
+    let h = 1.0 / n as f64;
+    // Handle length of the best cubic arc, 4/3 tan(a/4) of the radius for
+    // an arc of angle a, in place of the plain tangent's a/3.
+    let da = h * w;
+    let fit = if da.abs() > 1e-12 { 4.0 * (da / 4.0).tan() / da } else { 1.0 };
+    let tan = |s: f64| frame.dir_to_world(DVec3::new(-radius * w * fit * (s * w).sin(), radius * w * fit * (s * w).cos(), height));
+    let mut ctrl = vec![at(0.0)];
+    let mut knots = vec![0.0; 4];
+    for k in 0..n {
+        let (s0, s1) = (k as f64 * h, (k + 1) as f64 * h);
+        ctrl.push(at(s0) + tan(s0) * (h / 3.0));
+        ctrl.push(at(s1) - tan(s1) * (h / 3.0));
+        ctrl.push(at(s1));
+        knots.extend(std::iter::repeat(s1).take(if k + 1 == n { 4 } else { 3 }));
+    }
+    NurbsCurve::new(3, knots, ctrl.into_iter().map(|p| p.extend(1.0)).collect())
+}
+
 /// Rounds the corners of a chain of segments with arcs of radius `r`.
 /// `closed` chains also round the corner between the last and first
 /// segment. Only corners at points in `at` are rounded when it is given.
@@ -643,6 +669,18 @@ mod tests {
         // Tension pulls the bridge further along the end directions.
         let loose = bridge_curve(&a, &b, 1, [2.0, 2.0]);
         assert!(loose.length() > bridge_curve(&a, &b, 1, [1.0, 1.0]).length());
+    }
+
+    #[test]
+    fn helix_stays_on_its_cylinder() {
+        let f = Frame::new(DVec3::new(1.0, 2.0, 3.0), DVec3::Z, DVec3::X);
+        let h = helix(&f, 2.0, 5.0, 3.5);
+        let (t0, t1) = h.domain();
+        for k in 0..=500 {
+            let p = h.point(t0 + (t1 - t0) * k as f64 / 500.0) - f.origin;
+            assert!((p.truncate().length() - 2.0).abs() < 2e-7, "{p}");
+        }
+        assert!((h.point(t1) - f.origin - DVec3::new(-2.0, 0.0, 5.0)).length() < 1e-9);
     }
 
     #[test]

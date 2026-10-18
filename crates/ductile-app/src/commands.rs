@@ -43,6 +43,7 @@ pub enum Command {
     Circle,
     Ellipse,
     Polygon,
+    Helix,
     Extrude,
     Revolve,
     Loft,
@@ -124,6 +125,7 @@ impl Command {
         Command::Circle,
         Command::Ellipse,
         Command::Polygon,
+        Command::Helix,
         Command::Extrude,
         Command::Revolve,
         Command::Loft,
@@ -206,6 +208,7 @@ impl Command {
             Arc => "Arc (3 points)",
             Ellipse => "Ellipse",
             Polygon => "Polygon",
+            Helix => "Helix",
             Extrude => "Extrude face or curves",
             Revolve => "Revolve curves",
             Loft => "Loft",
@@ -536,6 +539,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Cone => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Cone))),
         Sphere => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Sphere))),
         Torus => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Torus))),
+        Helix => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Helix))),
         Extrude => match ExtrudeTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             // Curved faces push and pull by offsetting.
@@ -1010,6 +1014,19 @@ pub fn demo_scene(doc: &mut Document) {
         let wave = Loop3 { segments: vec![Segment::new(ductile_geom::Curve3::Nurbs(n), t0, t1)] };
         let imprinted = ductile_brep::ops::cut::imprint_curves(&drafted, &[wave], DVec3::Z).unwrap_or(drafted);
         doc.add_body("Drafted block", imprinted);
+    }
+    // A spring: a circle swept along a helix.
+    {
+        use ductile_brep::profile::{Loop3, Segment};
+        let axis = at(40.0, -22.0, 0.0);
+        let h = ductile_brep::curves::helix(&axis, 2.0, 6.0, 3.0);
+        let (t0, t1) = h.domain();
+        let start = h.point(t0);
+        let tan = h.derivs(t0, 1)[1].normalize();
+        let ring = Loop3 { segments: vec![Segment::new(ductile_geom::Curve3::Circle { frame: Frame::new(start, tan, DVec3::X), radius: 0.4 }, 0.0, std::f64::consts::TAU)] };
+        if let Some(b) = ductile_brep::ops::sweep::sweep(&ring, &[Segment::new(ductile_geom::Curve3::Nurbs(h), t0, t1)]) {
+            doc.add_body("Spring", b);
+        }
     }
     // Capsule end: cylinder with a hemispherical cap.
     let cap = op(make_cylinder(&at(13.0, 3.0, 0.0), 2.5, 4.0), make_sphere(DVec3::new(13.0, 3.0, 4.0), 2.5), BoolOp::Union);

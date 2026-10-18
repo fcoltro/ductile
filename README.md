@@ -36,7 +36,8 @@ code from them.
   world XY plane.
 - Curves on the construction plane: polyline (L), spline through points
   (Shift+L, open or closed C2), three-point arc (Shift+A), rectangle
-  (Shift+R), circle (Shift+O), ellipse (Shift+E), regular polygon (Shift+P).
+  (Shift+R), circle (Shift+O), ellipse (Shift+E), regular polygon (Shift+P),
+  helix (radius, height and turns; sweep a circle along it for a spring).
   Curves drawn separately that meet end to end form one profile. In vertex
   mode (1) spline control points show and can be selected and moved (G).
   Fillet (Shift+F) with curves selected rounds their corners (or just the
