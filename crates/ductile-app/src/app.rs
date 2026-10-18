@@ -20,6 +20,7 @@ pub struct Options {
     pub screenshot: Option<std::path::PathBuf>,
     pub open: Option<std::path::PathBuf>,
     pub demo: bool,
+    pub zebra: bool,
     /// Camera override: target x, y, z, distance, yaw and pitch in degrees.
     pub camera: Option<[f64; 6]>,
 }
@@ -96,6 +97,9 @@ impl DuctileApp {
             commands::demo_scene(&mut app.doc);
             let bb = app.doc.bbox();
             app.camera.frame(bb.center(), bb.diagonal() * 0.5);
+        }
+        if opts.zebra {
+            app.toggle_zebra();
         }
         if let Some(c) = opts.camera {
             app.camera.target = DVec3::new(c[0], c[1], c[2]);
@@ -741,6 +745,16 @@ impl DuctileApp {
 
     pub fn xray(&self) -> bool {
         self.renderer.as_ref().map(|r| r.xray).unwrap_or(false)
+    }
+
+    pub fn zebra(&self) -> bool {
+        self.renderer.as_ref().map(|r| r.zebra).unwrap_or(false)
+    }
+
+    pub fn toggle_zebra(&mut self) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.zebra = !r.zebra;
+        }
     }
 
     pub fn toggle_xray(&mut self) {

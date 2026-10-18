@@ -65,6 +65,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                     Command::ToggleGrid,
                     Command::ToggleEdges,
                     Command::ToggleXray,
+                    Command::ToggleZebra,
                     Command::ToggleSnap,
                 ] {
                     menu_item(app, ui, c);
@@ -101,6 +102,9 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 }
                 if ui.add(egui::Button::new("Snap").selected(app.snap_enabled)).clicked() {
                     app.pending.push(Command::ToggleSnap);
+                }
+                if ui.add(egui::Button::new("Zebra").selected(app.zebra())).clicked() {
+                    app.pending.push(Command::ToggleZebra);
                 }
                 if ui.add(egui::Button::new("X-ray").selected(app.xray())).clicked() {
                     app.pending.push(Command::ToggleXray);

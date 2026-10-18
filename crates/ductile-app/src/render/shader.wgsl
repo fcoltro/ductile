@@ -6,7 +6,7 @@ struct Camera {
     eye: vec4<f32>,
     // x, y: viewport size in pixels; z: 1 if orthographic; w: line depth bias.
     viewport: vec4<f32>,
-    // Camera forward direction (from eye into the scene).
+    // Camera forward direction (from eye into the scene); w: 1 for zebra stripes.
     forward: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -74,6 +74,28 @@ fn shade(base: vec3<f32>, n_in: vec3<f32>, world: vec3<f32>, front: bool) -> vec
     return c;
 }
 
+// Reflection of a room lined with horizontal light bars: the stripes stay
+// continuous across G1 joins and keep their direction across G2 ones.
+fn zebra(c: vec3<f32>, n_in: vec3<f32>, world: vec3<f32>, front: bool) -> vec3<f32> {
+    var n = normalize(n_in);
+    if (!front) {
+        n = -n;
+    }
+    var view_dir: vec3<f32>;
+    if (cam.viewport.z > 0.5) {
+        view_dir = -cam.forward.xyz;
+    } else {
+        view_dir = normalize(cam.eye.xyz - world);
+    }
+    let r = reflect(-view_dir, n);
+    let elevation = atan2(r.z, length(r.xy));
+    let s = fract(elevation * 10.0 / 3.14159265);
+    // Anti-aliased bar edges from the screen-space rate of change.
+    let w = max(fwidth(s), 1e-4);
+    let bar = smoothstep(0.5 - w, 0.5 + w, s) * (1.0 - smoothstep(1.0 - w, 1.0, s)) + (1.0 - smoothstep(0.0, w, s));
+    return mix(vec3<f32>(0.06), vec3<f32>(0.96), clamp(bar, 0.0, 1.0)) * 0.85 + c * 0.15;
+}
+
 @fragment
 fn fs_mesh(o: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     var base = obj.color.rgb;
@@ -83,7 +105,10 @@ fn fs_mesh(o: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
     } else if (obj.flags.x == 1u || fs == 1u) {
         base = obj.hover_color.rgb;
     }
-    let c = shade(base, o.nrm, o.world, front);
+    var c = shade(base, o.nrm, o.world, front);
+    if (cam.forward.w > 0.5) {
+        c = zebra(c, o.nrm, o.world, front);
+    }
     return vec4<f32>(c, obj.color.a);
 }
 

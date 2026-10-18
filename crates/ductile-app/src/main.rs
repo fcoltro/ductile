@@ -18,13 +18,14 @@ mod ui;
 
 fn main() -> eframe::Result {
     env_logger::init();
-    let mut opts = app::Options { screenshot: None, open: None, demo: false, camera: None };
+    let mut opts = app::Options { screenshot: None, open: None, demo: false, zebra: false, camera: None };
     let mut export_step: Option<std::path::PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--screenshot" => opts.screenshot = args.next().map(Into::into),
             "--demo" => opts.demo = true,
+            "--zebra" => opts.zebra = true,
             "--export-step" => export_step = args.next().map(Into::into),
             "--camera" => {
                 // x,y,z,distance,yaw,pitch (degrees)
@@ -34,7 +35,7 @@ fn main() -> eframe::Result {
                 }
             }
             "--help" | "-h" => {
-                println!("usage: ductile [FILE.ductile|FILE.step] [--demo] [--screenshot OUT.png] [--camera X,Y,Z,DIST,YAW,PITCH] [--export-step OUT.step]");
+                println!("usage: ductile [FILE.ductile|FILE.step] [--demo] [--screenshot OUT.png] [--camera X,Y,Z,DIST,YAW,PITCH] [--zebra] [--export-step OUT.step]");
                 return Ok(());
             }
             other => opts.open = Some(other.into()),

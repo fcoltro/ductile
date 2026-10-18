@@ -52,6 +52,9 @@ code from them.
   of extrusion and revolution, in any length unit. Parts written by
   OpenCascade import with the volumes OpenCascade reports for them
   (`crates/ductile-io/tests/occ_import.rs`).
+- Zebra stripes (Alt+R, or the Zebra button) to judge surface continuity:
+  stripes stay unbroken across tangent (G1) joins and keep their direction
+  across curvature-continuous (G2) ones. Headless: `--zebra`.
 - Move / rotate / scale / mirror, undo/redo.
 
 In progress: rolling-ball corners where filleted chains meet, mitred sweeps

@@ -116,6 +116,9 @@ pub struct ViewportRenderer {
     targets: Option<Targets>,
     objects: HashMap<u64, GpuObject>,
     pub xray: bool,
+    /// Zebra stripes (reflections of a striped room) for judging surface
+    /// continuity.
+    pub zebra: bool,
 }
 
 impl ViewportRenderer {
@@ -303,6 +306,7 @@ impl ViewportRenderer {
             targets: None,
             objects: HashMap::new(),
             xray: false,
+            zebra: false,
         }
     }
 
@@ -475,7 +479,7 @@ impl ViewportRenderer {
                 if camera.projection == Projection::Orthographic { 1.0 } else { 0.0 },
                 0.0008,
             ],
-            forward: fwd.as_vec3().extend(0.0).into(),
+            forward: fwd.as_vec3().extend(if self.zebra { 1.0 } else { 0.0 }).into(),
         };
         self.queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(&cu));
         let line_buf = (!lines.is_empty()).then(|| {
