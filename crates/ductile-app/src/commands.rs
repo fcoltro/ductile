@@ -56,6 +56,7 @@ pub enum Command {
     Loft,
     Patch,
     Thicken,
+    BridgeSurface,
     Cut,
     Imprint,
     Draft,
@@ -155,6 +156,7 @@ impl Command {
         Command::Loft,
         Command::Patch,
         Command::Thicken,
+        Command::BridgeSurface,
         Command::Cut,
         Command::Imprint,
         Command::Draft,
@@ -255,6 +257,7 @@ impl Command {
             Loft => "Loft",
             Patch => "Patch surface",
             Thicken => "Thicken surface",
+            BridgeSurface => "Bridge surface",
             Cut => "Cut solid with curves",
             Imprint => "Imprint curves onto faces",
             Draft => "Draft faces",
@@ -606,6 +609,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Pipe => match crate::tools::PipeTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Select curves to run a pipe along".into(),
+        },
+        BridgeSurface => match crate::tools::BridgeSurfaceTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select two edges to bridge with a surface".into(),
         },
         Thicken => match ThickenTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
@@ -991,6 +998,22 @@ pub fn demo_scene(doc: &mut Document) {
             if let Some(c) = cap {
                 doc.add_body("Tangent cap", c);
             }
+        }
+        // Two curved sheets joined by a curvature-continuous bridge.
+        let a = spline(&[p(20.0, -32.0, 0.0), p(21.5, -32.0, 1.2), p(23.0, -32.0, 1.6)]);
+        let b = spline(&[p(28.0, -32.0, 0.6), p(29.5, -32.0, 0.9), p(31.0, -32.0, 0.0)]);
+        if let (Some(a), Some(b)) = (extrude_sheet(&[a], p(0.0, 3.0, 0.0)), extrude_sheet(&[b], p(0.0, 3.0, 0.0))) {
+            use ductile_brep::ops::bridge::{bridge_surface, Continuity, Side};
+            let edge_at = |s: &ductile_brep::Body, x: f64| s.edge_ids().find(|e| s.edge(*e).curve.is_linear() && (s.edge(*e).mid().x - x).abs() < 1e-6);
+            if let (Some(ea), Some(eb)) = (edge_at(&a, 23.0), edge_at(&b, 28.0)) {
+                let sa = Side::of_edge(&a, ea, p(28.0, -30.5, 0.6), Continuity::G2, 1.0);
+                let sb = Side::of_edge(&b, eb, p(23.0, -30.5, 1.6), Continuity::G2, 1.0);
+                if let Some(br) = bridge_surface(&sa, &sb) {
+                    doc.add_body("Bridge surface", br);
+                }
+            }
+            doc.add_body("Bridged sheet", a);
+            doc.add_body("Bridged sheet", b);
         }
     }
     // A drafted block with a spline imprinted across its top.

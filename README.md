@@ -80,7 +80,10 @@ code from them.
   tube's rim gets a smooth dome. In vertex mode (1) the control nets of
   untrimmed spline surfaces show and their points move with G, rotate and
   scale; neighbouring faces stay joined. Thicken (Alt+K) turns surfaces into
-  solids of a given thickness on either side. Back faces show tinted.
+  solids of a given thickness on either side. Bridge surface spans two
+  selected edges with a sheet meeting the faces beyond them with G0, G1 or
+  G2 continuity, chosen per side, with a tension per side. Back faces show
+  tinted.
 - Fillets (B) and chamfers (Shift+K) on edges between planes, on
   circular plane/cylinder edges (boss and hole rims), with spherical corner
   patches where three filleted edges meet. Closed edges between any two

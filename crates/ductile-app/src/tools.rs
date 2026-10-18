@@ -2733,6 +2733,89 @@ impl Tool for ExtendTool {
 
 /// Thicken: turn the selected surfaces into solids by giving them a
 /// thickness, along their normals or (negative) against them.
+/// A sheet spanning two selected edges, meeting the faces beyond them
+/// with the continuity chosen per side.
+pub struct BridgeSurfaceTool {
+    sides: [ductile_brep::ops::bridge::Side; 2],
+    cache: std::cell::RefCell<Option<(Vec<u8>, Option<Body>)>>,
+}
+
+impl BridgeSurfaceTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        use ductile_brep::ops::bridge::{Continuity, Side};
+        let edges = doc.selected_edges();
+        let [(oa, ea), (ob, eb)] = edges[..] else { return None };
+        let (ba, bb) = (&doc.object(oa)?.body, &doc.object(ob)?.body);
+        let (ma, mb) = (ba.edge(ea).mid(), bb.edge(eb).mid());
+        Some(Self { sides: [Side::of_edge(ba, ea, mb, Continuity::G2, 1.0), Side::of_edge(bb, eb, ma, Continuity::G2, 1.0)], cache: Default::default() })
+    }
+
+    fn key(&self) -> Vec<u8> {
+        format!("{:?}", self.sides.iter().map(|s| (s.continuity, s.tension)).collect::<Vec<_>>()).into_bytes()
+    }
+
+    fn result(&self) -> Option<Body> {
+        let k = self.key();
+        if let Some((ck, b)) = &*self.cache.borrow() {
+            if *ck == k {
+                return b.clone();
+            }
+        }
+        let b = ductile_brep::ops::bridge::bridge_surface(&self.sides[0], &self.sides[1]);
+        *self.cache.borrow_mut() = Some((k, b.clone()));
+        b
+    }
+}
+
+impl Tool for BridgeSurfaceTool {
+    fn name(&self) -> &'static str {
+        "Bridge surface"
+    }
+    fn hint(&self) -> String {
+        "Bridge surface: pick G0 / G1 / G2 and the tension per side; 0 1 2 set both sides; Enter to finish".into()
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if p.clicked { ToolOutcome::Finished } else { ToolOutcome::Continue }
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        self.result()
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        use ductile_brep::ops::bridge::Continuity;
+        let mut ch = false;
+        for (i, s) in self.sides.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(if i == 0 { "First" } else { "Second" });
+                for (c, name) in [(Continuity::G0, "G0"), (Continuity::G1, "G1"), (Continuity::G2, "G2")] {
+                    ch |= ui.selectable_value(&mut s.continuity, c, name).changed();
+                }
+            });
+            ch |= drag_value(ui, "Tension", &mut s.tension, 0.01);
+            s.tension = s.tension.clamp(0.05, 5.0);
+        }
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        use ductile_brep::ops::bridge::Continuity;
+        let c = match v.map(|v| v.round() as i64) {
+            Some(0) => Continuity::G0,
+            Some(1) => Continuity::G1,
+            Some(2) => Continuity::G2,
+            _ => return,
+        };
+        for s in &mut self.sides {
+            s.continuity = c;
+        }
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let Some(b) = self.result() else { return false };
+        let id = doc.add_body("Bridge surface", b);
+        doc.selection.clear();
+        doc.selection.insert(Pick::Object(id));
+        true
+    }
+}
+
 pub struct ThickenTool {
     targets: Vec<(ObjectId, std::sync::Arc<Body>)>,
     base: DVec3,
