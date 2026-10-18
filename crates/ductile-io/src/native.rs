@@ -48,11 +48,14 @@ pub struct NativeDocument {
     pub objects: Vec<NativeObject>,
     #[serde(default)]
     pub groups: Vec<NativeGroup>,
+    /// Placed dimensions: the two points and the offset of the line.
+    #[serde(default)]
+    pub dimensions: Vec<[[f64; 3]; 3]>,
 }
 
 impl NativeDocument {
     pub fn new(objects: Vec<NativeObject>) -> Self {
-        Self { format: "ductile".into(), version: FORMAT_VERSION, objects, groups: vec![] }
+        Self { format: "ductile".into(), version: FORMAT_VERSION, objects, groups: vec![], dimensions: vec![] }
     }
 
     pub fn to_json(&self) -> crate::Result<String> {

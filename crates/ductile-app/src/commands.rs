@@ -104,6 +104,8 @@ pub enum Command {
     RadialArray,
     CurveArray,
     Place,
+    Dimension,
+    DeleteDimensions,
     MirrorX,
     MirrorY,
     MirrorZ,
@@ -230,6 +232,8 @@ impl Command {
         Command::RadialArray,
         Command::CurveArray,
         Command::Place,
+        Command::Dimension,
+        Command::DeleteDimensions,
         Command::MirrorX,
         Command::MirrorY,
         Command::MirrorZ,
@@ -357,6 +361,8 @@ impl Command {
             RadialArray => "Radial array",
             CurveArray => "Curve array (copies along a curve)",
             Place => "Place (copies stood on faces)",
+            Dimension => "Dimension (distance between two points)",
+            DeleteDimensions => "Delete all dimensions",
             MirrorX => "Mirror X",
             MirrorY => "Mirror Y",
             MirrorZ => "Mirror Z",
@@ -851,6 +857,15 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 None => app.status = "Select a solid, or the faces to open (face mode: 3)".into(),
             }
         }
+        Dimension => app.start_tool(std::boxed::Box::new(crate::tools::DimensionTool::new())),
+        DeleteDimensions => {
+            if app.doc.dimensions.is_empty() {
+                app.status = "There are no dimensions".into();
+            } else {
+                app.doc.checkpoint("Delete dimensions");
+                app.doc.dimensions.clear();
+            }
+        }
         Place => match crate::tools::PlaceTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Select the objects to place".into(),
@@ -1125,6 +1140,7 @@ pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), Strin
             open: true,
         });
     }
+    doc.dimensions = nd.dimensions.iter().map(|[a, b, o]| crate::document::Dimension { a: DVec3::from_array(*a), b: DVec3::from_array(*b), offset: DVec3::from_array(*o) }).collect();
     for o in nd.objects {
         let id = doc.add_body(&o.name, o.body);
         if let Some(ob) = doc.objects.iter_mut().find(|x| x.id == id) {
@@ -1179,6 +1195,7 @@ pub fn write_native(doc: &Document, path: &std::path::Path) -> Result<(), String
         .iter()
         .map(|g| ductile_io::native::NativeGroup { id: g.id, name: g.name.clone(), parent: g.parent, visible: g.visible, locked: g.locked })
         .collect();
+    nd.dimensions = doc.dimensions.iter().map(|d| [d.a.to_array(), d.b.to_array(), d.offset.to_array()]).collect();
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
@@ -1252,6 +1269,7 @@ pub fn demo_scene(doc: &mut Document) {
     let verticals = pick(&part, &|e| e.curve.is_linear() && (e.start() - e.end()).normalize().z.abs() > 0.999 && [0.0, 8.0].contains(&e.start().x) && [0.0, 6.0].contains(&e.start().y) && e.start().distance(e.end()) > 2.9);
     part = blend_edges(&part, &verticals, Blend::Fillet(0.6)).unwrap_or(part);
     doc.add_body("Block", part);
+    doc.dimensions.push(crate::document::Dimension { a: DVec3::ZERO, b: DVec3::new(8.0, 0.0, 0.0), offset: DVec3::new(0.0, -1.5, 0.0) });
     // A fully rounded box with curvature-continuous (G2) edges and corners.
     let all = |b: &ductile_brep::Body| b.edge_ids().collect::<Vec<_>>();
     let rb = make_box(&at(-7.0, 11.0, 0.0), DVec3::new(5.0, 3.5, 2.5));

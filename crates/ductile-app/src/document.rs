@@ -69,16 +69,27 @@ pub enum SelectMode {
     Object,
 }
 
+/// A dimension placed in the scene: the distance from `a` to `b`, its
+/// line drawn `offset` away from them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Dimension {
+    pub a: glam::DVec3,
+    pub b: glam::DVec3,
+    pub offset: glam::DVec3,
+}
+
 #[derive(Clone)]
 struct Snapshot {
     objects: Vec<Object>,
     groups: Vec<Group>,
+    dimensions: Vec<Dimension>,
     label: String,
 }
 
 pub struct Document {
     pub objects: Vec<Object>,
     pub groups: Vec<Group>,
+    pub dimensions: Vec<Dimension>,
     /// The active collection: new objects go into it.
     pub active_group: Option<GroupId>,
     pub selection: BTreeSet<Pick>,
@@ -99,6 +110,7 @@ impl Default for Document {
         Self {
             objects: vec![],
             groups: vec![],
+            dimensions: vec![],
             active_group: None,
             selection: BTreeSet::new(),
             hover: None,
@@ -148,7 +160,7 @@ impl Document {
 
     /// Records the current state for undo. Call before mutating.
     pub fn checkpoint(&mut self, label: &str) {
-        self.undo.push(Snapshot { objects: self.objects.clone(), groups: self.groups.clone(), label: label.to_string() });
+        self.undo.push(Snapshot { objects: self.objects.clone(), groups: self.groups.clone(), dimensions: self.dimensions.clone(), label: label.to_string() });
         if self.undo.len() > 200 {
             self.undo.remove(0);
         }
@@ -159,7 +171,8 @@ impl Document {
     pub fn undo(&mut self) -> Option<String> {
         let s = self.undo.pop()?;
         let groups = std::mem::replace(&mut self.groups, s.groups);
-        self.redo.push(Snapshot { objects: std::mem::replace(&mut self.objects, s.objects), groups, label: s.label.clone() });
+        let dimensions = std::mem::replace(&mut self.dimensions, s.dimensions);
+        self.redo.push(Snapshot { objects: std::mem::replace(&mut self.objects, s.objects), groups, dimensions, label: s.label.clone() });
         self.validate_selection();
         Some(s.label)
     }
@@ -167,7 +180,8 @@ impl Document {
     pub fn redo(&mut self) -> Option<String> {
         let s = self.redo.pop()?;
         let groups = std::mem::replace(&mut self.groups, s.groups);
-        self.undo.push(Snapshot { objects: std::mem::replace(&mut self.objects, s.objects), groups, label: s.label.clone() });
+        let dimensions = std::mem::replace(&mut self.dimensions, s.dimensions);
+        self.undo.push(Snapshot { objects: std::mem::replace(&mut self.objects, s.objects), groups, dimensions, label: s.label.clone() });
         self.validate_selection();
         Some(s.label)
     }

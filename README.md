@@ -171,6 +171,9 @@ code from them.
 - Curvature combs (the Curvature button) on the selected curves, edges and
   solids, all at one scale so joins compare, with G0 / G1 / G2 marked where
   picked curves meet. Headless: `--curvature`.
+- Dimension: click two points (snapped to geometry), move the line off
+  them and click; dimensions stay in the scene, undo and save with it, and
+  Delete all dimensions clears them.
 - Measure (palette or View menu): with two things selected, the shortest
   distance between them drawn as a dimension (the angle too for two
   planes); with one, its length, radius, area or volume.

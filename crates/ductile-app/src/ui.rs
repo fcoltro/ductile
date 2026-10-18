@@ -86,6 +86,8 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                     Command::ToggleCurvature,
                     Command::ToggleSection,
                     Command::Measure,
+                    Command::Dimension,
+                    Command::DeleteDimensions,
                     Command::ToggleSnap,
                 ] {
                     menu_item(app, ui, c);

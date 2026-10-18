@@ -4804,6 +4804,27 @@ mod tests {
     }
 
     #[test]
+    fn dimension_places_a_line_off_two_points_and_survives_undo_and_save() {
+        let mut doc = Document::default();
+        let mut t = DimensionTool::new();
+        click(&mut t, &doc, DVec3::ZERO, true);
+        click(&mut t, &doc, DVec3::new(3.0, 4.0, 0.0), true);
+        assert!(click(&mut t, &doc, DVec3::new(-4.0, 3.0, 0.0) + DVec3::new(1.5, 2.0, 0.0), true));
+        doc.checkpoint("Dimension");
+        assert!(t.commit(&mut doc));
+        let d = doc.dimensions[0];
+        assert!(d.offset.distance(DVec3::new(-4.0, 3.0, 0.0)) < 1e-9, "{:?}", d.offset);
+        assert_eq!(dimension_label(&d).1, "5");
+        let path = std::env::temp_dir().join("ductile_dimension_test.ductile");
+        crate::commands::write_native(&doc, &path).unwrap();
+        let mut back = Document::default();
+        crate::commands::load_into(&mut back, &path).unwrap();
+        assert_eq!(back.dimensions, doc.dimensions);
+        doc.undo();
+        assert!(doc.dimensions.is_empty());
+    }
+
+    #[test]
     fn isoparam_untrim_unjoin_and_boundary_edges() {
         let mut doc = Document::default();
         let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 2.0, 1.0)));
@@ -5627,5 +5648,114 @@ impl Tool for PlaceTool {
             }
         }
         true
+    }
+}
+
+// ------------------------------------------------------------ Dimension ----
+
+/// The lines of a dimension: extension lines from the two points, the
+/// dimension line between them with arrowheads, in `color`.
+pub fn dimension_lines(d: &crate::document::Dimension, color: [f32; 4], out: &mut Vec<LineInstance>) {
+    let (a, b, o) = (d.a, d.b, d.offset);
+    let over = o.normalize_or_zero() * (b - a).length().max(1e-9) * 0.03;
+    out.push(LineInstance::new(a, a + o + over, color, 1.0));
+    out.push(LineInstance::new(b, b + o + over, color, 1.0));
+    let (p, q) = (a + o, b + o);
+    out.push(LineInstance::new(p, q, color, 1.5));
+    let dir = (q - p).normalize_or_zero();
+    let side = o.normalize_or_zero();
+    let s = p.distance(q) * 0.04;
+    for (end, along) in [(p, dir), (q, -dir)] {
+        out.push(LineInstance::new(end, end + along * s + side * s * 0.35, color, 1.5));
+        out.push(LineInstance::new(end, end + along * s - side * s * 0.35, color, 1.5));
+    }
+}
+
+/// The dimension's text and where it goes.
+pub fn dimension_label(d: &crate::document::Dimension) -> (DVec3, String) {
+    let s = format!("{:.4}", d.a.distance(d.b));
+    let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
+    ((d.a + d.b) * 0.5 + d.offset, s)
+}
+
+/// Dimension: click two points, then move the line off them and click to
+/// place it; it stays in the scene until deleted.
+pub struct DimensionTool {
+    a: Option<DVec3>,
+    b: Option<DVec3>,
+    cursor: Option<DVec3>,
+}
+
+impl DimensionTool {
+    pub fn new() -> Self {
+        Self { a: None, b: None, cursor: None }
+    }
+
+    fn dimension(&self) -> Option<crate::document::Dimension> {
+        let (a, c) = (self.a?, self.cursor?);
+        let b = self.b.unwrap_or(c);
+        let dir = (b - a).try_normalize()?;
+        let offset = match self.b {
+            Some(_) => {
+                let v = c - a;
+                v - dir * v.dot(dir)
+            }
+            None => DVec3::ZERO,
+        };
+        Some(crate::document::Dimension { a, b, offset })
+    }
+}
+
+impl Tool for DimensionTool {
+    fn name(&self) -> &'static str {
+        "Dimension"
+    }
+    fn hint(&self) -> String {
+        let d = self.dimension().map(|d| dimension_label(&d).1).unwrap_or_default();
+        match (self.a, self.b) {
+            (None, _) => "Dimension: click the first point".into(),
+            (Some(_), None) => format!("Dimension: click the second point ({d})"),
+            _ => format!("Dimension {d}: move the line off the points and click to place it"),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        self.cursor = p.point.or(p.plane_point);
+        if p.clicked {
+            match (self.a, self.b) {
+                (None, _) => self.a = self.cursor,
+                (Some(a), None) => self.b = self.cursor.filter(|c| c.distance(a) > 1e-9),
+                _ => return ToolOutcome::Finished,
+            }
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        None
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        if let Some(d) = self.dimension() {
+            dimension_lines(&d, [0.45, 0.95, 0.6, 1.0], out);
+        }
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        if let Some(d) = self.dimension() {
+            ui.label(format!("Distance {}", dimension_label(&d).1));
+        }
+        false
+    }
+    fn anchor(&self) -> Option<DVec3> {
+        self.b.or(self.a)
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        if self.b.is_none() {
+            return false;
+        }
+        match self.dimension() {
+            Some(d) => {
+                doc.dimensions.push(d);
+                true
+            }
+            None => false,
+        }
     }
 }

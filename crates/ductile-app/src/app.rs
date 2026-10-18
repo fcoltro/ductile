@@ -548,6 +548,10 @@ impl DuctileApp {
                 }
             }
         }
+        for d in &self.doc.dimensions {
+            crate::tools::dimension_lines(d, [0.85, 0.85, 0.9, 1.0], &mut overlay);
+            labels.push(crate::tools::dimension_label(d));
+        }
         vertex_overlay(&self.doc, &mut overlay);
         let ppp = ui.ctx().pixels_per_point();
         let px = [(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32];
