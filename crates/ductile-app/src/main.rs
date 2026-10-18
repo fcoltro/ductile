@@ -28,14 +28,17 @@ mod ui;
 
 fn main() -> eframe::Result {
     env_logger::init();
-    let mut opts = app::Options { screenshot: None, open: None, demo: false, zebra: false, curvature: false, section: false, camera: None, select: None };
+    let mut opts = app::Options { screenshot: None, open: None, demo: false, analysis: None, curvature: false, section: false, camera: None, select: None };
     let mut export_step: Option<std::path::PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--screenshot" => opts.screenshot = args.next().map(Into::into),
             "--demo" => opts.demo = true,
-            "--zebra" => opts.zebra = true,
+            "--zebra" => opts.analysis = Some(render::Analysis::Zebra),
+            "--isophote" => opts.analysis = Some(render::Analysis::Isophote),
+            "--draft" => opts.analysis = Some(render::Analysis::Draft),
+            "--direction" => opts.analysis = Some(render::Analysis::Direction),
             "--curvature" => opts.curvature = true,
             "--section" => opts.section = true,
             "--select" => opts.select = args.next().and_then(|x| x.parse().ok()),
@@ -48,7 +51,7 @@ fn main() -> eframe::Result {
                 }
             }
             "--help" | "-h" => {
-                println!("usage: ductile [FILE.ductile|FILE.step] [--demo] [--screenshot OUT.png] [--camera X,Y,Z,DIST,YAW,PITCH] [--zebra] [--curvature] [--section] [--select N] [--export-step OUT.step]");
+                println!("usage: ductile [FILE.ductile|FILE.step] [--demo] [--screenshot OUT.png] [--camera X,Y,Z,DIST,YAW,PITCH] [--zebra|--isophote|--draft|--direction] [--curvature] [--section] [--select N] [--export-step OUT.step]");
                 return Ok(());
             }
             other => opts.open = Some(other.into()),

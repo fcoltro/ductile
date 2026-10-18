@@ -2,6 +2,7 @@
 //! Interface panels around the viewport.
 
 use crate::app::DuctileApp;
+use crate::render::Analysis;
 use crate::commands::Command;
 use crate::document::SelectMode;
 use crate::theme;
@@ -79,6 +80,9 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                     Command::ToggleEdges,
                     Command::ToggleXray,
                     Command::ToggleZebra,
+                    Command::ToggleIsophote,
+                    Command::ToggleDraft,
+                    Command::ToggleFaceDirection,
                     Command::ToggleCurvature,
                     Command::ToggleSection,
                     Command::Measure,
@@ -135,9 +139,17 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 if ui.add(egui::Button::new("Section").selected(app.section.is_some())).on_hover_text("Cut the scene away beyond a plane along the construction plane's normal").clicked() {
                     app.pending.push(Command::ToggleSection);
                 }
-                if ui.add(egui::Button::new("Zebra").selected(app.zebra())).clicked() {
-                    app.pending.push(Command::ToggleZebra);
+                if let Some(a) = app.draft_angle() {
+                    ui.add(egui::DragValue::new(a).speed(0.1).range(0.0..=45.0).suffix("°")).on_hover_text("Minimum draft angle");
                 }
+                let current = app.analysis();
+                egui::ComboBox::from_id_salt("analysis").selected_text(current.label()).width(110.0).show_ui(ui, |ui| {
+                    for a in Analysis::ALL {
+                        if ui.selectable_label(current == a, a.label()).clicked() && current != a {
+                            app.toggle_analysis(a);
+                        }
+                    }
+                });
                 if ui.add(egui::Button::new("X-ray").selected(app.xray())).clicked() {
                     app.pending.push(Command::ToggleXray);
                 }

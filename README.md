@@ -133,6 +133,12 @@ code from them.
 - Zebra stripes (Alt+R, or the Zebra button) to judge surface continuity:
   stripes stay unbroken across tangent (G1) joins and keep their direction
   across curvature-continuous (G2) ones. Headless: `--zebra`.
+- More analysis shading from the shading menu in the top bar: isophotes
+  (lines of equal angle to the view every 10°, smooth over G2 surfaces,
+  kinked at G1 joins), draft against the construction plane's normal (green
+  pulls, red undercut, yellow under the minimum angle you set) and face
+  direction (front blue, back red). Headless: `--isophote`, `--draft`,
+  `--direction`.
 - Curvature combs (the Curvature button) on the selected curves, edges and
   solids, all at one scale so joins compare, with G0 / G1 / G2 marked where
   picked curves meet. Headless: `--curvature`.

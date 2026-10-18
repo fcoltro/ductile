@@ -21,6 +21,37 @@ struct CameraUniform {
     viewport: [f32; 4],
     forward: [f32; 4],
     section: [f32; 4],
+    pull: [f32; 4],
+}
+
+/// How faces are shaded for surface analysis.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Analysis {
+    #[default]
+    None,
+    /// Reflections of a striped room: continuity across joins.
+    Zebra,
+    /// Lines of equal angle to the view: smoothness of the surface flow.
+    Isophote,
+    /// Draft against the pull direction: green pulls, red is undercut,
+    /// yellow is under the minimum angle.
+    Draft,
+    /// Front faces blue, back faces red.
+    Direction,
+}
+
+impl Analysis {
+    pub const ALL: [Analysis; 5] = [Analysis::None, Analysis::Zebra, Analysis::Isophote, Analysis::Draft, Analysis::Direction];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Analysis::None => "Shaded",
+            Analysis::Zebra => "Zebra",
+            Analysis::Isophote => "Isophote",
+            Analysis::Draft => "Draft",
+            Analysis::Direction => "Face direction",
+        }
+    }
 }
 
 #[repr(C)]
@@ -120,9 +151,10 @@ pub struct ViewportRenderer {
     targets: Option<Targets>,
     objects: HashMap<u64, GpuObject>,
     pub xray: bool,
-    /// Zebra stripes (reflections of a striped room) for judging surface
-    /// continuity.
-    pub zebra: bool,
+    /// Surface analysis shading.
+    pub analysis: Analysis,
+    /// Pull direction and minimum angle (degrees) for draft analysis.
+    pub pull: ([f32; 3], f32),
     /// Section analysis: the plane (normal, offset) beyond which the
     /// scene is cut away.
     pub section: Option<[f32; 4]>,
@@ -313,7 +345,8 @@ impl ViewportRenderer {
             targets: None,
             objects: HashMap::new(),
             xray: false,
-            zebra: false,
+            analysis: Analysis::None,
+            pull: ([0.0, 0.0, 1.0], 1.0),
             section: None,
         }
     }
@@ -487,8 +520,9 @@ impl ViewportRenderer {
                 if camera.projection == Projection::Orthographic { 1.0 } else { 0.0 },
                 0.0008,
             ],
-            forward: fwd.as_vec3().extend(if self.zebra { 1.0 } else { 0.0 }).into(),
+            forward: fwd.as_vec3().extend(self.analysis as u32 as f32).into(),
             section: self.section.unwrap_or([0.0; 4]),
+            pull: [self.pull.0[0], self.pull.0[1], self.pull.0[2], self.pull.1],
         };
         self.queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(&cu));
         let line_buf = (!lines.is_empty()).then(|| {

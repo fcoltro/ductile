@@ -6,11 +6,14 @@ struct Camera {
     eye: vec4<f32>,
     // x, y: viewport size in pixels; z: 1 if orthographic; w: line depth bias.
     viewport: vec4<f32>,
-    // Camera forward direction (from eye into the scene); w: 1 for zebra stripes.
+    // Camera forward direction (from eye into the scene); w: the analysis
+    // shading (0 none, 1 zebra, 2 isophote, 3 draft, 4 face direction).
     forward: vec4<f32>,
     // Section plane: points with dot(xyz, p) + w > 0 are cut away; off
     // when xyz is zero.
     section: vec4<f32>,
+    // Draft analysis: pull direction, and the minimum angle in degrees.
+    pull: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> cam: Camera;
 
@@ -104,6 +107,46 @@ fn cut(world: vec3<f32>) -> bool {
     return on && dot(cam.section.xyz, world) + cam.section.w > 0.0;
 }
 
+// Isophotes: lines where the surface meets the view at the same angle,
+// every 10°. They run smoothly over G2 surfaces and kink at G1 joins.
+fn isophote(c: vec3<f32>, n_in: vec3<f32>, world: vec3<f32>, front: bool) -> vec3<f32> {
+    var n = normalize(n_in);
+    if (!front) {
+        n = -n;
+    }
+    var view_dir: vec3<f32>;
+    if (cam.viewport.z > 0.5) {
+        view_dir = -cam.forward.xyz;
+    } else {
+        view_dir = normalize(cam.eye.xyz - world);
+    }
+    let a = acos(clamp(dot(n, view_dir), -1.0, 1.0)) * 18.0 / 3.14159265;
+    let s = abs(fract(a + 0.5) - 0.5);
+    let w = max(fwidth(a), 1e-4);
+    let line = 1.0 - smoothstep(0.5 * w, 1.5 * w, s);
+    let band = select(vec3<f32>(0.20, 0.55, 0.85), vec3<f32>(0.90, 0.75, 0.30), fract(a * 0.5) > 0.5);
+    return mix(c * 0.6 + band * 0.4, vec3<f32>(0.04), line);
+}
+
+// Draft against the pull direction: green where the face pulls by at least
+// the minimum angle, red where it is undercut, yellow between.
+fn draft(c: vec3<f32>, n_in: vec3<f32>, front: bool) -> vec3<f32> {
+    var n = normalize(n_in);
+    if (!front) {
+        n = -n;
+    }
+    let ang = degrees(asin(clamp(dot(n, normalize(cam.pull.xyz)), -1.0, 1.0)));
+    let lim = cam.pull.w;
+    var tint = vec3<f32>(0.95, 0.85, 0.20);
+    if (ang >= lim) {
+        tint = vec3<f32>(0.25, 0.80, 0.35);
+    } else if (ang <= -lim) {
+        tint = vec3<f32>(0.90, 0.25, 0.22);
+    }
+    let lum = dot(c, vec3<f32>(0.3, 0.5, 0.2));
+    return tint * (0.45 + lum * 0.8);
+}
+
 @fragment
 fn fs_mesh(o: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     if (cut(o.world)) {
@@ -121,8 +164,19 @@ fn fs_mesh(o: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
         base = obj.hover_color.rgb;
     }
     var c = shade(base, o.nrm, o.world, front);
-    if (cam.forward.w > 0.5) {
+    let mode = u32(cam.forward.w + 0.5);
+    if (mode == 1u) {
         c = zebra(c, o.nrm, o.world, front);
+    } else if (mode == 2u) {
+        c = isophote(c, o.nrm, o.world, front);
+    } else if (mode == 3u) {
+        c = draft(c, o.nrm, front);
+    } else if (mode == 4u) {
+        if (front) {
+            c = shade(vec3<f32>(0.25, 0.45, 0.95), o.nrm, o.world, true);
+        } else {
+            c = shade(vec3<f32>(0.95, 0.25, 0.22), -o.nrm, o.world, true);
+        }
     }
     return vec4<f32>(c, obj.color.a);
 }

@@ -2,6 +2,7 @@
 //! Named commands: what the toolbar, menus, palette and shortcuts invoke.
 
 use crate::app::DuctileApp;
+use crate::render::Analysis;
 use crate::document::{Document, Pick, SelectMode};
 use crate::tools::{ArrayTool, BoxTool, CurveEditTool, TrimTool, delete_selected, duplicate_selected, join_selected, BridgeTool, ExtendTool, ThickenTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
@@ -99,6 +100,9 @@ pub enum Command {
     ToggleEdges,
     ToggleXray,
     ToggleZebra,
+    ToggleIsophote,
+    ToggleDraft,
+    ToggleFaceDirection,
     ToggleCurvature,
     ToggleSection,
     Measure,
@@ -205,6 +209,9 @@ impl Command {
         Command::ToggleEdges,
         Command::ToggleXray,
         Command::ToggleZebra,
+        Command::ToggleIsophote,
+        Command::ToggleDraft,
+        Command::ToggleFaceDirection,
         Command::ToggleCurvature,
         Command::ToggleSection,
         Command::Measure,
@@ -312,6 +319,9 @@ impl Command {
             ToggleEdges => "Toggle edges",
             ToggleXray => "Toggle x-ray",
             ToggleZebra => "Toggle zebra stripes",
+            ToggleIsophote => "Toggle isophote analysis",
+            ToggleDraft => "Toggle draft analysis",
+            ToggleFaceDirection => "Toggle face direction",
             ToggleCurvature => "Toggle curvature combs",
             ToggleSection => "Toggle section analysis",
             Measure => "Measure",
@@ -352,7 +362,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
     // Shift+R repeats modeling commands, not navigation or selection.
     let fleeting = matches!(
         cmd,
-        Repeat | Palette | Help | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleCurvature | ToggleSection | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
+        Repeat | Palette | Help | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleIsophote | ToggleDraft | ToggleFaceDirection | ToggleCurvature | ToggleSection | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
     );
     if !fleeting {
         app.last_command = Some(cmd);
@@ -781,7 +791,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         ToggleGrid => app.show_grid = !app.show_grid,
         ToggleEdges => app.show_edges = !app.show_edges,
         ToggleXray => app.toggle_xray(),
-        ToggleZebra => app.toggle_zebra(),
+        ToggleZebra => app.toggle_analysis(Analysis::Zebra),
+        ToggleIsophote => app.toggle_analysis(Analysis::Isophote),
+        ToggleDraft => app.toggle_analysis(Analysis::Draft),
+        ToggleFaceDirection => app.toggle_analysis(Analysis::Direction),
         Measure => match crate::measure::measure(&app.doc) {
             Some(m) => {
                 app.status = m.text.clone();

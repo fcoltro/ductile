@@ -6,7 +6,7 @@ use crate::camera::{Camera, Projection};
 use crate::commands::{self, Command};
 use crate::document::{mesh_body, Document, ObjectId, Pick, SelectMode};
 use crate::picking;
-use crate::render::{LineInstance, ObjectStyle, ViewportRenderer};
+use crate::render::{Analysis, LineInstance, ObjectStyle, ViewportRenderer};
 use crate::theme;
 use crate::tools::{self, CPlane, PointerInfo, Tool, ToolOutcome, TransformKind, TransformTool};
 use ductile_brep::{Body, BodyMesh};
@@ -20,7 +20,7 @@ pub struct Options {
     pub screenshot: Option<std::path::PathBuf>,
     pub open: Option<std::path::PathBuf>,
     pub demo: bool,
-    pub zebra: bool,
+    pub analysis: Option<Analysis>,
     pub curvature: bool,
     pub section: bool,
     /// Camera override: target x, y, z, distance, yaw and pitch in degrees.
@@ -157,8 +157,8 @@ impl DuctileApp {
             let bb = app.doc.bbox();
             app.camera.frame(bb.center(), bb.diagonal() * 0.5);
         }
-        if opts.zebra {
-            app.toggle_zebra();
+        if let Some(a) = opts.analysis {
+            app.toggle_analysis(a);
         }
         app.show_curvature = opts.curvature;
         if opts.section {
@@ -1147,14 +1147,23 @@ impl DuctileApp {
         self.renderer.as_ref().map(|r| r.xray).unwrap_or(false)
     }
 
-    pub fn zebra(&self) -> bool {
-        self.renderer.as_ref().map(|r| r.zebra).unwrap_or(false)
+    pub fn analysis(&self) -> Analysis {
+        self.renderer.as_ref().map(|r| r.analysis).unwrap_or_default()
     }
 
-    pub fn toggle_zebra(&mut self) {
+    /// Switches to analysis shading `a`, or back to plain shading when it
+    /// is already on. Draft analysis pulls along the construction plane's normal.
+    pub fn toggle_analysis(&mut self, a: Analysis) {
+        let z = self.cplane.frame.z.as_vec3();
         if let Some(r) = self.renderer.as_mut() {
-            r.zebra = !r.zebra;
+            r.analysis = if r.analysis == a { Analysis::None } else { a };
+            r.pull.0 = z.into();
         }
+    }
+
+    /// Minimum draft angle in degrees for draft analysis.
+    pub fn draft_angle(&mut self) -> Option<&mut f32> {
+        self.renderer.as_mut().filter(|r| r.analysis == Analysis::Draft).map(|r| &mut r.pull.1)
     }
 
     /// Section analysis on or off: the plane starts through the scene's
