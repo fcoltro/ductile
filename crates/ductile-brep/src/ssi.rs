@@ -532,7 +532,10 @@ fn trace(a: &Surface, b: &Surface, p0: DVec3, t0: DVec3, roi: &BBox3, tol: f64, 
 /// Parameters in `[t0, t1]` where the curve crosses the surface.
 pub fn curve_surface_crossings(c: &Curve3, t0: f64, t1: f64, s: &Surface, tol: f64) -> Vec<f64> {
     let samples: Vec<f64> = {
-        let mut v: Vec<f64> = c.tessellate(t0, t1, tol * 100.0).into_iter().map(|x| x.0).collect();
+        // Sample spacing follows the curve's shape, not the (much finer)
+        // point tolerance; the subdivision below catches close crossings.
+        let len = c.point(t0).distance(c.point(0.5 * (t0 + t1))) + c.point(0.5 * (t0 + t1)).distance(c.point(t1));
+        let mut v: Vec<f64> = c.tessellate(t0, t1, (tol * 100.0).max(len * 2e-4)).into_iter().map(|x| x.0).collect();
         // Subdivide so sign changes are not missed on curved surfaces.
         let mut w = Vec::with_capacity(v.len() * 4);
         for pair in v.windows(2) {

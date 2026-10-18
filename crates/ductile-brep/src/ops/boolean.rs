@@ -118,8 +118,17 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     let tol = ductile_geom::LINEAR_TOL * (diag / 10.0).max(0.01);
     let mesh_opts = TessOptions::for_size(diag);
     let fine_opts = TessOptions { chord_tol: (diag * 2e-5).max(tol * 10.0), angle_tol: 0.1 };
+    let timing = std::env::var_os("DUCTILE_TIME").is_some();
+    let mut clock = std::time::Instant::now();
+    let mut mark = |what: &str| {
+        if timing {
+            eprintln!("  boolean {what}: {:?}", clock.elapsed());
+            clock = std::time::Instant::now();
+        }
+    };
     let mesh_a = tessellate(a, &mesh_opts);
     let mesh_b = tessellate(b, &mesh_opts);
+    mark("mesh");
     let na_faces = a.faces.len();
     let na_edges = a.edges.len();
     let mut w = a.clone();
@@ -150,6 +159,7 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     let samples: Vec<Vec<(f64, DVec3)>> = w.edge_ids().map(|e| tessellate_edge(&w, e, &fine_opts)).collect();
     let zones: Vec<Zone> = w.face_ids().map(|f| Zone::new(&w, f, &samples, fbox[f.idx()], tol)).collect();
 
+    mark("zones");
     // 1. Edge / face crossings.
     let mut crossings: Vec<(EdgeId, DVec3)> = Vec::new();
     for e in w.edge_ids() {
@@ -163,7 +173,7 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
             let s = &w.face(f).surface;
             // Uneven fractions, so a closed curve crossing a surface at its
             // start and half-way round is not mistaken for lying in it.
-            let on = [0.0, 0.173, 0.382, 0.618, 0.851, 1.0]
+            let on = [0.382, 0.618, 0.173, 0.851, 0.0, 1.0]
                 .iter()
                 .all(|&k| ssi::distance(s, edge.curve.point(edge.t0 + (edge.t1 - edge.t0) * k)) < tol * 10.0);
             if on {
@@ -176,15 +186,15 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
                 // a vertex of the face lying on the edge nearby is the
                 // intended point.
                 // The edge's own ends count when they lie on the surface.
-                let ends = [edge.v0, edge.v1].into_iter().map(|v| w.vertex(v)).filter(|q| ssi::distance(s, *q) < tol * 10.0);
+                let close = |q: &DVec3| q.distance(p) < diag * 1e-3;
+                let ends = [edge.v0, edge.v1].into_iter().map(|v| w.vertex(v)).filter(|q| close(q) && ssi::distance(s, *q) < tol * 10.0);
                 let near = w
                     .face_edges(f)
                     .into_iter()
                     .flat_map(|fe| [w.edge(fe).v0, w.edge(fe).v1])
                     .map(|v| w.vertex(v))
-                    .filter(|q| edge.curve.point(edge.curve.closest_param_in(*q, edge.t0, edge.t1)).distance(*q) < tol * 10.0)
+                    .filter(|q| close(q) && edge.curve.point(edge.curve.closest_param_in(*q, edge.t0, edge.t1)).distance(*q) < tol * 10.0)
                     .chain(ends)
-                    .filter(|q| q.distance(p) < diag * 1e-3)
                     .min_by(|a, b| a.distance(p).total_cmp(&b.distance(p)));
                 if let Some(q) = near {
                     p = q;
@@ -234,6 +244,7 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     }
     apply_splits(&mut w, splits);
 
+    mark("crossings");
     // 2. Face / face intersections.
     let mut edge_index: HashMap<(u32, u32), Vec<EdgeId>> = HashMap::new();
     for e in w.edge_ids() {
@@ -255,8 +266,8 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
                 Some(r) => r,
                 None => {
                     let mut seeds: Vec<DVec3> = crossing_points.iter().copied().filter(|p| roi.contains(*p)).collect();
-                    seeds.extend(mesh_seeds(face_mesh(fa), &sb, 400));
-                    seeds.extend(mesh_seeds(face_mesh(fb), &sa, 400));
+                    seeds.extend(mesh_seeds(face_mesh(fa), &sb, &roi, 400));
+                    seeds.extend(mesh_seeds(face_mesh(fb), &sa, &roi, 400));
                     ssi::intersect_marching(&sa, &sb, &roi, &seeds, tol)
                 }
             };
@@ -294,6 +305,7 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
             }
         }
     }
+    mark("ssi");
     // Coincident faces imprint each other's boundary edges.
     for &(fa, fb) in &coincident {
         for (src, dst) in [(fb, fa), (fa, fb)] {
@@ -334,6 +346,8 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     struct Frag {
         orig: FaceId,
         loops: Vec<Vec<Coedge>>,
+        /// Index into the mesh of split fragments, if this is one.
+        mesh: Option<usize>,
     }
     let mut frags: Vec<Frag> = Vec::new();
     for f in w.face_ids() {
@@ -344,28 +358,37 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
                 if debug() {
                     eprintln!("face {} split into {} fragments", f.idx(), faces.len());
                 }
-                frags.extend(faces.into_iter().map(|loops| Frag { orig: f, loops }))
+                frags.extend(faces.into_iter().map(|loops| Frag { orig: f, loops, mesh: Some(0) }))
             }
             None => {
                 if !ex.is_empty() {
                     log::warn!("boolean: could not split face {}", f.idx());
                 }
                 let loops = w.face_loops(f).map(|l| l.coedges.clone()).collect();
-                frags.push(Frag { orig: f, loops });
+                frags.push(Frag { orig: f, loops, mesh: None });
             }
         }
     }
 
+    mark("split");
     // 4. Classify fragments.
+    // Only split fragments need meshing; whole faces keep their meshes.
     let mut fb_body = Body { kind: BodyKind::Sheet, vertices: w.vertices.clone(), edges: w.edges.clone(), loops: vec![], faces: vec![] };
-    for fr in &frags {
-        let face = w.face(fr.orig);
-        fb_body.add_face(face.surface.clone(), face.reversed, fr.loops.clone());
+    for fr in frags.iter_mut() {
+        if fr.mesh.is_some() {
+            let face = w.face(fr.orig);
+            fr.mesh = Some(fb_body.add_face(face.surface.clone(), face.reversed, fr.loops.clone()).idx());
+        }
     }
     let frag_mesh = tessellate(&fb_body, &mesh_opts);
+    mark("fragment mesh");
     let mut keep: Vec<(usize, bool)> = Vec::new();
     for (i, fr) in frags.iter().enumerate() {
-        let Some(p) = interior_point(&frag_mesh.faces[i]) else { continue };
+        let m = match fr.mesh {
+            Some(k) => &frag_mesh.faces[k],
+            None => face_mesh(fr.orig),
+        };
+        let Some(p) = interior_point(m) else { continue };
         // Triangle centroids sag below curved surfaces: snap onto the face.
         let surf = &w.face(fr.orig).surface;
         let uv = surf.project(p, None);
@@ -414,6 +437,7 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
         return Err(BoolError::Empty);
     }
 
+    mark("classify");
     // 5. Assemble.
     let faces: Vec<(Surface, bool, Vec<Vec<Coedge>>)> = keep
         .into_iter()
@@ -429,6 +453,7 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
         })
         .collect();
     let body = super::heal::simplify(&assemble(&w, faces, tol));
+    mark("assemble");
     let open = open_edges(&body);
     if debug() && open > 0 {
         let mut uses: HashMap<EdgeId, Vec<(usize, bool)>> = HashMap::new();
@@ -597,8 +622,29 @@ fn curve_pieces(w: &mut Body, c: &Curve3, c0: f64, c1: f64, verts: &[VertexId], 
 }
 
 /// Approximate intersection points of a face mesh with a surface.
-fn mesh_seeds(m: &FaceMesh, s: &Surface, max: usize) -> Vec<DVec3> {
-    let d: Vec<f64> = m.positions.iter().map(|p| ssi::signed_distance(s, *p)).collect();
+fn mesh_seeds(m: &FaceMesh, s: &Surface, roi: &BBox3, max: usize) -> Vec<DVec3> {
+    // Only points near the region of interest matter; each projection
+    // starts from the previous point's parameters (mesh points come in
+    // runs of neighbours).
+    let near = roi.expanded(roi.diagonal() * 0.05);
+    let mut hint = None;
+    let d: Vec<f64> = m
+        .positions
+        .iter()
+        .map(|p| {
+            if !near.contains(*p) {
+                return f64::NAN;
+            }
+            match s {
+                Surface::Nurbs(_) => {
+                    let uv = s.project(*p, hint);
+                    hint = Some(uv);
+                    (*p - s.point(uv.x, uv.y)).dot(s.normal(uv.x, uv.y))
+                }
+                _ => ssi::signed_distance(s, *p),
+            }
+        })
+        .collect();
     let mut out = Vec::new();
     for t in &m.triangles {
         for k in 0..3 {
@@ -631,7 +677,9 @@ fn interior_point(m: &FaceMesh) -> Option<DVec3> {
     let border: Vec<(DVec3, DVec3)> =
         count.iter().filter(|(_, n)| **n == 1).map(|((a, b), _)| (m.positions[*a as usize], m.positions[*b as usize])).collect();
     let mut best: Option<(f64, DVec3)> = None;
-    for t in &m.triangles {
+    // A spread of a few hundred triangles finds a point well inside.
+    let stride = (m.triangles.len() / 256).max(1);
+    for t in m.triangles.iter().step_by(stride) {
         let [a, b, c] = t.map(|i| m.positions[i as usize]);
         if (b - a).cross(c - a).length() <= 1e-14 {
             continue;
