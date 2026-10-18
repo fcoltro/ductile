@@ -21,6 +21,7 @@ pub enum Command {
     ExportStep,
     ExportStl,
     ExportObj,
+    ExportHiddenLine,
     Undo,
     Redo,
     Delete,
@@ -144,6 +145,7 @@ impl Command {
         Command::ExportStep,
         Command::ExportStl,
         Command::ExportObj,
+        Command::ExportHiddenLine,
         Command::Undo,
         Command::Redo,
         Command::Delete,
@@ -268,6 +270,7 @@ impl Command {
             ExportStep => "Export STEP…",
             ExportStl => "Export STL…",
             ExportObj => "Export OBJ…",
+            ExportHiddenLine => "Export hidden line (SVG)…",
             Undo => "Undo",
             Redo => "Redo",
             Delete => "Delete",
@@ -483,6 +486,17 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 app.status = match export_step(&app.doc, &path) {
                     Ok(n) => format!("Exported {n} shape(s) to {}", path.display()),
                     Err(e) => format!("STEP export failed: {e}"),
+                };
+            }
+        }
+        ExportHiddenLine => {
+            if let Some(mut path) = rfd::FileDialog::new().add_filter("SVG", &["svg"]).save_file() {
+                if path.extension().is_none() {
+                    path.set_extension("svg");
+                }
+                app.status = match export_hidden_line(&app.doc, &app.camera, &path, true) {
+                    Ok(()) => format!("Exported the view's lines to {}", path.display()),
+                    Err(e) => format!("Export failed: {e}"),
                 };
             }
         }
@@ -1132,6 +1146,23 @@ pub fn export_step(doc: &Document, path: &std::path::Path) -> Result<usize, Stri
     let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Ductile part");
     let mut f = std::io::BufWriter::new(std::fs::File::create(path).map_err(|e| e.to_string())?);
     ductile_io::step::write_step(&mut f, name, &objs).map_err(|e| e.to_string())
+}
+
+/// Writes the visible bodies' edges and silhouettes as seen by `camera` to an
+/// SVG file, with lines behind surfaces dashed (when `hidden`) or left out.
+pub fn export_hidden_line(doc: &Document, camera: &crate::camera::Camera, path: &std::path::Path, hidden: bool) -> Result<(), String> {
+    let objs: Vec<_> = doc.objects.iter().filter(|o| o.visible).collect();
+    let meshes: Vec<&ductile_brep::BodyMesh> = objs.iter().map(|o| o.mesh.as_ref()).collect();
+    let diag = objs.iter().map(|o| o.body.bbox()).reduce(|a, b| a.union(&b)).map_or(1.0, |b| b.diagonal());
+    let width = 1600.0;
+    let view = ductile_io::hidden_line::View {
+        view_proj: camera.view_proj(),
+        eye: (camera.projection == crate::camera::Projection::Perspective).then(|| camera.eye()),
+        forward: -camera.back(),
+        size: ductile_geom::DVec2::new(width, (width / camera.aspect.max(1e-3)).round()),
+    };
+    let d = ductile_io::hidden_line::hidden_lines(&meshes, &view, 1e-3 * diag);
+    std::fs::write(path, ductile_io::hidden_line::to_svg(&d, view.size, hidden)).map_err(|e| e.to_string())
 }
 
 fn export_mesh(doc: &Document, path: &std::path::Path, stl: bool) -> Result<(), String> {

@@ -140,6 +140,10 @@ code from them.
   shape's outline (paths, rectangles, circles, ellipses, polygons, with
   their transforms) becomes curves in a group named after the file, one
   SVG unit to one model unit, ready to extrude.
+- Hidden-line export (File > Export hidden line): the current view's edges
+  and silhouettes as an SVG drawing, with the lines behind surfaces dashed
+  in their own group. Headless: `--export-hidden-line OUT.svg` (with
+  `--camera` to choose the view).
 - STEP import (File > Import STEP, or `ductile part.step`): planes,
   cylinders, cones, spheres, tori, B-spline and rational surfaces, surfaces
   of extrusion and revolution, in any length unit. Parts written by

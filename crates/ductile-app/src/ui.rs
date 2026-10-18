@@ -39,7 +39,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                     }
                 }
                 ui.separator();
-                for c in [Command::Save, Command::SaveAs, Command::ImportStep, Command::ImportSvg, Command::ExportStep, Command::ExportStl, Command::ExportObj] {
+                for c in [Command::Save, Command::SaveAs, Command::ImportStep, Command::ImportSvg, Command::ExportStep, Command::ExportStl, Command::ExportObj, Command::ExportHiddenLine] {
                     menu_item(app, ui, c);
                 }
             });

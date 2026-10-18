@@ -31,6 +31,7 @@ fn main() -> eframe::Result {
     env_logger::init();
     let mut opts = app::Options { screenshot: None, open: None, demo: false, analysis: None, curvature: false, section: false, camera: None, select: None };
     let mut export_step: Option<std::path::PathBuf> = None;
+    let mut export_lines: Option<std::path::PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -45,6 +46,7 @@ fn main() -> eframe::Result {
             "--section" => opts.section = true,
             "--select" => opts.select = args.next().and_then(|x| x.parse().ok()),
             "--export-step" => export_step = args.next().map(Into::into),
+            "--export-hidden-line" => export_lines = args.next().map(Into::into),
             "--camera" => {
                 // x,y,z,distance,yaw,pitch (degrees)
                 let v: Vec<f64> = args.next().unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -53,11 +55,41 @@ fn main() -> eframe::Result {
                 }
             }
             "--help" | "-h" => {
-                println!("usage: ductile [FILE.ductile|FILE.step] [--demo] [--screenshot OUT.png] [--camera X,Y,Z,DIST,YAW,PITCH] [--render|--zebra|--isophote|--draft|--direction] [--curvature] [--section] [--select N] [--export-step OUT.step]");
+                println!("usage: ductile [FILE.ductile|FILE.step] [--demo] [--screenshot OUT.png] [--camera X,Y,Z,DIST,YAW,PITCH] [--render|--zebra|--isophote|--draft|--direction] [--curvature] [--section] [--select N] [--export-step OUT.step] [--export-hidden-line OUT.svg]");
                 return Ok(());
             }
             other => opts.open = Some(other.into()),
         }
+    }
+    if let Some(out) = export_lines {
+        // Headless line drawing from the given (or a framing) camera.
+        let mut doc = document::Document::default();
+        if opts.demo {
+            commands::demo_scene(&mut doc);
+        } else if let Some(p) = &opts.open {
+            if let Err(e) = commands::load_into(&mut doc, p) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        let mut cam = camera::Camera { aspect: 1.6, ..Default::default() };
+        if let Some(b) = doc.objects.iter().map(|o| o.body.bbox()).reduce(|a, b| a.union(&b)) {
+            cam.frame(b.center(), b.diagonal() * 0.3);
+        }
+        if let Some(c) = opts.camera {
+            cam.target = glam::DVec3::new(c[0], c[1], c[2]);
+            cam.distance = c[3];
+            cam.yaw = c[4].to_radians();
+            cam.pitch = c[5].to_radians();
+        }
+        match commands::export_hidden_line(&doc, &cam, &out, true) {
+            Ok(()) => println!("wrote {}", out.display()),
+            Err(e) => {
+                eprintln!("hidden line export failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
     }
     if let Some(out) = export_step {
         // Headless conversion: build the document and write it out.
