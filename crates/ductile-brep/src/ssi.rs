@@ -589,11 +589,25 @@ pub fn curve_surface_crossings(c: &Curve3, t0: f64, t1: f64, s: &Surface, tol: f
         // point tolerance; the subdivision below catches close crossings.
         let len = c.point(t0).distance(c.point(0.5 * (t0 + t1))) + c.point(0.5 * (t0 + t1)).distance(c.point(t1));
         let mut v: Vec<f64> = c.tessellate(t0, t1, (tol * 100.0).max(len * 2e-4)).into_iter().map(|x| x.0).collect();
+        // A straight edge is two samples, which can pass both sides of a
+        // narrow cylinder or sphere it crosses: keep steps below the
+        // surface's own radius of curvature too.
+        let feature = match s {
+            Surface::Cylinder { radius, .. } | Surface::Sphere { radius, .. } => Some(*radius),
+            Surface::Cone { radius, .. } => Some(radius.abs()),
+            Surface::Torus { minor, .. } => Some(*minor),
+            _ => None,
+        };
         // Subdivide so sign changes are not missed on curved surfaces.
         let mut w = Vec::with_capacity(v.len() * 4);
         for pair in v.windows(2) {
-            for k in 0..4 {
-                w.push(pair[0] + (pair[1] - pair[0]) * k as f64 / 4.0);
+            let step = c.point(pair[0]).distance(c.point(pair[1]));
+            let n = match feature {
+                Some(r) => ((step / (0.25 * r.max(len / 256.0))).ceil() as usize).clamp(4, 1024),
+                None => 4,
+            };
+            for k in 0..n {
+                w.push(pair[0] + (pair[1] - pair[0]) * k as f64 / n as f64);
             }
         }
         w.push(*v.last().unwrap());

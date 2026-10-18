@@ -1610,6 +1610,17 @@ mod tests {
     }
 
     #[test]
+    fn hole_drilled_through_filleted_edges() {
+        // The hole's rim crosses the straight edges where the fillets meet
+        // the flat faces; those edges are long next to the hole.
+        let b = bx(DVec3::ZERO, DVec3::new(4.0, 3.0, 2.0));
+        let edges: Vec<EdgeId> = b.edge_ids().collect();
+        let a = crate::ops::fillet::blend_edges(&b, &edges, crate::ops::fillet::Blend::Fillet(0.2)).unwrap();
+        let c = make_cylinder(&Frame { origin: DVec3::new(0.5, 0.5, -1.0), ..Frame::WORLD }, 0.35, 4.0);
+        identities(&a, &c);
+    }
+
+    #[test]
     fn overlapping_boxes() {
         let a = bx(DVec3::ZERO, DVec3::new(2.0, 2.0, 2.0));
         let b = bx(DVec3::new(1.0, 1.0, 1.0), DVec3::new(2.0, 2.0, 2.0));
