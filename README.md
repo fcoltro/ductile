@@ -37,7 +37,9 @@ code from them.
   NURBS fillets and chamfers with exact circular sections, and so do
   chains of tangent edges: round a box's corners, then fillet its whole
   top rim in one go; or a side edge between a spline face and a plane,
-  closed off by the caps it runs into.
+  closed off by the caps it runs into. Blends can be round, smooth (G2:
+  curvature-continuous sections that leave the faces with zero curvature,
+  for class-A reflections) or chamfered.
 - Shell (Alt+S): hollow a solid into walls of a given thickness, opening
   the selected faces, or leaving an inner void when none are selected.
   Offset solid (Alt+O) grows or shrinks a whole solid. Faces move along

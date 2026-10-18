@@ -11,7 +11,7 @@
 //! closed off by the face its ends run into (the cap of a prism).
 
 use super::fillet::{Blend, FilletError};
-use super::roll::{arc_mid, ball, move_end};
+use super::roll::{ball, move_end, section_ctrl};
 use crate::topo::{Body, Coedge, EdgeId, FaceId, VertexId};
 use ductile_geom::{Curve3, DVec2, DVec3, NurbsCurve, NurbsSurface, Surface};
 
@@ -114,7 +114,7 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
     let k = chain.len();
     let size = body.bbox().diagonal().max(1e-9);
     let reach = match blend {
-        Blend::Fillet(r) | Blend::Chamfer(r) => r,
+        Blend::Fillet(r) | Blend::Smooth(r) | Blend::Chamfer(r) => r,
     };
     // Chain vertices: start of each link, plus the end of the last one.
     let start_of = |l: &Link| {
@@ -224,16 +224,15 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
             Some(n) => n,
             None => tan,
         };
-        let (p1, p2, mid) = match blend {
-            Blend::Fillet(r) => {
+        let (p1, p2, ctrl) = match blend {
+            Blend::Fillet(r) | Blend::Smooth(r) => {
                 let sgn = if cv { -1.0 } else { 1.0 };
                 let (c, p1, p2, h1, h2) = ball(body, (fa, sa), (fb, sb), q, normal, na, nb, sgn * r, (uva, uvb)).ok_or(FilletError::TooLarge)?;
                 *hints = (Some(h1), Some(h2));
                 if p1.distance(q) > size || p2.distance(q) > size {
                     return Err(FilletError::TooLarge);
                 }
-                let (m, w) = arc_mid(c, p1, p2);
-                (p1, p2, (m, w))
+                (p1, p2, section_ctrl(blend, c, p1, p2))
             }
             Blend::Chamfer(d) => {
                 let (u1, u2) = (na.cross(tan), tan.cross(nb));
@@ -241,10 +240,13 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
                 let h2 = sb.project(q + u2 * d, Some(uvb));
                 *hints = (Some(uva), Some(uvb));
                 let (p1, p2) = (sa.point(h1.x, h1.y), sb.point(h2.x, h2.y));
-                (p1, p2, ((p1 + p2) * 0.5, 1.0))
+                (p1, p2, vec![p1.extend(1.0), ((p1 + p2) * 0.5).extend(1.0), p2.extend(1.0)])
             }
         };
-        let curve = NurbsCurve::new(2, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], vec![p1.extend(1.0), (mid.0 * mid.1).extend(mid.1), p2.extend(1.0)]);
+        let deg = ctrl.len() - 1;
+        let mut knots = vec![0.0; deg + 1];
+        knots.extend(std::iter::repeat(1.0).take(deg + 1));
+        let curve = NurbsCurve::new(deg, knots, ctrl);
         Ok(Section { p1, p2, curve })
     };
     let cap_normal = |f: FaceId| match &body.face(f).surface {
@@ -408,7 +410,7 @@ pub(crate) fn blend_reversed(surf: &NurbsSurface, blend: Blend, convex: bool, q:
     let pm = surf.point(um, vm);
     let chord_mid = (surf.point(u0, vm) + surf.point(u1, vm)) * 0.5;
     let outward = match blend {
-        Blend::Fillet(_) => {
+        Blend::Fillet(_) | Blend::Smooth(_) => {
             let away = (pm - chord_mid).normalize_or_zero();
             if convex {
                 away

@@ -1191,6 +1191,16 @@ fn arc_through(a: DVec3, b: DVec3, m: DVec3) -> Option<ductile_brep::profile::Se
 
 /// Fillet or chamfer of the selected edges of one solid, with the radius
 /// dragged along the edge's bisector.
+/// Cross-section of an edge blend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlendShape {
+    /// Circular, from a rolling ball.
+    Round,
+    /// Curvature continuous with the faces.
+    Smooth,
+    Chamfer,
+}
+
 pub struct FilletTool {
     target: ObjectId,
     body: std::sync::Arc<Body>,
@@ -1199,9 +1209,9 @@ pub struct FilletTool {
     dir: DVec3,
     start_t: Option<f64>,
     pub radius: f64,
-    pub chamfer: bool,
+    pub shape: BlendShape,
     typed: Option<f64>,
-    cache: std::cell::RefCell<Option<(f64, bool, Option<Body>, Option<String>)>>,
+    cache: std::cell::RefCell<Option<(f64, BlendShape, Option<Body>, Option<String>)>>,
 }
 
 impl FilletTool {
@@ -1224,7 +1234,8 @@ impl FilletTool {
             })
             .sum();
         let dir = (-n).try_normalize().unwrap_or(DVec3::Z);
-        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, chamfer, typed: None, cache: std::cell::RefCell::new(None) })
+        let shape = if chamfer { BlendShape::Chamfer } else { BlendShape::Round };
+        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, shape, typed: None, cache: std::cell::RefCell::new(None) })
     }
 
     fn value(&self) -> f64 {
@@ -1235,27 +1246,31 @@ impl FilletTool {
         use ductile_brep::ops::fillet::{blend_edges, Blend};
         let r = self.value();
         if let Some((cr, cc, b, e)) = &*self.cache.borrow() {
-            if *cr == r && *cc == self.chamfer {
+            if *cr == r && *cc == self.shape {
                 return (b.clone(), e.clone());
             }
         }
         let out = if r <= 1e-9 {
             (None, None)
         } else {
-            let blend = if self.chamfer { Blend::Chamfer(r) } else { Blend::Fillet(r) };
+            let blend = match self.shape {
+                BlendShape::Round => Blend::Fillet(r),
+                BlendShape::Smooth => Blend::Smooth(r),
+                BlendShape::Chamfer => Blend::Chamfer(r),
+            };
             match blend_edges(&self.body, &self.edges, blend) {
                 Ok(b) => (Some(b), None),
                 Err(e) => (None, Some(e.to_string())),
             }
         };
-        *self.cache.borrow_mut() = Some((r, self.chamfer, out.0.clone(), out.1.clone()));
+        *self.cache.borrow_mut() = Some((r, self.shape, out.0.clone(), out.1.clone()));
         out
     }
 }
 
 impl Tool for FilletTool {
     fn name(&self) -> &'static str {
-        if self.chamfer {
+        if self.shape == BlendShape::Chamfer {
             "Chamfer"
         } else {
             "Fillet"
@@ -1264,7 +1279,7 @@ impl Tool for FilletTool {
     fn hint(&self) -> String {
         match self.cache.borrow().as_ref().and_then(|c| c.3.clone()) {
             Some(e) => format!("{} failed: {e}", self.name()),
-            None => format!("{}: drag or type a {} ({:.4}), click or Enter to finish", self.name(), if self.chamfer { "distance" } else { "radius" }, self.value()),
+            None => format!("{}: drag or type a {} ({:.4}), click or Enter to finish", self.name(), if self.shape == BlendShape::Chamfer { "distance" } else { "radius" }, self.value()),
         }
     }
     fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
@@ -1288,11 +1303,15 @@ impl Tool for FilletTool {
     }
     fn panel(&mut self, ui: &mut egui::Ui) -> bool {
         let mut r = self.value();
-        let mut ch = drag_value(ui, if self.chamfer { "Distance" } else { "Radius" }, &mut r, 0.01);
+        let mut ch = drag_value(ui, if self.shape == BlendShape::Chamfer { "Distance" } else { "Radius" }, &mut r, 0.01);
         if ch {
             self.typed = Some(r.max(0.0));
         }
-        ch |= ui.checkbox(&mut self.chamfer, "Chamfer").changed();
+        ui.horizontal(|ui| {
+            for (shape, label) in [(BlendShape::Round, "Round"), (BlendShape::Smooth, "Smooth (G2)"), (BlendShape::Chamfer, "Chamfer")] {
+                ch |= ui.radio_value(&mut self.shape, shape, label).changed();
+            }
+        });
         ch
     }
     fn hidden_objects(&self) -> Vec<ObjectId> {

@@ -722,12 +722,12 @@ pub fn demo_scene(doc: &mut Document) {
     let rb = make_box(&at(-7.0, 11.0, 0.0), DVec3::new(5.0, 3.5, 2.5));
     let rb = blend_edges(&rb, &all(&rb), Blend::Fillet(0.6)).unwrap_or(rb);
     doc.add_body("Rounded box", rb);
-    // A soap bar: round the corners, then fillet the top and bottom rims
-    // as tangent chains in one go.
+    // A soap bar: round the corners, then blend the top and bottom rims as
+    // tangent chains in one go, all with curvature-continuous (G2) blends.
     let soap = make_box(&at(4.0, -11.0, 0.0), DVec3::new(6.0, 4.0, 2.0));
-    let soap = blend_edges(&soap, &pick(&soap, &|e| (e.start() - e.end()).z.abs() > 1.0), Blend::Fillet(1.2)).map(|b| ductile_brep::ops::heal::compact(&b)).unwrap_or(soap);
+    let soap = blend_edges(&soap, &pick(&soap, &|e| (e.start() - e.end()).z.abs() > 1.0), Blend::Smooth(1.2)).map(|b| ductile_brep::ops::heal::compact(&b)).unwrap_or(soap);
     let rims = pick(&soap, &|e| (e.start().z - e.end().z).abs() < 1e-9 && (e.start().z.abs() < 1e-9 || (e.start().z - 2.0).abs() < 1e-9));
-    let soap = blend_edges(&soap, &rims, Blend::Fillet(0.5)).unwrap_or(soap);
+    let soap = blend_edges(&soap, &rims, Blend::Smooth(0.5)).unwrap_or(soap);
     doc.add_body("Soap", soap);
     // Capsule end: cylinder with a hemispherical cap.
     let cap = op(make_cylinder(&at(13.0, 3.0, 0.0), 2.5, 4.0), make_sphere(DVec3::new(13.0, 3.0, 4.0), 2.5), BoolOp::Union);

@@ -22,6 +22,10 @@ use std::collections::{BTreeSet, HashMap};
 pub enum Blend {
     /// Rolling-ball fillet of the given radius.
     Fillet(f64),
+    /// Curvature-continuous (G2) blend with the same contact lines as a
+    /// fillet of the given radius: its sections leave the faces with zero
+    /// curvature, so the reflections flow across the joins.
+    Smooth(f64),
     /// Chamfer cutting the given distance back along both faces.
     Chamfer(f64),
 }
@@ -160,7 +164,7 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     let set = tooled;
     let corners = match blend {
         Blend::Fillet(r) => corner_tools(body, &set, &infos, r),
-        Blend::Chamfer(_) => Vec::new(),
+        Blend::Smooth(_) | Blend::Chamfer(_) => Vec::new(),
     };
     // Edge tools stop where the corner patches begin, so that tools of
     // neighbouring edges never overlap.
@@ -192,6 +196,10 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
 }
 
 fn edge_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> Result<Body, FilletError> {
+    // Smooth blends have no exact tool; the ball is rolled for them.
+    if matches!(blend, Blend::Smooth(_)) {
+        return Err(FilletError::Unsupported);
+    }
     let ed = b.edge(e);
     let (s1, s2) = (&b.face(info.f1).surface, &b.face(info.f2).surface);
     match (&ed.curve, s1, s2) {
@@ -214,7 +222,7 @@ fn line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> R
     let u1 = n1.cross(t);
     let u2 = t.cross(n2);
     let (profile_pts, radius) = match blend {
-        Blend::Fillet(r) => {
+        Blend::Fillet(r) | Blend::Smooth(r) => {
             let sgn = if convex { -1.0 } else { 1.0 };
             let m = DMat3::from_cols(n1, n2, t).transpose();
             let o = m.inverse() * DVec3::new(sgn * r, sgn * r, 0.0);
@@ -273,7 +281,7 @@ fn circle_tool(b: &Body, center: DVec3, pf: FaceId, cf: FaceId, info: &EdgeInfo,
     let big_r = *big_r;
     let at = |rho: f64, z: f64| center + e * rho + a * z;
     let d = match blend {
-        Blend::Fillet(r) | Blend::Chamfer(r) => r,
+        Blend::Fillet(r) | Blend::Smooth(r) | Blend::Chamfer(r) => r,
     };
     let rho_p = big_r + zs * sigma * d;
     if rho_p <= 1e-9 {
@@ -283,7 +291,7 @@ fn circle_tool(b: &Body, center: DVec3, pf: FaceId, cf: FaceId, info: &EdgeInfo,
     let qp = at(rho_p, 0.0);
     let qc = at(big_r, zs * d);
     let mid = match blend {
-        Blend::Fillet(_) => arc(at(rho_p, zs * d), qp, qc, e.cross(a)),
+        Blend::Fillet(_) | Blend::Smooth(_) => arc(at(rho_p, zs * d), qp, qc, e.cross(a)),
         Blend::Chamfer(_) => Segment::line(qp, qc),
     };
     let lp = Loop3 { segments: vec![Segment::line(corner, qp), mid, Segment::line(qc, corner)] };
@@ -506,5 +514,65 @@ mod chain_tests {
         let path = 2.0 * (w - 2.0 * c) + 2.0 * (d - 2.0 * c) + 2.0 * PI * (c - dbar);
         let expect = vol(&b) - spandrel * path;
         assert!((vol(&f) - expect).abs() < 2e-3 * spandrel * path, "{} vs {expect}", vol(&f));
+    }
+}
+
+#[cfg(test)]
+mod smooth_tests {
+    use super::*;
+    use crate::ops::boolean::open_edges;
+    use crate::ops::heal::compact;
+    use crate::tess::{tessellate, TessOptions};
+    use std::f64::consts::PI;
+
+    fn vol(b: &Body) -> f64 {
+        tessellate(b, &TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume()
+    }
+
+    /// Area cut off a right-angled corner by the smooth section with
+    /// contact points `r` from the corner (shoelace over the quintic).
+    fn smooth_corner_area(r: f64) -> f64 {
+        let ctrl = crate::ops::roll::section_ctrl(Blend::Smooth(r), DVec3::new(r, r, 0.0), DVec3::new(r, 0.0, 0.0), DVec3::new(0.0, r, 0.0));
+        let c = ductile_geom::NurbsCurve::new(5, vec![0.0; 6].into_iter().chain(vec![1.0; 6]).collect(), ctrl);
+        let n = 4000;
+        let pts: Vec<DVec3> = (0..=n).map(|i| c.point(i as f64 / n as f64)).collect();
+        // Polygon corner -> (r,0) -> curve -> (0,r) -> corner.
+        let mut poly = vec![DVec3::ZERO];
+        poly.extend(pts);
+        let mut a = 0.0;
+        for i in 0..poly.len() {
+            let (p, q) = (poly[i], poly[(i + 1) % poly.len()]);
+            a += p.x * q.y - q.x * p.y;
+        }
+        a.abs() / 2.0
+    }
+
+    #[test]
+    fn smooth_blend_on_a_box_edge() {
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let e = b.edge_ids().find(|e| {
+            let ed = b.edge(*e);
+            ed.start().z > 1.9 && ed.end().z > 1.9 && ed.start().y.abs() < 1e-9 && ed.end().y.abs() < 1e-9
+        }).unwrap();
+        let r = 0.5;
+        let f = blend_edges(&b, &[e], Blend::Smooth(r)).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        let removed = 24.0 - vol(&f);
+        let expect = smooth_corner_area(r) * 4.0;
+        // Shallower than the round fillet in the middle, flatter at the ends.
+        assert!(expect < 4.0 * r * r * (1.0 - PI / 4.0));
+        assert!((removed - expect).abs() < 1e-3 * expect, "{removed} vs {expect}");
+    }
+
+    #[test]
+    fn smooth_rims_on_a_soap_bar() {
+        let b = make_box(&Frame::WORLD, DVec3::new(6.0, 4.0, 2.0));
+        let vertical: Vec<EdgeId> = b.edge_ids().filter(|e| (b.edge(*e).start() - b.edge(*e).end()).z.abs() > 1.0).collect();
+        let b = compact(&blend_edges(&b, &vertical, Blend::Smooth(1.2)).unwrap());
+        assert_eq!(open_edges(&b), 0);
+        let rims: Vec<EdgeId> = b.edge_ids().filter(|e| (b.edge(*e).start().z - b.edge(*e).end().z).abs() < 1e-9 && b.edge(*e).start().z > 1.99).collect();
+        let f = blend_edges(&b, &rims, Blend::Smooth(0.4)).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        assert!(vol(&f) < vol(&b));
     }
 }

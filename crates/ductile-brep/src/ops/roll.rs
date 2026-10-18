@@ -46,13 +46,13 @@ pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, Fi
     // Tangent along face 1's traversal of the edge.
     let dir1 = if c1.reversed { -1.0 } else { 1.0 };
     // Sections starting at edge parameter `start`, wrapping around.
-    let sample = |start: f64| -> Result<([Vec<DVec4>; 3], bool), FilletError> {
+    let sample = |start: f64| -> Result<(Vec<Vec<DVec4>>, bool), FilletError> {
         let along = |k: usize| ed.t0 + (start - ed.t0 + period * k as f64 / n as f64).rem_euclid(period);
         let q0 = ed.curve.point(along(0));
         let mut hint1 = Some(s1.project(q0, None));
         let mut hint2 = Some(s2.project(q0, None));
         let mut convex = None;
-        let mut rows: [Vec<DVec4>; 3] = [vec![DVec4::ZERO; n], vec![DVec4::ZERO; n], vec![DVec4::ZERO; n]];
+        let mut rows: Vec<Vec<DVec4>> = vec![vec![DVec4::ZERO; n]; section_len(blend)];
         for k in 0..n {
             let t = along(k);
             let q = ed.curve.point(t);
@@ -69,8 +69,8 @@ pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, Fi
             if *convex.get_or_insert(cv) != cv {
                 return Err(FilletError::Unsupported);
             }
-            let (p1, p2, mid) = match blend {
-                Blend::Fillet(r) => {
+            let ctrl = match blend {
+                Blend::Fillet(r) | Blend::Smooth(r) => {
                     let sgn = if cv { -1.0 } else { 1.0 };
                     let (c, p1, p2, h1, h2) = ball(body, (f1, s1), (f2, s2), q, tan, n1, n2, sgn * r, (uv1, uv2)).ok_or(FilletError::TooLarge)?;
                     hint1 = Some(h1);
@@ -78,8 +78,7 @@ pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, Fi
                     if p1.distance(q) > size || p2.distance(q) > size {
                         return Err(FilletError::TooLarge);
                     }
-                    // One rational quadratic arc, exact for sweeps under 180°.
-                    (p1, p2, Some(arc_mid(c, p1, p2)))
+                    section_ctrl(blend, c, p1, p2)
                 }
                 Blend::Chamfer(d) => {
                     let t1 = tan * dir1;
@@ -88,10 +87,13 @@ pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, Fi
                     let h2 = s2.project(q + u2 * d, Some(uv2));
                     hint1 = Some(uv1);
                     hint2 = Some(uv2);
-                    (s1.point(h1.x, h1.y), s2.point(h2.x, h2.y), None)
+                    let (p1, p2) = (s1.point(h1.x, h1.y), s2.point(h2.x, h2.y));
+                    vec![p1.extend(1.0), ((p1 + p2) * 0.5).extend(1.0), p2.extend(1.0)]
                 }
             };
-            set_section(&mut rows, k, p1, p2, mid);
+            for (row, h) in rows.iter_mut().zip(ctrl) {
+                row[k] = h;
+            }
         }
         Ok((rows, convex.unwrap_or(true)))
     };
@@ -109,7 +111,7 @@ pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, Fi
     let crossing = match (seam_of(f1), seam_of(f2)) {
         (Some(_), Some(_)) => return Err(FilletError::Unsupported),
         (Some(x), None) => Some((x, 0)),
-        (None, Some(x)) => Some((x, 2)),
+        (None, Some(x)) => Some((x, section_len(blend) - 1)),
         (None, None) => None,
     };
     if let Some((x, row)) = crossing {
@@ -136,13 +138,13 @@ pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, Fi
         // The contact curve's parameter is not the edge's: map the estimate
         // through the section spacing, then polish the start with secant
         // steps on the lead contact point's offset from the seam.
-        let point = |r: &[Vec<DVec4>; 3], j: usize| r[row][j].truncate() / r[row][j].w;
+        let point = |r: &Vec<Vec<DVec4>>, j: usize| r[row][j].truncate() / r[row][j].w;
         let k = (best.rem_euclid(1.0) * n as f64).floor() as usize % n;
         let (pk, pk1) = (point(&rows, k), point(&rows, (k + 1) % n));
         let target = contact.point(best.rem_euclid(1.0));
         let frac = ((target - pk).dot(pk1 - pk) / (pk1 - pk).length_squared().max(1e-300)).clamp(-1.0, 2.0);
         let mut start = ed.t0 + period * (k as f64 + frac) / n as f64;
-        let offset = |r: &[Vec<DVec4>; 3]| {
+        let offset = |r: &Vec<Vec<DVec4>>| {
             let p = point(r, 0);
             let t = seam.curve.closest_param_in(p, seam.t0, seam.t1);
             let along = point(r, 1) - p;
@@ -179,8 +181,9 @@ pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, Fi
         let on_seam = seam.curve.point(seam.curve.closest_param_in(p, seam.t0, seam.t1));
         rows[row][0] = on_seam.extend(1.0);
         // Keep the arc's middle control point consistent with its end.
-        let w = rows[1][0].w;
-        rows[1][0] += ((on_seam - p) * 0.5 * w).extend(0.0);
+        let next = if row == 0 { 1 } else { row - 1 };
+        let w = rows[next][0].w;
+        rows[next][0] += ((on_seam - p) * 0.5 * w).extend(0.0);
     }
     let surf = skin_rows(&rows);
 
@@ -227,7 +230,7 @@ pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, Fi
     let away = (pm - chord_mid).normalize_or_zero();
     let geo = Surface::Nurbs(surf.clone()).normal(um, vm);
     let outward = match blend {
-        Blend::Fillet(_) => {
+        Blend::Fillet(_) | Blend::Smooth(_) => {
             if convex {
                 away
             } else {
@@ -250,28 +253,46 @@ pub fn roll_closed_edge(body: &Body, e: EdgeId, blend: Blend) -> Result<Body, Fi
     Ok(out)
 }
 
-/// Blend surface through the section rows: u across the sections
-/// (quadratic), v around the edge (closed cubic).
-fn skin_rows(rows: &[Vec<DVec4>; 3]) -> NurbsSurface {
+/// Blend surface through the section rows: u across the sections (one row
+/// per section control point), v around the edge (closed cubic).
+fn skin_rows(rows: &[Vec<DVec4>]) -> NurbsSurface {
+    let nu = rows.len();
     let columns: Vec<(Vec<f64>, Vec<DVec4>)> = rows.iter().map(|r| interpolate_closed_hom(r)).collect();
     let knots_v = columns[0].0.clone();
     let nv = columns[0].1.len();
-    let mut ctrl = vec![DVec4::ZERO; 3 * nv];
+    let mut ctrl = vec![DVec4::ZERO; nu * nv];
     for (i, (_, col)) in columns.iter().enumerate() {
         for (j, h) in col.iter().enumerate() {
             ctrl[i * nv + j] = *h;
         }
     }
-    NurbsSurface::new(2, 3, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0], knots_v, 3, nv, ctrl)
+    let mut knots_u = vec![0.0; nu];
+    knots_u.extend(std::iter::repeat(1.0).take(nu));
+    NurbsSurface::new(nu - 1, 3, knots_u, knots_v, nu, nv, ctrl)
 }
 
-fn set_section(rows: &mut [Vec<DVec4>; 3], k: usize, p1: DVec3, p2: DVec3, mid: Option<(DVec3, f64)>) {
-    rows[0][k] = p1.extend(1.0);
-    rows[2][k] = p2.extend(1.0);
-    rows[1][k] = match mid {
-        Some((m, w)) => (m * w).extend(w),
-        None => ((p1 + p2) * 0.5).extend(1.0),
-    };
+/// Control points per blend section.
+pub(crate) fn section_len(blend: Blend) -> usize {
+    match blend {
+        Blend::Smooth(_) => 6,
+        _ => 3,
+    }
+}
+
+/// Homogeneous control points of a blend section from `p1` to `p2` for a
+/// ball centred at `c`: one rational quadratic arc for a fillet (exact for
+/// sweeps under 180°), or for a smooth blend a quintic whose first and last
+/// three points lie on the faces' tangents, so it leaves both faces with
+/// zero curvature.
+pub(crate) fn section_ctrl(blend: Blend, c: DVec3, p1: DVec3, p2: DVec3) -> Vec<DVec4> {
+    let (x, w) = arc_mid(c, p1, p2);
+    match blend {
+        Blend::Smooth(_) => {
+            let (a, b) = (0.3, 0.6);
+            [p1, p1.lerp(x, a), p1.lerp(x, b), p2.lerp(x, b), p2.lerp(x, a), p2].iter().map(|p| p.extend(1.0)).collect()
+        }
+        _ => vec![p1.extend(1.0), (x * w).extend(w), p2.extend(1.0)],
+    }
 }
 
 /// Middle control point and weight of the rational quadratic arc from `p1`
