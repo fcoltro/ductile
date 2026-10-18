@@ -141,6 +141,45 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     if ra.is_some() || rb.is_some() {
         return boolean(ra.as_ref().unwrap_or(a), rb.as_ref().unwrap_or(b), op);
     }
+    let first = boolean_once(a, b, op);
+    if !matches!(first, Err(BoolError::Open(_))) {
+        return first;
+    }
+    // A section running along a whole torus's seam leaves the seam's
+    // stretch of it ambiguous; the same torus turned about its axis has
+    // the seam elsewhere.
+    for k in 1..4 {
+        let angle = 0.61 * k as f64;
+        let (ta, tb) = (turned_torus(a, angle), turned_torus(b, angle));
+        if ta.is_none() && tb.is_none() {
+            break;
+        }
+        let r = boolean_once(ta.as_ref().unwrap_or(a), tb.as_ref().unwrap_or(b), op);
+        if r.is_ok() {
+            return r;
+        }
+    }
+    first
+}
+
+/// A whole torus (one face) rebuilt with its seams turned by `angle` about
+/// its axis.
+fn turned_torus(a: &Body, angle: f64) -> Option<Body> {
+    use ductile_geom::{DQuat, Frame};
+    if a.faces.len() != 1 {
+        return None;
+    }
+    let Surface::Torus { frame, major, minor } = &a.faces[0].surface else { return None };
+    let q = DQuat::from_axis_angle(frame.z, angle);
+    let f = Frame { origin: frame.origin, x: q * frame.x, y: q * frame.y, z: frame.z };
+    let mut t = crate::primitives::make_torus(&f, *major, *minor);
+    if a.faces[0].reversed != t.faces[0].reversed {
+        t = crate::primitives::flip_orientation(t);
+    }
+    Some(t)
+}
+
+fn boolean_once(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     let diag = a.bbox().union(&b.bbox()).diagonal().max(1e-9);
     let tol = ductile_geom::LINEAR_TOL * (diag / 10.0).max(0.01);
     let mesh_opts = TessOptions::for_size(diag);
@@ -1560,6 +1599,14 @@ mod tests {
         let c = make_cylinder(&Frame::new(DVec3::new(-0.5, 0.5, -0.5), DVec3::Z, DVec3::Z.any_orthonormal_vector()), 1.25, 2.5);
         let s = make_sphere(DVec3::new(-0.010249256356415382, 0.0, 0.0), 0.75);
         identities(&c, &s);
+    }
+
+    #[test]
+    fn torus_section_along_the_other_torus_seam() {
+        // The section runs within 0.004 of B's seam meridian.
+        let a = make_torus(&Frame::new(DVec3::new(0.9960875483932841, -0.5, 0.0), DVec3::X, DVec3::X.any_orthonormal_vector()), 1.2, 0.4);
+        let b = make_torus(&Frame::new(DVec3::new(1.0, -0.5, -0.5516835623365264), DVec3::Z, DVec3::Z.any_orthonormal_vector()), 1.5, 0.5);
+        identities(&a, &b);
     }
 
     #[test]
