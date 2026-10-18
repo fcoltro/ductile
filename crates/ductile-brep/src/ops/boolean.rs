@@ -319,6 +319,12 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
                         if let Ssi::Curves(cs) = &r {
                             for (c, c0, c1) in cs {
                                 eprintln!("   curve {:.4} -> {:.4}", c.point(*c0), c.point(*c1));
+                                if std::env::var_os("DUCTILE_DEBUG_CURVE").is_some() {
+                                    for k in 0..=40 {
+                                        let t = c0 + (c1 - c0) * k as f64 / 40.0;
+                                        eprintln!("      t {t:.4} {:.4}", c.point(t));
+                                    }
+                                }
                             }
                         }
                     }
@@ -402,6 +408,10 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
             for i in 0..list.len() {
                 for j in i + 1..list.len() {
                     let Some(p) = edge_edge_crossing(&w, list[i], list[j], &samples, tol) else { continue };
+                    if debug() {
+                        let (a, b) = (w.edge(list[i]), w.edge(list[j]));
+                        eprintln!("self-crossing e{} [{:.4}..{:.4}] {:.4}->{:.4} x e{} [{:.4}..{:.4}] {:.4}->{:.4} at {p:.4}", list[i].0, a.t0, a.t1, a.start(), a.end(), list[j].0, b.t0, b.t1, b.start(), b.end());
+                    }
                     let v = find_vertex(&w, p, tol * 10.0).unwrap_or_else(|| w.add_vertex(p));
                     for e in [list[i], list[j]] {
                         let ed = w.edge(e);
@@ -1541,6 +1551,15 @@ mod tests {
         let c = make_frustum(&Frame::new(DVec3::new(-0.5, -0.3252664789699078, -0.15727473618939336), DVec3::X, DVec3::X.any_orthonormal_vector()), 1.0, 0.4, 2.0);
         let b = make_box(&Frame::new(DVec3::new(1.0, 0.0, 1.0), DVec3::Y, DVec3::Y.any_orthonormal_vector()), DVec3::new(2.0, 1.5, 1.5));
         identities(&c, &b);
+    }
+
+    #[test]
+    fn sphere_poking_through_a_cylinder_bottom_rim() {
+        // The section loop dips just below the cylinder's bottom and the
+        // trace runs nearly all the way round before leaving the box.
+        let c = make_cylinder(&Frame::new(DVec3::new(-0.5, 0.5, -0.5), DVec3::Z, DVec3::Z.any_orthonormal_vector()), 1.25, 2.5);
+        let s = make_sphere(DVec3::new(-0.010249256356415382, 0.0, 0.0), 0.75);
+        identities(&c, &s);
     }
 
     #[test]

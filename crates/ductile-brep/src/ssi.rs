@@ -488,11 +488,15 @@ fn extend_to_end(a: &Surface, b: &Surface, pts: &mut Vec<DVec3>, front: bool, en
     }
     let (p, q) = if front { (pts[0], pts[1]) } else { (pts[pts.len() - 1], pts[pts.len() - 2]) };
     let ahead = (p - q).normalize_or_zero();
+    let on_both = |e: DVec3| distance(a, e) < tol * 10.0 && distance(b, e) < tol * 10.0;
+    // An end the trace already runs through needs no reaching for (the
+    // trace may have carried on past it and out of the box).
+    let passed = |e: DVec3| pts.windows(2).any(|w| dist_point_segment3(e, w[0], w[1]) < (w[0].distance(w[1]) * 0.02).max(tol * 10.0));
     let Some(&e) = ends
         .iter()
         .filter(|e| {
             let d = **e - p;
-            d.length() > tol * 10.0 && d.length() < max_step * 2.0 && d.normalize().dot(ahead) > 0.5 && distance(a, **e) < tol * 10.0 && distance(b, **e) < tol * 10.0
+            d.length() > tol * 10.0 && d.length() < max_step * 2.0 && d.normalize().dot(ahead) > 0.5 && on_both(**e) && !passed(**e)
         })
         .min_by(|x, y| x.distance(p).total_cmp(&y.distance(p)))
     else {
@@ -558,7 +562,8 @@ fn trace(a: &Surface, b: &Surface, p0: DVec3, t0: DVec3, roi: &BBox3, tol: f64, 
         }
         travelled += seg;
         // Closing the loop?
-        if travelled > h * 3.0 && q.distance(p0) < h * 1.1 && pts.len() > 3 {
+        // The step may stride past the start, so test the step's segment.
+        if travelled > h * 3.0 && pts.len() > 3 && (q.distance(p0) < h * 1.1 || dist_point_segment3(p0, p, q) < (seg * 0.5).max(tol * 10.0)) {
             return (pts, true);
         }
         if !roi.contains(q) {
