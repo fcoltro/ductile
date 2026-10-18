@@ -250,7 +250,6 @@ impl NurbsSurface {
         }
         let cs = make_compatible(sections);
         let k = cs.len();
-        let q = degree_v.min(k - 1);
         let nu = cs[0].ctrl.len();
         // Average chord parameterization across control columns.
         let mut params = vec![0.0; k];
@@ -265,6 +264,24 @@ impl NurbsSurface {
             }
         }
         params[k - 1] = 1.0;
+        Self::skin(cs, degree_v, &params)
+    }
+
+    /// Loft with the sections placed at the given v parameters (increasing,
+    /// 0 to 1). Surfaces lofted from matching sections with the same
+    /// parameters share their boundary iso-curves exactly.
+    pub fn loft_with_params(sections: &[NurbsCurve], degree_v: usize, params: &[f64]) -> Self {
+        assert!(sections.len() >= 2 && params.len() == sections.len());
+        if sections.len() == 2 {
+            return Self::ruled(&sections[0], &sections[1]);
+        }
+        Self::skin(make_compatible(sections), degree_v, params)
+    }
+
+    fn skin(cs: Vec<NurbsCurve>, degree_v: usize, params: &[f64]) -> Self {
+        let k = cs.len();
+        let q = degree_v.min(k - 1);
+        let nu = cs[0].ctrl.len();
         let mut knots_v = vec![0.0; q + 1];
         for j in 1..k - q {
             knots_v.push(params[j..j + q].iter().sum::<f64>() / q as f64);

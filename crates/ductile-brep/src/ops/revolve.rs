@@ -27,7 +27,7 @@ pub fn revolve(profile: &Loop3, origin: DVec3, axis: DVec3, angle: f64) -> Optio
     let a = axis.try_normalize()?;
     let tol = 1e-9 * (1.0 + profile.polygon(1e-2).iter().map(|p| p.length()).fold(0.0, f64::max));
     let n = profile.segments.len();
-    if n < 2 || !profile.is_closed() {
+    if n < 1 || !profile.is_closed() {
         return None;
     }
     // Radial direction of the profile half plane.

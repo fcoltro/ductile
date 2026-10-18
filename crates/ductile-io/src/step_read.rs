@@ -523,7 +523,7 @@ impl Reader<'_> {
         // Our edges run along increasing curve parameter.
         let (va, vb, flipped) = if same { (v_start, v_end, false) } else { (v_end, v_start, true) };
         let (pa, pb) = (b.vertex(va), b.vertex(vb));
-        let ta = curve.closest_param(pa);
+        let mut ta = curve.closest_param(pa);
         let mut tb = curve.closest_param(pb);
         match curve.period() {
             Some(per) => {
@@ -535,6 +535,13 @@ impl Reader<'_> {
                 }
             }
             None => {
+                // A closed spline's ends coincide, so its end vertex can
+                // project onto its start; take the whole curve then.
+                let (d0, d1) = curve.natural_domain();
+                let tol = 1e-7 * (1.0 + pa.length());
+                if tb <= ta && curve.point(d0).distance(curve.point(d1)) < tol && pa.distance(pb) < tol {
+                    (ta, tb) = (d0, d1);
+                }
                 if tb <= ta {
                     return Err(format!("edge #{id} runs against its curve"));
                 }

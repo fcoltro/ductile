@@ -26,6 +26,9 @@ code from them.
 - Revolve (V) closed curves by any angle about a selected edge or the
   construction plane axes; exact planes, cylinders, cones, spheres, tori,
   and NURBS surfaces of revolution for splines.
+- Loft (Alt+L) through two or more closed curves, keeping corners as edges
+  when the profiles match; Sweep (Alt+W) a closed curve along an open path
+  with a rotation-minimizing frame (exact for straight and circular paths).
 - Fillets (Shift+F) and chamfers (Shift+K) on edges between planes, on
   circular plane/cylinder edges (boss and hole rims), with spherical corner
   patches where three filleted edges meet.
@@ -38,7 +41,7 @@ code from them.
   (`crates/ductile-io/tests/occ_import.rs`).
 - Move / rotate / scale / mirror, undo/redo.
 
-In progress: curve editing, sweep and loft, general
+In progress: curve editing, mitred sweeps around sharp path corners, general
 rolling-ball NURBS fillets, STEP assemblies.
 
 ## Layout

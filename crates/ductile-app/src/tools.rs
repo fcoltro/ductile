@@ -657,6 +657,64 @@ pub fn selected_curve_regions(doc: &Document) -> Vec<ductile_brep::profile::Regi
     }
 }
 
+/// Chains of the selected wire objects; separately drawn curves that meet
+/// end to end join up.
+fn selected_chains(doc: &Document) -> Vec<ductile_brep::profile::Loop3> {
+    use ductile_brep::profile::{wire_chains, wire_from_segments, Segment};
+    let segs: Vec<Segment> = doc
+        .selected_objects()
+        .iter()
+        .filter_map(|id| doc.object(*id))
+        .filter(|o| o.body.kind == ductile_brep::BodyKind::Wire)
+        .flat_map(|o| o.body.edges.iter().map(|e| Segment::new(e.curve.clone(), e.t0, e.t1)).collect::<Vec<_>>())
+        .collect();
+    wire_chains(&wire_from_segments(&segs))
+}
+
+/// Lofts a solid through the selected closed curves, ordered along the
+/// line through the two profiles farthest apart.
+pub fn loft_selected(doc: &Document) -> Result<Body, String> {
+    let mut loops: Vec<_> = selected_chains(doc).into_iter().filter(|l| l.is_closed()).collect();
+    if loops.len() < 2 {
+        return Err("Loft: select two or more closed curves".into());
+    }
+    let centroid = |l: &ductile_brep::profile::Loop3| {
+        let p = l.polygon(1e-2);
+        p.iter().copied().sum::<DVec3>() / p.len() as f64
+    };
+    let cs: Vec<DVec3> = loops.iter().map(centroid).collect();
+    let (mut a, mut b) = (0, 1);
+    for i in 0..cs.len() {
+        for j in i + 1..cs.len() {
+            if cs[i].distance(cs[j]) > cs[a].distance(cs[b]) {
+                (a, b) = (i, j);
+            }
+        }
+    }
+    let axis = cs[b] - cs[a];
+    loops.sort_by(|x, y| centroid(x).dot(axis).total_cmp(&centroid(y).dot(axis)));
+    ductile_brep::ops::loft::loft(&loops).ok_or_else(|| "Loft failed: the profiles must be planar and apart".into())
+}
+
+/// Sweeps the selected closed curve along the selected open one.
+pub fn sweep_selected(doc: &Document) -> Result<Body, String> {
+    let chains = selected_chains(doc);
+    let (closed, open): (Vec<_>, Vec<_>) = chains.into_iter().partition(|l| l.is_closed());
+    let (Some(profile), Some(path)) = (closed.first(), open.first()) else {
+        return Err("Sweep: select a closed profile curve and an open path curve".into());
+    };
+    if closed.len() > 1 || open.len() > 1 {
+        return Err("Sweep: select one profile and one path".into());
+    }
+    // Run the path from the end nearer the profile.
+    let pc = {
+        let p = profile.polygon(1e-2);
+        p.iter().copied().sum::<DVec3>() / p.len() as f64
+    };
+    let path = if path.segments.last().unwrap().end().distance(pc) < path.segments[0].start().distance(pc) { path.reversed() } else { path.clone() };
+    ductile_brep::ops::sweep::sweep(profile, &path.segments).ok_or_else(|| "Sweep failed".into())
+}
+
 impl ExtrudeTool {
     /// Starts on the first selected planar face, or else on the regions of
     /// the selected closed curves.
@@ -1451,6 +1509,36 @@ mod tests {
         assert!(line.commit(&mut doc));
         doc.selection.insert(Pick::Object(a));
         assert!((extrude_selected(&mut doc) - 2.0 * PI).abs() < 1e-2);
+    }
+
+    #[test]
+    fn loft_and_sweep_from_drawn_curves() {
+        use std::f64::consts::PI;
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        // Two squares drawn on the plane, the second lifted 3 up.
+        for (c, h) in [(DVec3::new(0.0, 0.0, 3.0), 1.0), (DVec3::ZERO, 2.0)] {
+            let mut r = CurveTool::new(CurveKind::Rectangle);
+            click(&mut r, &doc, c - DVec3::new(h, h, 0.0), true);
+            assert!(click(&mut r, &doc, c + DVec3::new(h, h, 0.0), true));
+            assert!(r.commit(&mut doc));
+        }
+        doc.selection = doc.objects.iter().map(|o| Pick::Object(o.id)).collect();
+        let b = loft_selected(&doc).unwrap();
+        assert!((volume(&b) - 28.0).abs() < 1e-6, "{}", volume(&b));
+
+        // A circle swept along a polyline leg.
+        let mut doc = Document::default();
+        let mut c = CurveTool::new(CurveKind::Circle);
+        click(&mut c, &doc, DVec3::ZERO, true);
+        c.typed_value(Some(0.5));
+        assert!(c.commit(&mut doc));
+        // The path runs off the construction plane, so build it directly.
+        let path = ductile_brep::profile::wire_from_segments(&[ductile_brep::profile::Segment::line(DVec3::new(0.0, 0.0, 4.0), DVec3::ZERO)]);
+        doc.add_body("Path", path);
+        doc.selection = doc.objects.iter().map(|o| Pick::Object(o.id)).collect();
+        let b = sweep_selected(&doc).unwrap();
+        assert!((volume(&b) - PI * 0.25 * 4.0).abs() < 1e-2, "{}", volume(&b));
     }
 
     #[test]

@@ -45,6 +45,8 @@ pub enum Command {
     Polygon,
     Extrude,
     Revolve,
+    Loft,
+    Sweep,
     Fillet,
     Chamfer,
     Union,
@@ -106,6 +108,8 @@ impl Command {
         Command::Polygon,
         Command::Extrude,
         Command::Revolve,
+        Command::Loft,
+        Command::Sweep,
         Command::Fillet,
         Command::Chamfer,
         Command::Union,
@@ -168,6 +172,8 @@ impl Command {
             Polygon => "Polygon",
             Extrude => "Extrude face or curves",
             Revolve => "Revolve curves",
+            Loft => "Loft",
+            Sweep => "Sweep",
             Fillet => "Fillet edges",
             Chamfer => "Chamfer edges",
             Union => "Boolean union",
@@ -230,6 +236,8 @@ impl Command {
             Fillet => "Shift+F",
             Chamfer => "Shift+K",
             Union => "Shift+U",
+            Loft => "Alt+L",
+            Sweep => "Alt+W",
             Subtract => "Shift+D",
             Intersect => "Shift+I",
             Move => "G",
@@ -284,6 +292,8 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::E, false, true, false) => Ellipse,
         (Key::P, false, true, false) => Polygon,
         (Key::V, false, false, false) => Revolve,
+        (Key::L, false, false, true) => Loft,
+        (Key::W, false, false, true) => Sweep,
         (Key::F, false, true, false) => Fillet,
         (Key::K, false, true, false) => Chamfer,
         (Key::U, false, true, false) => Union,
@@ -465,6 +475,19 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             None => app.status = "Select edges to blend (edge mode: 2)".into(),
         },
         Union => boolean_selected(app, BoolOp::Union),
+        Loft | Sweep => {
+            let (name, res) = if cmd == Loft { ("Loft", crate::tools::loft_selected(&app.doc)) } else { ("Sweep", crate::tools::sweep_selected(&app.doc)) };
+            match res {
+                Ok(b) => {
+                    app.doc.checkpoint(name);
+                    let id = app.doc.add_body(name, b);
+                    app.doc.selection.clear();
+                    app.doc.selection.insert(Pick::Object(id));
+                    app.status = format!("{name} done");
+                }
+                Err(e) => app.status = e,
+            }
+        }
         Subtract => boolean_selected(app, BoolOp::Difference),
         Intersect => boolean_selected(app, BoolOp::Intersection),
         Move | Rotate | Scale => {
@@ -728,6 +751,27 @@ pub fn demo_scene(doc: &mut Document) {
         };
         if let Some(b) = ductile_brep::ops::revolve::revolve_loop(&l, c, DVec3::Z) {
             doc.add_body("Vase", b);
+        }
+    }
+    // A loft from a circle to a rounded square, and a tube swept along a spline.
+    {
+        use ductile_brep::profile::{Loop3, Segment};
+        use ductile_geom::Curve3;
+        let c = DVec3::new(26.0, 4.0, 0.0);
+        let circle = Loop3 { segments: vec![Segment::new(Curve3::Circle { frame: Frame { origin: c, ..Frame::WORLD }, radius: 2.5 }, 0.0, std::f64::consts::TAU)] };
+        let mid = Loop3 { segments: vec![Segment::new(Curve3::Circle { frame: Frame { origin: c + DVec3::Z * 2.5, ..Frame::WORLD }, radius: 1.6 }, 0.0, std::f64::consts::TAU)] };
+        let top = c + DVec3::Z * 5.0;
+        let q = [top + DVec3::new(-2.0, -2.0, 0.0), top + DVec3::new(2.0, -2.0, 0.0), top + DVec3::new(2.0, 2.0, 0.0), top + DVec3::new(-2.0, 2.0, 0.0)];
+        let square = Loop3 { segments: (0..4).map(|i| Segment::line(q[i], q[(i + 1) % 4])).collect() };
+        if let Some(b) = ductile_brep::ops::loft::loft(&[circle, mid, square]) {
+            doc.add_body("Loft", b);
+        }
+        let pts = [DVec3::new(-14.0, 6.0, 0.6), DVec3::new(-10.0, 10.0, 1.5), DVec3::new(-6.0, 7.0, 3.0), DVec3::new(-2.0, 12.0, 2.0)];
+        let path = ductile_geom::NurbsCurve::interpolate(&pts, 3);
+        let (t0, t1) = path.domain();
+        let tube = Loop3 { segments: vec![Segment::new(Curve3::Circle { frame: Frame::new(pts[0], path.tangent(t0), DVec3::Z), radius: 0.6 }, 0.0, std::f64::consts::TAU)] };
+        if let Some(b) = ductile_brep::ops::sweep::sweep(&tube, &[Segment::new(Curve3::Nurbs(path), t0, t1)]) {
+            doc.add_body("Tube", b);
         }
     }
     doc.dirty = false;

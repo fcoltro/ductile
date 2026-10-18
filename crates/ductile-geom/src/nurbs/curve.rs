@@ -278,8 +278,13 @@ impl NurbsCurve {
 
     /// Approximate arc length by adaptive Simpson-free Gauss quadrature per span.
     pub fn length(&self) -> f64 {
+        // Per knot span: the speed can jump at a C0 knot.
         let (a, b) = self.domain();
-        gauss_length(|t| self.derivs(t, 1)[1].length(), a, b, 64)
+        let mut spans: Vec<f64> = self.knots.iter().copied().filter(|k| *k > a && *k < b).collect();
+        spans.dedup();
+        let bounds: Vec<f64> = std::iter::once(a).chain(spans).chain(std::iter::once(b)).collect();
+        let per = (64 / (bounds.len() - 1)).max(8);
+        bounds.windows(2).map(|w| gauss_length(|t| self.derivs(t, 1)[1].length(), w[0], w[1], per)).sum()
     }
 
     /// Parameter of the closest point to `p` (sampling + Newton).
@@ -369,6 +374,32 @@ impl NurbsCurve {
         }
         let ctrl = solve_dense(a, pts.to_vec());
         Self::from_points(p, knots, &ctrl)
+    }
+
+    /// Joins curves that meet end to start into one curve, each piece
+    /// taking a parameter span equal to its length. Joints are C0 knots.
+    pub fn join(curves: &[NurbsCurve]) -> Self {
+        let p = curves.iter().map(|c| c.degree).max().unwrap();
+        let mut knots: Vec<f64> = Vec::new();
+        let mut ctrl: Vec<DVec4> = Vec::new();
+        let mut start = 0.0;
+        for (i, c) in curves.iter().enumerate() {
+            let len = c.length().max(1e-12);
+            let mut c = c.elevated_to(p).reparameterized(start, start + len);
+            if i == 0 {
+                knots.extend_from_slice(&c.knots[..c.knots.len() - 1]);
+                ctrl.extend_from_slice(&c.ctrl);
+            } else {
+                // Scale the homogeneous points so the shared end weights agree.
+                let s = ctrl.last().unwrap().w / c.ctrl[0].w;
+                c.ctrl.iter_mut().for_each(|h| *h *= s);
+                knots.extend_from_slice(&c.knots[p + 1..c.knots.len() - 1]);
+                ctrl.extend_from_slice(&c.ctrl[1..]);
+            }
+            start += len;
+        }
+        knots.push(start);
+        Self::new(p, knots, ctrl)
     }
 
     /// Closed C2 cubic through `pts` (the first point is not repeated),
@@ -529,6 +560,23 @@ where
 mod tests {
     use super::*;
     use std::f64::consts::PI;
+
+    #[test]
+    fn join_keeps_pieces() {
+        let f = Frame::WORLD;
+        let a = NurbsCurve::line(DVec3::new(1.0, -1.0, 0.0), DVec3::new(1.0, 0.0, 0.0));
+        let b = NurbsCurve::arc(&f, 1.0, 0.0, PI);
+        let c = NurbsCurve::line(DVec3::new(-1.0, 0.0, 0.0), DVec3::new(1.0, -1.0, 0.0));
+        let j = NurbsCurve::join(&[a.clone(), b.clone(), c.clone()]);
+        assert!((j.length() - (a.length() + b.length() + c.length())).abs() < 1e-6);
+        assert!(j.point(j.domain().0).distance(DVec3::new(1.0, -1.0, 0.0)) < 1e-12);
+        assert!(j.point(j.domain().1).distance(DVec3::new(1.0, -1.0, 0.0)) < 1e-12);
+        // The arc part stays round.
+        for i in 0..=20 {
+            let t = 1.0 + PI * i as f64 / 20.0;
+            assert!((j.point(t).length() - 1.0).abs() < 1e-9, "{t}");
+        }
+    }
 
     #[test]
     fn closed_interpolation_is_c2_through_points() {
