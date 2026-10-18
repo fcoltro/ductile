@@ -4745,6 +4745,42 @@ mod tests {
     }
 
     #[test]
+    fn tangent_circle_between_two_lines_and_inside_a_triangle() {
+        use ductile_brep::profile::{wire_from_segments, Segment};
+        let mut doc = Document::default();
+        // An L of two lines meeting at the origin, and a diagonal closing it.
+        doc.add_body("X", wire_from_segments(&[Segment::line(DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0))]));
+        doc.add_body("Y", wire_from_segments(&[Segment::line(DVec3::ZERO, DVec3::new(0.0, 10.0, 0.0))]));
+        let mut t = TangentCircleTool::new(&doc);
+        click(&mut t, &doc, DVec3::new(5.0, 0.0, 0.0), true);
+        click(&mut t, &doc, DVec3::new(0.0, 5.0, 0.0), true);
+        assert_eq!(t.picked.len(), 2);
+        // The cursor at (3, 2) sizes the circle to the bisector's (2.5, 2.5).
+        click(&mut t, &doc, DVec3::new(3.0, 2.0, 0.0), false);
+        assert!((t.radius - 2.5).abs() < 1e-6, "{}", t.radius);
+        t.typed_value(Some(1.0));
+        assert!(click(&mut t, &doc, DVec3::new(3.0, 2.0, 0.0), true));
+        assert!(t.commit(&mut doc));
+        let ductile_geom::Curve3::Circle { frame, radius } = &doc.objects.last().unwrap().body.edges[0].curve else { panic!() };
+        assert!(frame.origin.distance(DVec3::new(1.0, 1.0, 0.0)) < 1e-6 && (*radius - 1.0).abs() < 1e-12, "{}", frame.origin);
+        // The incircle of the 3-4-5 triangle has radius 1 at (1, 1).
+        let ts = [
+            Tangency::from_edge(&ductile_geom::Curve3::Line { origin: DVec3::ZERO, dir: DVec3::X }, 0.0, 4.0),
+            Tangency::from_edge(&ductile_geom::Curve3::Line { origin: DVec3::ZERO, dir: DVec3::Y }, 0.0, 3.0),
+            Tangency::from_edge(&ductile_geom::Curve3::Line { origin: DVec3::new(4.0, 0.0, 0.0), dir: DVec3::new(-4.0, 3.0, 0.0).normalize() }, 0.0, 5.0),
+        ];
+        let (c, r) = tangent_circle(&ts, DVec3::new(1.5, 0.8, 0.0), None, &Frame::WORLD).unwrap();
+        assert!((r - 1.0).abs() < 1e-9 && c.distance(DVec3::new(1.0, 1.0, 0.0)) < 1e-9, "{c} {r}");
+        // Tangent to a circle of radius 3 and the X axis, radius 1, outside.
+        let ts = [
+            Tangency::from_edge(&ductile_geom::Curve3::Circle { frame: Frame { origin: DVec3::new(0.0, 5.0, 0.0), ..Frame::WORLD }, radius: 3.0 }, 0.0, std::f64::consts::TAU),
+            ts[0].clone(),
+        ];
+        let (c, r) = tangent_circle(&ts, DVec3::new(2.0, 1.0, 0.0), Some(1.0), &Frame::WORLD).unwrap();
+        assert!((r - 1.0).abs() < 1e-12 && (c.y - 1.0).abs() < 1e-9 && (c.distance(DVec3::new(0.0, 5.0, 0.0)) - 4.0).abs() < 1e-9, "{c}");
+    }
+
+    #[test]
     fn isoparam_untrim_unjoin_and_boundary_edges() {
         let mut doc = Document::default();
         let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 2.0, 1.0)));
@@ -5239,6 +5275,227 @@ impl Tool for CurveArrayTool {
             }
             doc.selection.insert(Pick::Object(new));
         }
+        true
+    }
+}
+
+// ------------------------------------------------------- Tangent circle ----
+
+/// One curve a tangent circle touches: lines count as infinite, other
+/// curves over their own range.
+#[derive(Clone)]
+struct Tangency {
+    curve: ductile_geom::Curve3,
+    t0: f64,
+    t1: f64,
+}
+
+impl Tangency {
+    fn from_edge(curve: &ductile_geom::Curve3, t0: f64, t1: f64) -> Self {
+        match curve {
+            ductile_geom::Curve3::Line { .. } => Self { curve: curve.clone(), t0: -1e7, t1: 1e7 },
+            _ => Self { curve: curve.clone(), t0, t1 },
+        }
+    }
+
+    /// Signed distance from `c` (on the plane with normal `z`) and the
+    /// direction it grows in.
+    fn signed(&self, c: DVec3, z: DVec3) -> (f64, DVec3) {
+        let t = self.curve.closest_param_in(c, self.t0, self.t1);
+        let foot = self.curve.point(t);
+        let d = c - foot;
+        let d = d - z * d.dot(z);
+        let n = z.cross(self.curve.tangent(t)).try_normalize().unwrap_or(DVec3::X);
+        let n = n - z * n.dot(z);
+        // Past the curve's ends the distance is to the end point.
+        let s = d.length() * if d.dot(n) < 0.0 { -1.0 } else { 1.0 };
+        let g = if d.length() > 1e-12 { d.normalize() * s.signum() } else { n };
+        (s, g)
+    }
+}
+
+/// The circle tangent to two (or three) curves on the construction plane,
+/// on the sides of them the cursor is on: with a radius, the one whose
+/// center is nearest `near`; without, the one whose center is nearest
+/// `near`'s projection onto the curves' equidistance line; with three
+/// curves, the one touching them all.
+fn tangent_circle(ts: &[Tangency], near: DVec3, radius: Option<f64>, f: &Frame) -> Option<(DVec3, f64)> {
+    let z = f.z;
+    let near = near - z * (near - f.origin).dot(z);
+    let sig: Vec<f64> = ts.iter().map(|t| if t.signed(near, z).0 < 0.0 { -1.0 } else { 1.0 }).collect();
+    let mut c = near;
+    let mut r = radius.unwrap_or_else(|| ts.iter().zip(&sig).map(|(t, s)| s * t.signed(near, z).0).sum::<f64>() / ts.len() as f64);
+    let (x, y) = (f.x, f.y);
+    for _ in 0..60 {
+        let v: Vec<(f64, DVec3)> = ts.iter().zip(&sig).map(|(t, s)| { let (d, g) = t.signed(c, z); (s * d, g * *s) }).collect();
+        let step = if ts.len() >= 3 && radius.is_none() {
+            // Three equations d_i(c) = r in (cx, cy, r).
+            let m = ductile_geom::DMat3::from_cols(
+                DVec3::new(v[0].1.dot(x), v[1].1.dot(x), v[2].1.dot(x)),
+                DVec3::new(v[0].1.dot(y), v[1].1.dot(y), v[2].1.dot(y)),
+                DVec3::splat(-1.0),
+            );
+            if m.determinant().abs() < 1e-12 {
+                return None;
+            }
+            let s = m.inverse() * DVec3::new(v[0].0 - r, v[1].0 - r, v[2].0 - r);
+            r -= s.z;
+            x * s.x + y * s.y
+        } else if let Some(r) = radius {
+            // Two equations d_i(c) = r.
+            let (a, b, cc, d) = (v[0].1.dot(x), v[0].1.dot(y), v[1].1.dot(x), v[1].1.dot(y));
+            let det = a * d - b * cc;
+            if det.abs() < 1e-12 {
+                return None;
+            }
+            let (e0, e1) = (v[0].0 - r, v[1].0 - r);
+            x * ((d * e0 - b * e1) / det) + y * ((a * e1 - cc * e0) / det)
+        } else {
+            // Onto d_0 = d_1 along its gradient.
+            let g = v[0].1 - v[1].1;
+            if g.length_squared() < 1e-18 {
+                return None;
+            }
+            g * ((v[0].0 - v[1].0) / g.length_squared())
+        };
+        c -= step;
+        if step.length() < 1e-12 * (1.0 + c.length()) {
+            break;
+        }
+    }
+    let ds: Vec<f64> = ts.iter().zip(&sig).map(|(t, s)| s * t.signed(c, z).0).collect();
+    let r = radius.unwrap_or(if ts.len() >= 3 { r } else { ds[0] });
+    let ok = r > 1e-9 && ds.iter().all(|d| (d - r).abs() < 1e-6 * (1.0 + r));
+    ok.then_some((c, r))
+}
+
+/// Tangent circle: click two curves, then move to size the circle between
+/// them (or click a third curve for the circle touching all three); Tab
+/// types the radius.
+pub struct TangentCircleTool {
+    edges: Vec<(ductile_geom::Curve3, f64, f64, Vec<DVec3>)>,
+    picked: Vec<usize>,
+    hover: Option<usize>,
+    cursor: Option<DVec3>,
+    pub radius: f64,
+    pub fixed: bool,
+}
+
+impl TangentCircleTool {
+    pub fn new(doc: &Document) -> Self {
+        let edges = doc
+            .objects
+            .iter()
+            .filter(|o| o.visible && !doc.is_locked(o.id))
+            .flat_map(|o| o.body.edges.iter().map(|e| (e.curve.clone(), e.t0, e.t1, e.curve.tessellate(e.t0, e.t1, 1e-3).into_iter().map(|q| q.1).collect::<Vec<_>>())))
+            .collect();
+        Self { edges, picked: vec![], hover: None, cursor: None, radius: 1.0, fixed: false }
+    }
+
+    fn pick(&self, p: &PointerInfo) -> Option<usize> {
+        let mut best = (8.0 * p.world_per_px, None);
+        for (i, e) in self.edges.iter().enumerate() {
+            for w in e.3.windows(2) {
+                let d = ray_segment_distance(&p.ray, w[0], w[1]);
+                if d < best.0 {
+                    best = (d, Some(i));
+                }
+            }
+        }
+        best.1
+    }
+
+    fn circle(&self) -> Option<(DVec3, f64)> {
+        if self.picked.len() < 2 {
+            return None;
+        }
+        let mut ids = self.picked.clone();
+        if let Some(h) = self.hover.filter(|h| !ids.contains(h)) {
+            if !self.fixed {
+                ids.push(h);
+            }
+        }
+        let ts: Vec<Tangency> = ids.iter().map(|i| Tangency::from_edge(&self.edges[*i].0, self.edges[*i].1, self.edges[*i].2)).collect();
+        let f = current_cplane().frame;
+        let near = self.cursor?;
+        tangent_circle(&ts, near, self.fixed.then_some(self.radius), &f).or_else(|| (ts.len() > 2).then(|| tangent_circle(&ts[..2], near, self.fixed.then_some(self.radius), &f)).flatten())
+    }
+
+    fn segment(&self) -> Option<ductile_brep::profile::Segment> {
+        let (c, r) = self.circle()?;
+        let frame = Frame { origin: c, ..current_cplane().frame };
+        Some(ductile_brep::profile::Segment::new(ductile_geom::Curve3::Circle { frame, radius: r }, 0.0, std::f64::consts::TAU))
+    }
+}
+
+impl Tool for TangentCircleTool {
+    fn name(&self) -> &'static str {
+        "Tangent circle"
+    }
+    fn hint(&self) -> String {
+        match self.picked.len() {
+            0 => "Tangent circle: click the first curve".into(),
+            1 => "Tangent circle: click the second curve".into(),
+            _ => "Tangent circle: move to size it, or hover a third curve; click to place; Tab types the radius".into(),
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        self.hover = self.pick(p);
+        self.cursor = p.plane_point.or(p.point);
+        if self.picked.len() >= 2 && !self.fixed {
+            if let Some((_, r)) = self.circle() {
+                self.radius = r;
+            }
+        }
+        if p.clicked {
+            if self.picked.len() >= 2 {
+                return if self.circle().is_some() { ToolOutcome::Finished } else { ToolOutcome::Continue };
+            }
+            if let Some(h) = self.hover.filter(|h| !self.picked.contains(h)) {
+                self.picked.push(h);
+            }
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        self.segment().map(|s| ductile_brep::profile::wire_from_segments(&[s]))
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        for (i, e) in self.edges.iter().enumerate() {
+            let color = if self.picked.contains(&i) {
+                [0.3, 0.7, 1.0, 1.0]
+            } else if self.hover == Some(i) {
+                [1.0, 0.8, 0.3, 1.0]
+            } else {
+                continue;
+            };
+            for w in e.3.windows(2) {
+                out.push(LineInstance::new(w[0], w[1], color, 3.0));
+            }
+        }
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut ch = ui.checkbox(&mut self.fixed, "Fixed radius").changed();
+        if drag_value(ui, "Radius", &mut self.radius, 0.05) {
+            self.fixed = true;
+            ch = true;
+        }
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        match v {
+            Some(v) if v.abs() > 1e-9 => {
+                self.radius = v.abs();
+                self.fixed = true;
+            }
+            _ => self.fixed = false,
+        }
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let Some(s) = self.segment() else { return false };
+        let id = doc.add_body("Circle", ductile_brep::profile::wire_from_segments(&[s]));
+        doc.selection.clear();
+        doc.selection.insert(Pick::Object(id));
         true
     }
 }
