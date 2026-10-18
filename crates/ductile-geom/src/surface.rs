@@ -316,7 +316,11 @@ impl Surface {
     pub fn to_nurbs(&self, u0: f64, u1: f64, v0: f64, v1: f64) -> NurbsSurface {
         use crate::NurbsCurve;
         match self {
-            Surface::Plane { frame } => NurbsSurface::plane_patch(frame, u0, u1, v0, v1),
+            Surface::Plane { frame } => {
+                let mut s = NurbsSurface::plane_patch(frame, u0, u1, v0, v1);
+                reparam(&mut s, u0, u1, v0, v1);
+                s
+            }
             Surface::Cylinder { frame, .. } | Surface::Cone { frame, .. } => {
                 let prof = NurbsCurve::line(self.point(u0, v0), self.point(u0, v1));
                 let mut s = NurbsSurface::revolution(&prof, frame.origin, frame.z, u1 - u0);

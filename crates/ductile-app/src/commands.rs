@@ -76,6 +76,11 @@ pub enum Command {
     OffsetCurve,
     JoinCurves,
     Trim,
+    Isoparam,
+    Untrim,
+    Unjoin,
+    FindBoundaryEdges,
+    ReverseSheet,
     BridgeCurve,
     ExtendCurve,
     ReverseCurve,
@@ -189,6 +194,11 @@ impl Command {
         Command::OffsetCurve,
         Command::JoinCurves,
         Command::Trim,
+        Command::Isoparam,
+        Command::Untrim,
+        Command::Unjoin,
+        Command::FindBoundaryEdges,
+        Command::ReverseSheet,
         Command::BridgeCurve,
         Command::ExtendCurve,
         Command::ReverseCurve,
@@ -303,6 +313,11 @@ impl Command {
             OffsetCurve => "Offset curve",
             JoinCurves => "Join curves or surfaces",
             Trim => "Trim curves",
+            Isoparam => "Isoparam (split a face along its surface's u or v)",
+            Untrim => "Untrim (the whole surface under a face)",
+            Unjoin => "Unjoin (faces, bodies or curves into pieces)",
+            FindBoundaryEdges => "Find boundary edges",
+            ReverseSheet => "Reverse sheet",
             BridgeCurve => "Bridge curves",
             ExtendCurve => "Extend curve or surface",
             ReverseCurve => "Reverse curve",
@@ -641,6 +656,24 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 None => app.status = "Select edges to blend (edge mode: 2), or curves to round".into(),
             },
         },
+        Isoparam => app.start_tool(std::boxed::Box::new(crate::tools::IsoparamTool::new())),
+        Untrim => {
+            app.status = match crate::tools::untrim_selected(&mut app.doc) {
+                Ok(n) => format!("Untrimmed {n} face(s) into new sheets"),
+                Err(e) => e,
+            }
+        }
+        Unjoin => {
+            app.status = crate::tools::unjoin_selected(&mut app.doc).unwrap_or_else(|e| e);
+        }
+        FindBoundaryEdges => {
+            let n = crate::tools::find_boundary_edges(&mut app.doc);
+            app.status = if n == 0 { "No open edges: every body is closed".into() } else { format!("{n} open edge(s) selected") };
+        }
+        ReverseSheet => {
+            let n = crate::tools::reverse_selected_sheets(&mut app.doc);
+            app.status = if n == 0 { "Select sheets to reverse".into() } else { format!("Reversed {n} sheet(s)") };
+        }
         Trim => match TrimTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "There are no curves to trim".into(),

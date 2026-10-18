@@ -4604,4 +4604,273 @@ mod tests {
         let v = extrude_selected(&mut doc);
         assert!((v - area).abs() < 1e-3 * area, "{v} vs {area}");
     }
+
+    #[test]
+    fn isoparam_untrim_unjoin_and_boundary_edges() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 2.0, 1.0)));
+        // Click the top at x = 1: split it there along the surface's u.
+        let mut t = IsoparamTool::new();
+        assert!(click(&mut t, &doc, DVec3::new(1.0, 1.0, 1.0), true));
+        assert!(t.commit(&mut doc));
+        let b = &doc.object(id).unwrap().body;
+        assert_eq!(b.faces.len(), 7);
+        assert!(b.edge_ids().any(|e| { let ed = b.edge(e); (ed.start().x - 1.0).abs() < 1e-6 && (ed.end().x - 1.0).abs() < 1e-6 && ed.start().z > 0.99 }));
+        // Pull the two top halves out: the box becomes an open sheet with a gap.
+        let tops: Vec<FaceId> = b.face_ids().filter(|f| b.face_normal(*f, 0.5, 0.5).z > 0.9).collect();
+        assert_eq!(tops.len(), 2);
+        doc.selection = tops.iter().map(|f| Pick::Face(id, *f)).collect();
+        let n = untrim_selected(&mut doc).unwrap();
+        assert_eq!(n, 2);
+        doc.selection = tops.iter().map(|f| Pick::Face(id, *f)).collect();
+        unjoin_selected(&mut doc).unwrap();
+        assert_eq!(doc.object(id).unwrap().body.kind, ductile_brep::BodyKind::Sheet);
+        doc.selection = [Pick::Object(id)].into_iter().collect();
+        assert_eq!(find_boundary_edges(&mut doc), 6, "the long top edges were split at the isoparam");
+        doc.selection = [Pick::Object(id)].into_iter().collect();
+        assert_eq!(reverse_selected_sheets(&mut doc), 1);
+        doc.selection = [Pick::Object(id)].into_iter().collect();
+        unjoin_selected(&mut doc).unwrap();
+        assert!(doc.object(id).is_none());
+        assert_eq!(doc.objects.len(), 4 + 5);
+    }
+}
+
+// ------------------------------------------------------------- Isoparam ----
+
+/// Isoparam: hover a face to see where its surface's iso-parametric curve
+/// under the cursor runs; Tab swaps u and v; click splits the face there.
+pub struct IsoparamTool {
+    /// The face under the cursor, whether the curve is at constant u, and
+    /// where across the face it sits (0 to 1).
+    target: Option<(ObjectId, FaceId)>,
+    along_u: bool,
+    param: f64,
+    typed: Option<f64>,
+    cut: Option<ductile_brep::profile::Segment>,
+    error: Option<String>,
+}
+
+impl IsoparamTool {
+    pub fn new() -> Self {
+        Self { target: None, along_u: true, param: 0.5, typed: None, cut: None, error: None }
+    }
+
+    fn fraction(&self) -> f64 {
+        self.typed.unwrap_or(self.param).clamp(1e-4, 1.0 - 1e-4)
+    }
+
+    /// The split body and its new edge, for the current face and place.
+    fn split(&self, doc: &Document) -> Result<(Body, ductile_brep::profile::Segment), String> {
+        let (o, f) = self.target.ok_or("hover a face")?;
+        let ob = doc.object(o).ok_or("the object is gone")?;
+        let (lo, hi) = ductile_brep::ops::isoparam::face_param_range(&ob.body, f, self.along_u).ok_or("the face has no extent")?;
+        ductile_brep::ops::isoparam::split_face_iso_cut(&ob.body, f, self.along_u, lo + (hi - lo) * self.fraction())
+    }
+
+    fn refresh(&mut self, doc: &Document) {
+        match self.split(doc) {
+            Ok((_, seg)) => {
+                self.cut = Some(seg);
+                self.error = None;
+            }
+            Err(e) => {
+                self.cut = None;
+                self.error = self.target.map(|_| e);
+            }
+        }
+    }
+}
+
+impl Tool for IsoparamTool {
+    fn name(&self) -> &'static str {
+        "Isoparam"
+    }
+    fn hint(&self) -> String {
+        let dir = if self.along_u { "u" } else { "v" };
+        match &self.error {
+            Some(e) => format!("Isoparam: {e}"),
+            None => format!("Isoparam: hover a face, click to split it along {dir} = {:.3} of the way across; Tab swaps u and v, type a value from 0 to 1", self.fraction()),
+        }
+    }
+    fn pointer(&mut self, doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        let hit = crate::picking::pick_face(doc, &p.ray).filter(|h| !doc.is_locked(h.object));
+        if let Some(h) = &hit {
+            if let Some(ob) = doc.object(h.object) {
+                let s = &ob.body.face(h.face).surface;
+                if let Some((lo, hi)) = ductile_brep::ops::isoparam::face_param_range(&ob.body, h.face, self.along_u) {
+                    // Project near the face's middle so periodic surfaces land in its chart.
+                    let other = ductile_brep::ops::isoparam::face_param_range(&ob.body, h.face, !self.along_u).unwrap_or((lo, hi));
+                    let mid = if self.along_u { ductile_geom::DVec2::new(0.5 * (lo + hi), 0.5 * (other.0 + other.1)) } else { ductile_geom::DVec2::new(0.5 * (other.0 + other.1), 0.5 * (lo + hi)) };
+                    let uv = s.align_periodic(s.project(h.point, Some(mid)), mid);
+                    let k = if self.along_u { uv.x } else { uv.y };
+                    if self.typed.is_none() {
+                        self.param = ((k - lo) / (hi - lo)).clamp(0.0, 1.0);
+                    }
+                }
+            }
+            self.target = Some((h.object, h.face));
+            self.refresh(doc);
+        }
+        if p.clicked && self.cut.is_some() {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        None
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        if let Some(seg) = &self.cut {
+            let pts = seg.sample(1e-3);
+            for w in pts.windows(2) {
+                out.push(LineInstance::new(w[0], w[1], [1.0, 0.85, 0.3, 1.0], 2.5));
+            }
+        }
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut ch = false;
+        ui.horizontal(|ui| {
+            ui.label("Direction");
+            ch |= ui.radio_value(&mut self.along_u, true, "U").changed();
+            ch |= ui.radio_value(&mut self.along_u, false, "V").changed();
+        });
+        let mut v = self.fraction();
+        if drag_value(ui, "Param", &mut v, 0.005) {
+            self.typed = Some(v.clamp(0.0, 1.0));
+            ch = true;
+        }
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v.map(|x| x.clamp(0.0, 1.0));
+    }
+    fn command_key(&mut self, key: egui::Key, _m: egui::Modifiers) -> bool {
+        if key == egui::Key::Tab {
+            self.along_u = !self.along_u;
+            self.cut = None;
+            return true;
+        }
+        false
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let Ok((b, _)) = self.split(doc) else { return false };
+        let Some((o, _)) = self.target else { return false };
+        doc.replace_body(o, b);
+        true
+    }
+}
+
+// ------------------------------------------------ Untrim, unjoin, reverse ----
+
+/// Untrim: a new sheet of the whole surface under each selected face.
+pub fn untrim_selected(doc: &mut Document) -> Result<usize, String> {
+    let faces = doc.selected_faces();
+    if faces.is_empty() {
+        return Err("Select faces to untrim (face mode: 3)".into());
+    }
+    let sheets: Vec<Body> = faces.iter().filter_map(|(o, f)| ductile_brep::ops::untrim::untrim(&doc.object(*o)?.body, *f)).collect();
+    if sheets.is_empty() {
+        return Err("Could not untrim those faces".into());
+    }
+    doc.checkpoint("Untrim");
+    doc.selection.clear();
+    let n = sheets.len();
+    for s in sheets {
+        let id = doc.add_body("Untrimmed", s);
+        doc.selection.insert(Pick::Object(id));
+    }
+    doc.mode = SelectMode::Object;
+    Ok(n)
+}
+
+/// Unjoin: selected faces pulled out of their bodies as sheets; selected
+/// solids or sheets exploded into one sheet per face; selected curves
+/// split into one curve per segment.
+pub fn unjoin_selected(doc: &mut Document) -> Result<String, String> {
+    use ductile_brep::ops::delete::{extract_edges, extract_faces};
+    let faces = doc.selected_faces();
+    let objects: Vec<ObjectId> = doc.selection.iter().filter_map(|p| if let Pick::Object(o) = p { Some(*o) } else { None }).collect();
+    if faces.is_empty() && objects.is_empty() {
+        return Err("Select faces, bodies or curves to unjoin".into());
+    }
+    doc.checkpoint("Unjoin");
+    doc.selection.clear();
+    let mut made = 0;
+    let mut by_object: std::collections::BTreeMap<ObjectId, Vec<FaceId>> = Default::default();
+    for (o, f) in faces {
+        by_object.entry(o).or_default().push(f);
+    }
+    for (o, fs) in by_object {
+        let Some(ob) = doc.object(o).cloned() else { continue };
+        let rest: Vec<FaceId> = ob.body.face_ids().filter(|f| !fs.contains(f)).collect();
+        for f in &fs {
+            let id = doc.add_body("Face", extract_faces(&ob.body, &[*f]));
+            doc.selection.insert(Pick::Object(id));
+            made += 1;
+        }
+        if rest.is_empty() {
+            doc.remove(o);
+        } else {
+            doc.replace_body(o, extract_faces(&ob.body, &rest));
+        }
+    }
+    for o in objects {
+        let Some(ob) = doc.object(o).cloned() else { continue };
+        let parts: Vec<Body> = match ob.body.kind {
+            ductile_brep::BodyKind::Wire => ob.body.edge_ids().map(|e| extract_edges(&ob.body, &[e])).collect(),
+            _ => ob.body.face_ids().map(|f| extract_faces(&ob.body, &[f])).collect(),
+        };
+        if parts.len() < 2 {
+            continue;
+        }
+        doc.remove(o);
+        for p in parts {
+            let id = doc.add_body(&ob.name, p);
+            if let Some(x) = doc.objects.iter_mut().find(|x| x.id == id) {
+                (x.group, x.color) = (ob.group, ob.color);
+            }
+            doc.selection.insert(Pick::Object(id));
+            made += 1;
+        }
+    }
+    doc.mode = SelectMode::Object;
+    Ok(format!("Unjoined into {made} piece(s)"))
+}
+
+/// Find Boundary Edges: selects the open edges of the selected bodies (all
+/// visible bodies when none is selected), the gaps keeping a body from
+/// being a closed solid.
+pub fn find_boundary_edges(doc: &mut Document) -> usize {
+    let mut ids = doc.selected_objects();
+    if ids.is_empty() {
+        ids = doc.objects.iter().filter(|o| o.visible && o.body.kind != ductile_brep::BodyKind::Wire).map(|o| o.id).collect();
+    }
+    let mut picks = vec![];
+    for id in ids {
+        let Some(o) = doc.object(id) else { continue };
+        if o.body.kind == ductile_brep::BodyKind::Wire {
+            continue;
+        }
+        picks.extend(o.body.edge_ids().filter(|e| o.body.edge_faces(*e).len() == 1).map(|e| Pick::Edge(id, e)));
+    }
+    doc.selection.clear();
+    doc.mode = SelectMode::Edge;
+    let n = picks.len();
+    doc.selection.extend(picks);
+    n
+}
+
+/// Reverse Sheet: swaps the front and back of the selected sheets.
+pub fn reverse_selected_sheets(doc: &mut Document) -> usize {
+    let ids: Vec<ObjectId> = doc.selected_objects().into_iter().filter(|id| doc.object(*id).is_some_and(|o| o.body.kind == ductile_brep::BodyKind::Sheet)).collect();
+    if ids.is_empty() {
+        return 0;
+    }
+    doc.checkpoint("Reverse sheet");
+    for id in &ids {
+        let b = ductile_brep::ops::untrim::reverse_sheet(&doc.object(*id).unwrap().body);
+        doc.replace_body(*id, b);
+    }
+    ids.len()
 }

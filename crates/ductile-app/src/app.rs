@@ -918,6 +918,10 @@ impl DuctileApp {
                     _ => None,
                 };
                 if key == egui::Key::Tab {
+                    // Tools with options to cycle take Tab; others open the typed field.
+                    if self.tool.as_mut().unwrap().command_key(key, modifiers) {
+                        continue;
+                    }
                     self.typed = Some(String::new());
                     continue;
                 }

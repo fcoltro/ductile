@@ -129,6 +129,9 @@ const DEFAULTS: &[(Command, &str)] = {
         (ToggleZebra, "Alt+R"),
         (Help, "F1"),
         (Group, "Ctrl+G"),
+        (Isoparam, "Ctrl+R"),
+        (Untrim, "Alt+T"),
+        (Unjoin, "Alt+J"),
         (Ungroup, "Alt+G"),
     ]
 };

@@ -95,6 +95,14 @@ code from them.
   face the same way, and makes a solid when they close up. Match surface
   reshapes a surface along its open edge so it lands on another edge and
   continues the face beyond it with G0, G1 or G2. Back faces show tinted.
+- Isoparam (Ctrl+R): hover a face to see the surface's iso-parametric
+  curve under the cursor, Tab swaps u and v, click splits the face there
+  (neighbouring edges are split to match, so solids stay closed). Untrim
+  (Alt+T) makes a sheet of the whole surface under the selected faces.
+  Unjoin (Alt+J) pulls selected faces out as sheets, explodes bodies into
+  one sheet per face, and curves into one curve per segment. Find boundary
+  edges selects the open edges keeping a body from being solid; Reverse
+  sheet swaps a sheet's front and back.
 - Fillets (B) and chamfers (Shift+K) on edges between planes, on
   circular plane/cylinder edges (boss and hole rims), with spherical corner
   patches where three filleted edges meet. Closed edges between any two
