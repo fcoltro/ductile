@@ -56,6 +56,10 @@ pub struct DuctileApp {
     viewport_rect: egui::Rect,
     last_cursor: Option<DVec2>,
     pub pending: Vec<Command>,
+    /// The last modeling command run, for Shift+R.
+    pub last_command: Option<Command>,
+    /// The command whose shortcut the next key press sets.
+    pub assigning: Option<Command>,
     pub snap_enabled: bool,
     snap_marker: Option<DVec3>,
     screenshot_done: Arc<std::sync::atomic::AtomicBool>,
@@ -104,7 +108,7 @@ impl DuctileApp {
             gizmo_drag: false,
             preview_shown: false,
             preview_body: None,
-            status: "Welcome to Ductile. Press Space for the command palette, F1 for help.".into(),
+            status: "Welcome to Ductile. Press F for the command palette, F1 for help.".into(),
             box_select: None,
             typed: String::new(),
             show_grid: true,
@@ -116,6 +120,8 @@ impl DuctileApp {
             viewport_rect: egui::Rect::NOTHING,
             last_cursor: None,
             pending: vec![],
+            last_command: None,
+            assigning: None,
             snap_enabled: true,
             snap_marker: None,
             screenshot_done: Default::default(),
@@ -706,6 +712,18 @@ impl DuctileApp {
         let events = ctx.input(|i| i.events.clone());
         for ev in events {
             let egui::Event::Key { key, pressed: true, modifiers, .. } = ev else { continue };
+            if let Some(cmd) = self.assigning.take() {
+                self.status = if key == egui::Key::Escape {
+                    "Shortcut unchanged".into()
+                } else {
+                    let chord = crate::keymap::Chord::new(key, modifiers);
+                    match crate::keymap::keymap_mut().assign(cmd, chord) {
+                        Some(old) => format!("{} is now {} (taken from {})", chord.text(), cmd.label(), old.label()),
+                        None => format!("{} is now {}", chord.text(), cmd.label()),
+                    }
+                };
+                continue;
+            }
             // Modal typing for active tools.
             if self.tool.is_some() {
                 let digit = match key {

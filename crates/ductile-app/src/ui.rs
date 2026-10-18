@@ -156,7 +156,7 @@ pub fn toolbar(app: &mut DuctileApp, ui: &mut egui::Ui) {
 /// A square toolbar button showing the command's icon, its name and
 /// shortcut on hover.
 fn icon_button(app: &mut DuctileApp, ui: &mut egui::Ui, cmd: Command) {
-    let tip = match cmd.shortcut_text() {
+    let tip = match cmd.shortcut_text().as_str() {
         "" => cmd.label().to_string(),
         s => format!("{}   ({s})", cmd.label()),
     };
@@ -287,9 +287,22 @@ pub fn palette(app: &mut DuctileApp, ctx: &egui::Context) {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for c in matches {
                     let b = egui::Button::new(c.label()).shortcut_text(c.shortcut_text()).frame(false);
-                    if ui.add_sized([ui.available_width(), 22.0], b).clicked() {
+                    let r = ui.add_sized([ui.available_width(), 22.0], b).on_hover_text("Right-click to change the shortcut");
+                    if r.clicked() {
                         chosen = Some(c);
                     }
+                    r.context_menu(|ui| {
+                        if ui.button("Assign shortcut…").clicked() {
+                            app.assigning = Some(c);
+                            app.status = format!("Press the new shortcut for {} (Esc keeps the old one)", c.label());
+                            open = false;
+                            ui.close();
+                        }
+                        if ui.button("Reset to default").clicked() {
+                            crate::keymap::keymap_mut().reset(c);
+                            ui.close();
+                        }
+                    });
                 }
             });
         });
@@ -312,7 +325,7 @@ pub fn help_window(app: &mut DuctileApp, ctx: &egui::Context) {
     let mut open = true;
     egui::Window::new("Ductile help").open(&mut open).default_width(420.0).show(ctx, |ui| {
         ui.label(RichText::new("Navigation").strong());
-        ui.label("Orbit: right or middle mouse drag\nPan: Shift + right/middle drag\nZoom: mouse wheel (zooms toward the cursor)\nFrame selection: F · Top view: T · Orthographic: O");
+        ui.label("Orbit: right or middle mouse drag\nPan: Shift + right/middle drag\nZoom: mouse wheel (zooms toward the cursor)\nFrame selection: / · Command palette: F · Construction plane from selection: Space");
         ui.add_space(6.0);
         ui.label(RichText::new("Selection").strong());
         ui.label("1 vertices · 2 edges · 3 faces · 4 solids\nClick to select, Shift+click to toggle, Ctrl+click to remove, drag for box select");
@@ -329,6 +342,7 @@ pub fn help_window(app: &mut DuctileApp, ctx: &egui::Context) {
         });
         ui.add_space(6.0);
         ui.label("While a command runs: type a number to enter a value, X/Y/Z to constrain, Enter to confirm, Esc to cancel.");
+        ui.label("Shortcuts follow Plasticity's. Right-click a command in the palette (F) to change its shortcut.");
     });
     app.show_help = open;
 }

@@ -92,6 +92,11 @@ pub enum Command {
     SetCPlane,
     Palette,
     Help,
+    Repeat,
+    InvertSelection,
+    Boolean,
+    Offset,
+    Mirror,
 }
 
 impl Command {
@@ -177,6 +182,11 @@ impl Command {
         Command::SetCPlane,
         Command::Palette,
         Command::Help,
+        Command::Repeat,
+        Command::InvertSelection,
+        Command::Boolean,
+        Command::Offset,
+        Command::Mirror,
     ];
 
     pub fn label(self) -> &'static str {
@@ -263,166 +273,60 @@ impl Command {
             SetCPlane => "Construction plane: face / view / world",
             Palette => "Command palette",
             Help => "Help",
+            Repeat => "Repeat last command",
+            InvertSelection => "Invert selection",
+            Boolean => "Boolean (subtract the others from the first)",
+            Offset => "Offset (curves, faces or solid)",
+            Mirror => "Mirror across the construction plane's YZ",
         }
     }
 
-    pub fn shortcut_text(self) -> &'static str {
-        use Command::*;
-        match self {
-            New => "Ctrl+N",
-            Open => "Ctrl+O",
-            Save => "Ctrl+S",
-            SaveAs => "Ctrl+Shift+S",
-            Undo => "Ctrl+Z",
-            Redo => "Ctrl+Shift+Z",
-            Delete => "Del / X",
-            Duplicate => "Ctrl+D",
-            SelectAll => "Ctrl+A",
-            DeselectAll => "Esc",
-            Hide => "H",
-            Isolate => "Shift+H",
-            UnhideAll => "Alt+H",
-            ModeVertex => "1",
-            ModeEdge => "2",
-            ModeFace => "3",
-            ModeObject => "4",
-            Box => "B",
-            Cylinder => "C",
-            Cone => "Shift+C",
-            Sphere => "Shift+S",
-            Torus => "Shift+T",
-            Curve => "L",
-            Rectangle => "Shift+R",
-            Circle => "Shift+O",
-            Spline => "Shift+L",
-            Arc => "Shift+A",
-            Ellipse => "Shift+E",
-            Polygon => "Shift+P",
-            Extrude => "E",
-            Revolve => "V",
-            Fillet => "Shift+F",
-            Chamfer => "Shift+K",
-            Shell => "Alt+S",
-            OffsetSolid => "Alt+O",
-            OffsetFaces => "Alt+F",
-            OffsetCurve => "Alt+C",
-            JoinCurves => "J",
-            Trim => "Alt+T",
-            BridgeCurve => "Alt+B",
-            ExtendCurve => "Alt+X",
-            IntersectionCurve => "Alt+N",
-            ProjectCurve => "Alt+J",
-            Union => "Shift+U",
-            Loft => "Alt+L",
-            Patch => "Alt+P",
-            Thicken => "Alt+K",
-            Cut => "Alt+D",
-            Imprint => "Alt+I",
-            Draft => "Alt+G",
-            Sweep => "Alt+W",
-            Pipe => "Alt+U",
-            Subtract => "Shift+D",
-            Intersect => "Shift+I",
-            Move => "G",
-            Rotate => "R",
-            Scale => "S",
-            LinearArray => "Alt+A",
-            RadialArray => "Alt+Shift+A",
-            ViewTop => "Numpad 7 / T",
-            ViewFront => "Numpad 1",
-            ViewRight => "Numpad 3",
-            ViewIso => "Numpad 0",
-            ToggleOrtho => "Numpad 5 / O",
-            FrameSelection => "F",
-            ToggleXray => "Alt+Z",
-            ToggleZebra => "Alt+R",
-            SetCPlane => "Alt+V",
-            Palette => "Space",
-            Help => "F1",
-            _ => "",
-        }
+    /// Stable name, as used in the keymap file.
+    pub fn id(self) -> String {
+        format!("{self:?}")
+    }
+
+    pub fn from_id(id: &str) -> Option<Command> {
+        Command::ALL.iter().copied().find(|c| c.id().eq_ignore_ascii_case(id))
+    }
+
+    pub fn shortcut_text(self) -> String {
+        crate::keymap::keymap().text(self)
     }
 }
 
 pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
-    use Command::*;
-    let ctrl = m.ctrl || m.command;
-    Some(match (key, ctrl, m.shift, m.alt) {
-        (Key::N, true, _, _) => New,
-        (Key::O, true, _, _) => Open,
-        (Key::S, true, true, _) => SaveAs,
-        (Key::S, true, false, _) => Save,
-        (Key::Z, true, true, _) => Redo,
-        (Key::Y, true, _, _) => Redo,
-        (Key::Z, true, false, _) => Undo,
-        (Key::D, true, _, _) => Duplicate,
-        (Key::A, true, _, _) => SelectAll,
-        (Key::Delete, _, _, _) | (Key::X, false, false, false) => Delete,
-        (Key::Escape, _, _, _) => DeselectAll,
-        (Key::H, false, _, true) => UnhideAll,
-        (Key::H, false, true, false) => Isolate,
-        (Key::H, false, false, false) => Hide,
-        (Key::Num1, false, _, _) => ModeVertex,
-        (Key::Num2, false, _, _) => ModeEdge,
-        (Key::Num3, false, _, _) => ModeFace,
-        (Key::Num4, false, _, _) => ModeObject,
-        (Key::B, false, false, false) => Box,
-        (Key::C, false, true, false) => Cone,
-        (Key::C, false, false, false) => Cylinder,
-        (Key::S, false, true, false) => Sphere,
-        (Key::T, false, true, false) => Torus,
-        (Key::E, false, false, false) => Extrude,
-        (Key::L, false, false, false) => Curve,
-        (Key::R, false, true, false) => Rectangle,
-        (Key::O, false, true, false) => Circle,
-        (Key::L, false, true, false) => Spline,
-        (Key::A, false, true, false) => Arc,
-        (Key::E, false, true, false) => Ellipse,
-        (Key::P, false, true, false) => Polygon,
-        (Key::V, false, false, false) => Revolve,
-        (Key::V, false, false, true) => SetCPlane,
-        (Key::L, false, false, true) => Loft,
-        (Key::P, false, false, true) => Patch,
-        (Key::K, false, false, true) => Thicken,
-        (Key::D, false, false, true) => Cut,
-        (Key::I, false, false, true) => Imprint,
-        (Key::G, false, false, true) => Draft,
-        (Key::W, false, false, true) => Sweep,
-        (Key::U, false, false, true) => Pipe,
-        (Key::F, false, true, false) => Fillet,
-        (Key::K, false, true, false) => Chamfer,
-        (Key::S, false, false, true) => Shell,
-        (Key::O, false, false, true) => OffsetSolid,
-        (Key::F, false, false, true) => OffsetFaces,
-        (Key::C, false, false, true) => OffsetCurve,
-        (Key::J, false, false, false) => JoinCurves,
-        (Key::T, false, false, true) => Trim,
-        (Key::B, false, false, true) => BridgeCurve,
-        (Key::X, false, false, true) => ExtendCurve,
-        (Key::N, false, false, true) => IntersectionCurve,
-        (Key::J, false, false, true) => ProjectCurve,
-        (Key::U, false, true, false) => Union,
-        (Key::D, false, true, false) => Subtract,
-        (Key::I, false, true, false) => Intersect,
-        (Key::G, false, false, false) => Move,
-        (Key::R, false, false, false) => Rotate,
-        (Key::S, false, false, false) => Scale,
-        (Key::A, false, false, true) => LinearArray,
-        (Key::A, false, true, true) => RadialArray,
-        (Key::T, false, false, false) => ViewTop,
-        (Key::O, false, false, false) => ToggleOrtho,
-        (Key::F, false, false, false) => FrameSelection,
-        (Key::Z, false, false, true) => ToggleXray,
-        (Key::R, false, false, true) => ToggleZebra,
-        (Key::Space, false, false, false) => Palette,
-        (Key::F1, _, _, _) => Help,
-        _ => return None,
-    })
+    crate::keymap::keymap().lookup(key, m)
 }
 
 pub fn run(app: &mut DuctileApp, cmd: Command) {
     use Command::*;
+    // Shift+R repeats modeling commands, not navigation or selection.
+    let fleeting = matches!(
+        cmd,
+        Repeat | Palette | Help | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleSnap | SetCPlane
+    );
+    if !fleeting {
+        app.last_command = Some(cmd);
+    }
     match cmd {
+        Repeat => match app.last_command {
+            Some(c) => run(app, c),
+            None => app.status = "Nothing to repeat yet".into(),
+        },
+        Boolean => run(app, Subtract),
+        Mirror => run(app, MirrorX),
+        Offset => {
+            let curves = app.doc.selected_objects().iter().any(|id| app.doc.object(*id).is_some_and(|o| o.body.kind == ductile_brep::BodyKind::Wire));
+            let next = if curves {
+                OffsetCurve
+            } else if !app.doc.selected_faces().is_empty() {
+                OffsetFaces
+            } else {
+                OffsetSolid
+            };
+            run(app, next);
+        }
         New => {
             app.doc.clear();
             app.cancel_tool();
@@ -507,7 +411,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 app.start_tool(std::boxed::Box::new(TransformTool::new(TransformKind::Move, &app.doc)));
             }
         }
-        SelectAll => {
+        SelectAll | InvertSelection => {
             let mode = app.doc.mode;
             let all: Vec<Pick> = app
                 .doc
@@ -523,7 +427,12 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                     }
                 })
                 .collect();
-            app.doc.selection.extend(all);
+            if cmd == InvertSelection {
+                let was = std::mem::take(&mut app.doc.selection);
+                app.doc.selection.extend(all.into_iter().filter(|p| !was.contains(p)));
+            } else {
+                app.doc.selection.extend(all);
+            }
         }
         DeselectAll => {
             if app.palette_open {
@@ -538,7 +447,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 for o in app.doc.objects.iter_mut() {
                     o.visible = keep.contains(&o.id);
                 }
-                app.status = "Isolated; Alt+H shows everything again".into();
+                app.status = format!("Isolated; {} shows everything again", UnhideAll.shortcut_text());
             }
         }
         JoinCurves => {
@@ -759,7 +668,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             let world = Frame::WORLD;
             let is_world = app.cplane.frame.origin.length() < 1e-12 && (app.cplane.frame.z - world.z).length() < 1e-12;
             (app.cplane.frame, app.status) = match face {
-                Some(fr) => (fr, "Construction plane set on the selected face; Alt+V again with nothing selected to go back".into()),
+                Some(fr) => (fr, format!("Construction plane set on the selected face; {} again with nothing selected to go back", SetCPlane.shortcut_text())),
                 None if is_world => {
                     let z = (app.camera.eye() - app.camera.target).normalize();
                     let up = if z.z.abs() > 0.99 { DVec3::Y } else { DVec3::Z };

@@ -15,40 +15,40 @@ code from them.
 ## What works today
 
 - Primitives: box, cylinder, cone, sphere, torus (exact analytic surfaces).
-- Exact booleans: union, subtract, intersect (Shift+U / Shift+D / Shift+I),
-  including coplanar, tangent and pole cases. Cut (Alt+D) splits solids
+- Exact booleans: union, subtract, intersect (Q subtracts the other selected solids from the first),
+  including coplanar, tangent and pole cases. Cut (C) splits solids
   along curves swept straight through them: a closed curve cuts out a
-  plug, an open one splits the solid in two. Imprint (Alt+I) sweeps curves
+  plug, an open one splits the solid in two. Imprint (Shift+I) sweeps curves
   the same way but only splits the faces they cross, so the pieces of a
   face can be picked, offset or extruded on their own. Both also take a
-  surface (sheet) that reaches across the solid in place of curves. Draft (Alt+G) tilts
+  surface (sheet) that reaches across the solid in place of curves. Draft tilts
   selected planar faces about the line where they meet a neutral plane
   through their base, by a dragged or typed angle. Intersection curves
-  (Alt+N) adds the curves where selected solids cross; Project (Alt+J)
+  adds the curves where selected solids cross; Project (I)
   traces curves onto solids along the construction plane's normal.
 - Move faces: G in face mode pushes or tilts planar faces and re-trims the
   faces around them (curved neighbours follow a straight push).
 - Delete faces (Delete in face mode) heals the solid where it can: holes
   and bosses close up, and fillets or chamfers between planes grow back to
   a sharp edge. Otherwise the solid becomes an open sheet. Duplicate
-  (Ctrl+D) in face or edge mode copies the selected faces out as a sheet
+  (Shift+D) in face or edge mode copies the selected faces out as a sheet
   or the selected edges out as curves.
-- Construction plane (Alt+V): onto a selected planar face, so curves are
+- Construction plane (Space): onto a selected planar face, so curves are
   drawn on it; with nothing selected, square to the view, then back to the
   world XY plane.
-- Curves on the construction plane: polyline (L), spline through points
-  (Shift+L, open or closed C2), three-point arc (Shift+A), rectangle
-  (Shift+R), circle (Shift+O), ellipse (Shift+E), regular polygon (Shift+P),
+- Curves on the construction plane: polyline (Shift+A), spline through points
+  (open or closed C2), three-point arc, rectangle,
+  circle, ellipse, regular polygon,
   helix (radius, height and turns; sweep a circle along it for a spring).
   Curves drawn separately that meet end to end form one profile. In vertex
   mode (1) spline control points show and can be selected and moved (G).
-  Fillet (Shift+F) with curves selected rounds their corners (or just the
-  selected vertices'); Offset curve (Alt+C) offsets them in their plane,
-  rounding outside corners; Trim (Alt+T) deletes the pieces you click
+  Fillet (B) with curves selected rounds their corners (or just the
+  selected vertices'); Offset (O) offsets them in their plane,
+  rounding outside corners; Trim (T) deletes the pieces you click
   between curve crossings; Join (J) merges curves that meet end to end
   into one. Bridge (Alt+B) joins two curve ends with a new
   curve that meets them with G0 to G3 continuity and adjustable tension;
-  Extend (Alt+X) lengthens open curves past their ends, naturally (lines
+  Extend lengthens open curves past their ends, naturally (lines
   and arcs stay lines and arcs, splines continue their own polynomial) or
   straight along the end tangent.
 - Extrude (E): push/pull planar faces, or turn closed planar curves (with
@@ -58,10 +58,10 @@ code from them.
 - Revolve (V) closed curves by any angle about a selected edge or the
   construction plane axes; exact planes, cylinders, cones, spheres, tori,
   and NURBS surfaces of revolution for splines.
-- Loft (Alt+L) through two or more closed curves, keeping corners as edges
-  when the profiles match; Sweep (Alt+W) a closed curve along an open path
+- Loft (L) through two or more closed curves, keeping corners as edges
+  when the profiles match; Sweep (Shift+P) a closed curve along an open path
   with a rotation-minimizing frame (exact for straight and circular paths),
-  mitred where the path turns through a sharp corner. Pipe (Alt+U) runs a
+  mitred where the path turns through a sharp corner. Pipe (P) runs a
   round tube of a dragged radius along curves, closing into a ring along a
   closed curve.
 - Surfaces: Extrude, Revolve and Loft turn open curves into surfaces
@@ -74,7 +74,7 @@ code from them.
   untrimmed spline surfaces show and their points move with G, rotate and
   scale; neighbouring faces stay joined. Thicken (Alt+K) turns surfaces into
   solids of a given thickness on either side. Back faces show tinted.
-- Fillets (Shift+F) and chamfers (Shift+K) on edges between planes, on
+- Fillets (B) and chamfers (Shift+K) on edges between planes, on
   circular plane/cylinder edges (boss and hole rims), with spherical corner
   patches where three filleted edges meet. Closed edges between any two
   surfaces (a vase lip, a loft's foot, a sphere cut flat) get rolling-ball
@@ -92,8 +92,8 @@ code from them.
   then an exact cone, the smooth one its G2 counterpart.
 - Shell (Alt+S): hollow a solid into walls of a given thickness, opening
   the selected faces, or leaving an inner void when none are selected.
-  Offset solid (Alt+O) grows or shrinks a whole solid, Offset faces
-  (Alt+F, or E on a curved face) pushes and pulls any faces. Faces move along
+  Offset (O) grows or shrinks a whole solid, on selected faces
+  (or E on a curved face) it pushes and pulls any faces. Faces move along
   their normals with exact offset surfaces for analytic faces, sharp edges
   stay sharp, and tangent faces (fillets) move together.
 - STEP (AP214) export of exact solids and surfaces, checked against
@@ -109,11 +109,11 @@ code from them.
 - Zebra stripes (Alt+R, or the Zebra button) to judge surface continuity:
   stripes stay unbroken across tangent (G1) joins and keep their direction
   across curvature-continuous (G2) ones. Headless: `--zebra`.
-- Move / rotate / scale / mirror, linear and radial arrays (Alt+A,
-  Alt+Shift+A), undo/redo. Mirror reflects across the construction plane,
+- Move (G) / rotate (R) / scale (S) / mirror (Alt+X), linear and radial
+  arrays, undo/redo. Mirror reflects across the construction plane,
   or across a selected planar face; a solid mirrored across its own face is
   joined to its reflection, so half a symmetric part becomes the whole.
-- Hide (H), isolate the selection (Shift+H), show everything (Alt+H).
+- Hide (H), isolate the selection (Shift+H or .), show everything (Alt+H).
   Double-click an edge to add the edges running on tangentially from it
   (a filleted outline, a spline profile) to the selection.
 - Transform gizmo: selecting something shows axis arrows and rotation rings
@@ -121,6 +121,18 @@ code from them.
   (type a value while dragging for an exact one). Headless: `--select N`.
 
 In progress: more of Plasticity's curve and surface tools.
+
+## Shortcuts
+
+The default keys follow Plasticity's, one key per intent: F opens the
+command palette, B fillets (edges, or curve corners), O offsets (curves,
+faces or a whole solid), Q runs a boolean, C cuts, E extrudes, L lofts, P
+makes a pipe, G / R / S move, rotate and scale, 1–4 pick vertices, edges,
+faces or solids, A selects all, Shift+R repeats the last command, / frames
+the selection and Space sets the construction plane from it. Every
+command, with or without a key, is in the palette; right-click one there
+to give it a new shortcut. Changes are kept in
+`~/.config/ductile/keymap.txt` as lines like `Box = Shift+B`.
 
 ## Layout
 
