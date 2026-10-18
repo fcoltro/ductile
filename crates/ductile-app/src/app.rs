@@ -671,6 +671,39 @@ fn vertex_overlay(doc: &Document, out: &mut Vec<LineInstance>) {
                 out.push(LineInstance::point(p, col, s));
             }
         }
+        // Surface control nets, likewise.
+        if show_all && o.body.kind == ductile_brep::BodyKind::Sheet {
+            let cps = ductile_brep::ops::sheet::surface_control_points(&o.body);
+            for f in o.body.face_ids() {
+                let ductile_geom::Surface::Nurbs(s) = &o.body.face(f).surface else { continue };
+                let pts: Vec<DVec3> = cps.iter().filter(|c| c.0 == f).map(|c| c.2).collect();
+                if pts.len() != s.nu * s.nv {
+                    continue;
+                }
+                for i in 0..s.nu {
+                    for j in 0..s.nv {
+                        let p = pts[i * s.nv + j];
+                        if j + 1 < s.nv {
+                            out.push(LineInstance::new(p, pts[i * s.nv + j + 1], [0.55, 0.6, 0.75, 0.8], 1.0));
+                        }
+                        if i + 1 < s.nu {
+                            out.push(LineInstance::new(p, pts[(i + 1) * s.nv + j], [0.55, 0.6, 0.75, 0.8], 1.0));
+                        }
+                    }
+                }
+            }
+            for (f, i, p) in cps {
+                let pk = Pick::SurfaceControl(o.id, f, i);
+                let (col, s) = if doc.selection.contains(&pk) {
+                    ([1.0, 0.75, 0.2, 1.0], 9.0)
+                } else if doc.hover == Some(pk) {
+                    ([1.0, 0.9, 0.55, 1.0], 9.0)
+                } else {
+                    ([0.55, 0.75, 1.0, 1.0], 6.0)
+                };
+                out.push(LineInstance::point(p, col, s));
+            }
+        }
     }
 }
 

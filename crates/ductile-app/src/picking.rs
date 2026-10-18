@@ -160,9 +160,18 @@ pub fn pick_vertex(
     best.map(|(_, o, v)| (o, v))
 }
 
-/// Nearest curve control point (of visible wire objects) to the cursor.
+/// Nearest curve or surface control point (of visible objects) to the cursor.
 pub fn pick_control(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, tol_px: f64) -> Option<Pick> {
     let mut best: Option<(f64, Pick)> = None;
+    for o in doc.objects.iter().filter(|o| o.visible && o.body.kind == ductile_brep::BodyKind::Sheet) {
+        for (f, i, p) in ductile_brep::ops::sheet::surface_control_points(&o.body) {
+            let Some((s, _)) = to_screen(cam, p, size) else { continue };
+            let d = s.distance(cursor);
+            if d < tol_px && best.map(|x| d < x.0).unwrap_or(true) {
+                best = Some((d, Pick::SurfaceControl(o.id, f, i)));
+            }
+        }
+    }
     for o in doc.objects.iter().filter(|o| o.visible && o.body.kind == ductile_brep::BodyKind::Wire) {
         for (e, i, p) in ductile_brep::profile::control_points(&o.body) {
             let Some((s, _)) = to_screen(cam, p, size) else { continue };
@@ -214,6 +223,11 @@ pub fn pick_box(doc: &Document, cam: &Camera, a: DVec2, b: DVec2, size: DVec2, m
                         if inside(p) {
                             out.push(Pick::Control(o.id, e, i));
                         }
+                    }
+                }
+                for (f, i, p) in ductile_brep::ops::sheet::surface_control_points(&o.body) {
+                    if inside(p) {
+                        out.push(Pick::SurfaceControl(o.id, f, i));
                     }
                 }
             }

@@ -28,12 +28,14 @@ pub enum Pick {
     Vertex(ObjectId, VertexId),
     /// Control point `index` of a curve edge.
     Control(ObjectId, EdgeId, u32),
+    /// Control point `index` of a surface face's net.
+    SurfaceControl(ObjectId, FaceId, u32),
 }
 
 impl Pick {
     pub fn object(&self) -> ObjectId {
         match *self {
-            Pick::Object(o) | Pick::Face(o, _) | Pick::Edge(o, _) | Pick::Vertex(o, _) | Pick::Control(o, _, _) => o,
+            Pick::Object(o) | Pick::Face(o, _) | Pick::Edge(o, _) | Pick::Vertex(o, _) | Pick::Control(o, _, _) | Pick::SurfaceControl(o, _, _) => o,
         }
     }
 }
@@ -157,7 +159,7 @@ impl Document {
             o.revision = rev;
         }
         // Sub-object picks may no longer be valid.
-        self.selection.retain(|p| !matches!(p, Pick::Face(o, _) | Pick::Edge(o, _) | Pick::Vertex(o, _) | Pick::Control(o, _, _) if *o == id));
+        self.selection.retain(|p| !matches!(p, Pick::Face(o, _) | Pick::Edge(o, _) | Pick::Vertex(o, _) | Pick::Control(o, _, _) | Pick::SurfaceControl(o, _, _) if *o == id));
         self.dirty = true;
     }
 

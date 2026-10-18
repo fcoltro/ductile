@@ -68,13 +68,21 @@ impl Sewer {
     /// boundary iso-curves (u along the first, v along the second), with
     /// its normal along Su × Sv.
     pub fn patch(&mut self, s: NurbsSurface) {
+        self.patch_oriented(s, false);
+    }
+
+    /// As [`Sewer::patch`], with the normal flipped when `reversed`.
+    pub fn patch_oriented(&mut self, s: NurbsSurface, reversed: bool) {
         let ((u0, u1), (v0, v1)) = s.domain();
         let iso = |c: NurbsCurve, rev: bool| {
             let (a, b) = c.domain();
             Segment { curve: Curve3::Nurbs(c), t0: a, t1: b, reversed: rev }
         };
-        let lp = [iso(s.iso_v(v0), false), iso(s.iso_u(u1), false), iso(s.iso_v(v1), true), iso(s.iso_u(u0), true)];
-        self.face(Surface::Nurbs(s), false, &lp, &[]);
+        let mut lp = vec![iso(s.iso_v(v0), false), iso(s.iso_u(u1), false), iso(s.iso_v(v1), true), iso(s.iso_u(u0), true)];
+        if reversed {
+            lp = lp.into_iter().rev().map(|x| x.flipped()).collect();
+        }
+        self.face(Surface::Nurbs(s), reversed, &lp, &[]);
     }
 }
 
@@ -588,6 +596,70 @@ fn fit_g1(sides: [&NurbsCurve; 4], cross: &dyn Fn(DVec3) -> Option<(DVec3, DVec3
     Some(NurbsSurface::new(p, q, ku, kv, nu, nv, ctrl))
 }
 
+/// The NURBS surface of face `f` when the face is the whole surface,
+/// bounded by its own boundary iso-curves, so moving its control points
+/// keeps it a valid face.
+fn whole_patch(b: &Body, f: crate::topo::FaceId) -> Option<&NurbsSurface> {
+    let face = b.face(f);
+    let Surface::Nurbs(s) = &face.surface else { return None };
+    if face.loops.len() != 1 {
+        return None;
+    }
+    let ((u0, u1), (v0, v1)) = s.domain();
+    let tol = 1e-6 * (u1 - u0).max(v1 - v0);
+    let on_rim = |p: DVec3| {
+        let uv = face.surface.project(p, None);
+        (uv.x - u0).abs() < tol || (uv.x - u1).abs() < tol || (uv.y - v0).abs() < tol || (uv.y - v1).abs() < tol
+    };
+    let all = b.face_edges(f).iter().all(|e| {
+        let ed = b.edge(*e);
+        [0.0, 0.25, 0.5, 0.75, 1.0].iter().all(|k| on_rim(ed.curve.point(ed.t0 + (ed.t1 - ed.t0) * k)))
+    });
+    all.then_some(s)
+}
+
+/// Editable control points of a sheet made of whole NURBS patches: (face,
+/// index into the face's net, point). Empty for any other body.
+pub fn surface_control_points(b: &Body) -> Vec<(crate::topo::FaceId, u32, DVec3)> {
+    if b.kind != BodyKind::Sheet {
+        return Vec::new();
+    }
+    let patches: Option<Vec<_>> = b.face_ids().map(|f| whole_patch(b, f).map(|s| (f, s))).collect();
+    let Some(patches) = patches else { return Vec::new() };
+    patches.into_iter().flat_map(|(f, s)| s.ctrl.iter().enumerate().map(move |(i, h)| (f, i as u32, h.truncate() / h.w))).collect()
+}
+
+/// The sheet with the given control points transformed by `m`. Control
+/// points of other faces at the same place (shared boundaries, the seam
+/// of a closed surface) move with them, so the faces stay joined.
+pub fn move_surface_controls(b: &Body, moves: &[(crate::topo::FaceId, u32)], m: &DMat4) -> Option<Body> {
+    if surface_control_points(b).is_empty() {
+        return None;
+    }
+    let size = b.bbox().diagonal().max(1e-9);
+    let tol = 1e-9 * size.max(1.0);
+    let picked: Vec<DVec3> = moves
+        .iter()
+        .filter_map(|(f, i)| match &b.face(*f).surface {
+            Surface::Nurbs(s) => s.ctrl.get(*i as usize).map(|h| h.truncate() / h.w),
+            _ => None,
+        })
+        .collect();
+    let mut sw = Sewer::new(BodyKind::Sheet, 1e-7 * size.max(1.0));
+    for f in b.face_ids() {
+        let Surface::Nurbs(s) = &b.face(f).surface else { return None };
+        let mut s = s.clone();
+        for h in s.ctrl.iter_mut() {
+            let p = h.truncate() / h.w;
+            if picked.iter().any(|q| q.distance(p) < tol) {
+                *h = (m.transform_point3(p) * h.w).extend(h.w);
+            }
+        }
+        sw.patch_oriented(s, b.face(f).reversed);
+    }
+    Some(sw.body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,5 +864,32 @@ mod tests {
             let top = s.point(0.5, 0.5);
             assert!(top.z > h + 0.3 * r, "{c}: {top}");
         }
+    }
+
+    #[test]
+    fn surface_control_points_move() {
+        let q = [DVec3::new(0.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0), DVec3::new(2.0, 2.0, 1.0), DVec3::new(0.0, 2.0, 0.0)];
+        let skew = patch(&chain((0..4).map(|i| Segment::line(q[i], q[(i + 1) % 4])).collect()), &[]).unwrap();
+        let cps = surface_control_points(&skew);
+        assert_eq!(cps.len(), 4);
+        // Lift one corner: the patch and its edges follow.
+        let up = DMat4::from_translation(DVec3::Z);
+        let moved = move_surface_controls(&skew, &[(cps[0].0, cps[0].1)], &up).unwrap();
+        assert_eq!((moved.faces.len(), moved.edges.len()), (1, 4));
+        assert!(moved.vertices.iter().any(|v| v.point.distance(cps[0].2 + DVec3::Z) < 1e-12));
+        // A loft of two faces: moving a control point on their shared
+        // boundary moves both faces' copies, so they stay joined.
+        let a = chain(vec![Segment::line(DVec3::ZERO, DVec3::new(2.0, 0.0, 0.0)), Segment::line(DVec3::new(2.0, 0.0, 0.0), DVec3::new(2.0, 2.0, 0.0))]);
+        let b = chain(vec![Segment::line(DVec3::new(0.0, 0.0, 3.0), DVec3::new(2.0, 0.0, 3.0)), Segment::line(DVec3::new(2.0, 0.0, 3.0), DVec3::new(2.0, 2.0, 3.0))]);
+        let s = loft_sheet(&[a, b]).unwrap();
+        let cps = surface_control_points(&s);
+        let shared = cps.iter().find(|c| c.2.distance(DVec3::new(2.0, 0.0, 3.0)) < 1e-12).unwrap();
+        let moved = move_surface_controls(&s, &[(shared.0, shared.1)], &DMat4::from_translation(DVec3::new(0.5, -0.5, 0.0))).unwrap();
+        assert_eq!(moved.faces.len(), 2);
+        assert_eq!(open_boundary(&moved), 6);
+        // Trimmed faces have no editable control points.
+        let p = [DVec3::ZERO, DVec3::new(4.0, 0.0, 0.0), DVec3::new(4.0, 4.0, 0.0), DVec3::new(0.0, 4.0, 0.0)];
+        let flat = patch(&chain((0..4).map(|i| Segment::line(p[i], p[(i + 1) % 4])).collect()), &[]).unwrap();
+        assert!(surface_control_points(&flat).is_empty());
     }
 }

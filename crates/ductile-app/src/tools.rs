@@ -402,6 +402,7 @@ pub struct TransformTool {
     targets: Vec<ObjectId>,
     /// Selected curve control points; when any, only these move.
     controls: Vec<(ObjectId, ductile_brep::EdgeId, u32)>,
+    surface_controls: Vec<(ObjectId, ductile_brep::FaceId, u32)>,
     pivot: DVec3,
     start: Option<DVec3>,
     current: Option<DVec3>,
@@ -414,9 +415,17 @@ pub struct TransformTool {
 impl TransformTool {
     pub fn new(kind: TransformKind, doc: &Document) -> Self {
         let controls: Vec<_> = doc.selection.iter().filter_map(|p| if let Pick::Control(o, e, i) = p { Some((*o, *e, *i)) } else { None }).collect();
+        let surface_controls: Vec<_> = doc.selection.iter().filter_map(|p| if let Pick::SurfaceControl(o, f, i) = p { Some((*o, *f, *i)) } else { None }).collect();
         let targets = doc.selected_objects();
         let mut bb = ductile_geom::BBox3::EMPTY;
-        if controls.is_empty() {
+        for (o, f, i) in &surface_controls {
+            if let Some(ductile_geom::Surface::Nurbs(s)) = doc.object(*o).map(|ob| ob.body.face(*f).surface.clone()) {
+                if let Some(h) = s.ctrl.get(*i as usize) {
+                    bb = bb.union(&ductile_geom::BBox3::from_points([h.truncate() / h.w]));
+                }
+            }
+        }
+        if controls.is_empty() && surface_controls.is_empty() {
             for id in &targets {
                 if let Some(o) = doc.object(*id) {
                     bb = bb.union(&o.body.bbox());
@@ -432,14 +441,18 @@ impl TransformTool {
             }
         }
         let pivot = if bb.is_empty() { DVec3::ZERO } else { bb.center() };
-        Self { kind, targets, controls, pivot, start: None, current: None, axis: None, typed: None, value: 0.0 }
+        Self { kind, targets, controls, surface_controls, pivot, start: None, current: None, axis: None, typed: None, value: 0.0 }
     }
 
     /// The object's body after applying `m` to it, or to its selected
     /// control points.
     fn moved(&self, id: ObjectId, body: &Body, m: &DMat4) -> Body {
-        if self.controls.is_empty() {
+        if self.controls.is_empty() && self.surface_controls.is_empty() {
             return body.transformed(m);
+        }
+        let on_surface: Vec<_> = self.surface_controls.iter().filter(|c| c.0 == id).map(|c| (c.1, c.2)).collect();
+        if !on_surface.is_empty() {
+            return ductile_brep::ops::sheet::move_surface_controls(body, &on_surface, m).unwrap_or_else(|| body.clone());
         }
         let mine: Vec<_> = self.controls.iter().filter(|c| c.0 == id).map(|c| (c.1, c.2)).collect();
         ductile_brep::profile::move_controls(body, &mine, m)
@@ -2581,6 +2594,25 @@ mod tests {
         let a = extrude_selected(&mut doc);
         let expect = 12.0 - std::f64::consts::PI / 4.0;
         assert!((a - expect).abs() < 2e-2, "{a} vs {expect}");
+    }
+
+    #[test]
+    fn move_tool_drags_surface_control_points() {
+        use ductile_brep::profile::{Loop3, Segment};
+        let q = [DVec3::ZERO, DVec3::new(2.0, 0.0, 0.0), DVec3::new(2.0, 2.0, 1.0), DVec3::new(0.0, 2.0, 0.0)];
+        let lp = Loop3 { segments: (0..4).map(|i| Segment::line(q[i], q[(i + 1) % 4])).collect() };
+        let mut doc = Document::default();
+        let id = doc.add_body("Patch", ductile_brep::ops::sheet::patch(&lp, &[]).unwrap());
+        let cps = ductile_brep::ops::sheet::surface_control_points(&doc.object(id).unwrap().body);
+        let c = cps.iter().find(|c| c.2.distance(q[2]) < 1e-12).unwrap();
+        doc.selection.insert(Pick::SurfaceControl(id, c.0, c.1));
+        let mut t = TransformTool::new(TransformKind::Move, &doc);
+        t.axis = Some(2);
+        t.typed_value(Some(1.5));
+        assert!(t.commit(&mut doc));
+        let b = &doc.object(id).unwrap().body;
+        assert!(b.vertices.iter().any(|v| v.point.distance(q[2] + DVec3::Z * 1.5) < 1e-9));
+        assert!(b.vertices.iter().any(|v| v.point.distance(q[0]) < 1e-12));
     }
 
     #[test]
