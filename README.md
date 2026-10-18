@@ -133,6 +133,9 @@ code from them.
 - Curvature combs (the Curvature button) on the selected curves, edges and
   solids, all at one scale so joins compare, with G0 / G1 / G2 marked where
   picked curves meet. Headless: `--curvature`.
+- Measure (palette or View menu): with two things selected, the shortest
+  distance between them drawn as a dimension (the angle too for two
+  planes); with one, its length, radius, area or volume.
 - Move (G) / rotate (R) / scale (S) / mirror (Alt+X), linear and radial
   arrays, undo/redo. Mirror reflects across the construction plane,
   or across a selected planar face; a solid mirrored across its own face is

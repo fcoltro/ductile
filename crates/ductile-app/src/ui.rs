@@ -80,6 +80,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                     Command::ToggleXray,
                     Command::ToggleZebra,
                     Command::ToggleCurvature,
+                    Command::Measure,
                     Command::ToggleSnap,
                 ] {
                     menu_item(app, ui, c);

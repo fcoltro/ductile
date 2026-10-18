@@ -97,6 +97,7 @@ pub enum Command {
     ToggleXray,
     ToggleZebra,
     ToggleCurvature,
+    Measure,
     ToggleSnap,
     SetCPlane,
     SetCPlaneOnly,
@@ -198,6 +199,7 @@ impl Command {
         Command::ToggleXray,
         Command::ToggleZebra,
         Command::ToggleCurvature,
+        Command::Measure,
         Command::ToggleSnap,
         Command::SetCPlane,
         Command::SetCPlaneOnly,
@@ -300,6 +302,7 @@ impl Command {
             ToggleXray => "Toggle x-ray",
             ToggleZebra => "Toggle zebra stripes",
             ToggleCurvature => "Toggle curvature combs",
+            Measure => "Measure",
             ToggleSnap => "Toggle snapping",
             SetCPlane => "Construction plane from selection, and look at it",
             SetCPlaneOnly => "Construction plane from selection",
@@ -337,7 +340,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
     // Shift+R repeats modeling commands, not navigation or selection.
     let fleeting = matches!(
         cmd,
-        Repeat | Palette | Help | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleCurvature | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
+        Repeat | Palette | Help | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleCurvature | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
     );
     if !fleeting {
         app.last_command = Some(cmd);
@@ -751,6 +754,13 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         ToggleEdges => app.show_edges = !app.show_edges,
         ToggleXray => app.toggle_xray(),
         ToggleZebra => app.toggle_zebra(),
+        Measure => match crate::measure::measure(&app.doc) {
+            Some(m) => {
+                app.status = m.text.clone();
+                app.measurement = Some((m, app.doc.selection.clone()));
+            }
+            None => app.status = "Select one thing to measure its size, or two to measure between them".into(),
+        },
         ToggleCurvature => {
             app.show_curvature = !app.show_curvature;
             if app.show_curvature && app.doc.selection.is_empty() {

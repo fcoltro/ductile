@@ -13,6 +13,7 @@ mod commands;
 mod cplane;
 mod expr;
 mod keymap;
+mod measure;
 mod document;
 mod icons;
 mod picking;

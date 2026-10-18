@@ -57,6 +57,8 @@ pub struct DuctileApp {
     pub show_curvature: bool,
     /// Length of the longer comb teeth, as a fraction of the curves' size.
     pub comb_scale: f64,
+    /// The last measurement, shown while the selection it measured stays.
+    pub measurement: Option<(crate::measure::Measurement, std::collections::BTreeSet<Pick>)>,
     pub palette_open: bool,
     pub palette_query: String,
     pub show_help: bool,
@@ -126,6 +128,7 @@ impl DuctileApp {
             show_edges: true,
             show_curvature: false,
             comb_scale: 0.1,
+            measurement: None,
             palette_open: false,
             palette_query: String::new(),
             show_help: false,
@@ -512,6 +515,25 @@ impl DuctileApp {
         if self.show_curvature {
             self.curvature_overlay(&mut overlay, &mut labels);
         }
+        if self.measurement.as_ref().is_some_and(|(_, sel)| *sel != self.doc.selection) {
+            self.measurement = None;
+        }
+        if let Some((m, _)) = &self.measurement {
+            match m.span {
+                Some((p, q)) => {
+                    let c = [0.45, 0.95, 0.6, 1.0];
+                    overlay.push(LineInstance::new(p, q, c, 2.0));
+                    overlay.push(LineInstance::point(p, c, 6.0));
+                    overlay.push(LineInstance::point(q, c, 6.0));
+                    labels.push(((p + q) * 0.5, m.text.clone()));
+                }
+                None => {
+                    if let Some(p) = self.doc.selection.iter().next().and_then(|p| self.pick_point(p)) {
+                        labels.push((p, m.text.clone()));
+                    }
+                }
+            }
+        }
         vertex_overlay(&self.doc, &mut overlay);
         let ppp = ui.ctx().pixels_per_point();
         let px = [(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32];
@@ -779,6 +801,20 @@ impl DuctileApp {
                 }
             }
         }
+    }
+
+    /// A point to label a pick at.
+    fn pick_point(&self, p: &Pick) -> Option<DVec3> {
+        let ob = self.doc.object(p.object())?;
+        Some(match *p {
+            Pick::Vertex(_, v) => ob.body.vertex(v),
+            Pick::Edge(_, e) => ob.body.edge(e).mid(),
+            Pick::Face(_, f) => {
+                let m = ob.mesh.faces.get(f.idx())?;
+                m.positions.iter().copied().sum::<DVec3>() / m.positions.len().max(1) as f64
+            }
+            _ => ob.body.bbox().center(),
+        })
     }
 
     /// Hands the typed field's value to the tool (None while it doesn't parse).
