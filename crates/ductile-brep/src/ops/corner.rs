@@ -444,9 +444,79 @@ pub(crate) fn add_face(b: &mut Body, surface: Surface, reversed: bool, mut lp: V
 /// Sections on oblique end planes are the normal section projected along
 /// the edge, so the blend face is exactly ruled between them.
 pub fn smooth_edge_tool(t0: DVec3, a0: DVec3, c0: DVec3, ctrl: &[DVec4], dir: DVec3, ends: [(DVec3, DVec3); 2]) -> Option<Body> {
-    let proj = |x: DVec3, (o, n): (DVec3, DVec3)| -> Option<DVec3> {
-        let d = dir.dot(n);
-        (d.abs() > 1e-9).then(|| x + dir * ((o - x).dot(n) / d))
+    let moved: Vec<DVec4> = ctrl.iter().map(|h| h + (dir * h.w).extend(0.0)).collect();
+    ruled_edge_tool([Station { t: t0, a: a0, c: c0, ctrl: ctrl.to_vec() }, Station { t: t0 + dir, a: a0 + dir, c: c0 + dir, ctrl: moved }], ends)
+}
+
+/// A blend's cross-section at one place along a straight edge: the corner
+/// point on the edge, the contacts with the two faces and the section's
+/// homogeneous control points from `a` to `c`.
+pub struct Station {
+    pub t: DVec3,
+    pub a: DVec3,
+    pub c: DVec3,
+    pub ctrl: Vec<DVec4>,
+}
+
+/// Product of two polynomials in Bernstein form of the same degree.
+fn bernstein_mul(f: &[f64], g: &[f64]) -> Vec<f64> {
+    let p = f.len() - 1;
+    let bin = |n: usize, k: usize| ductile_geom::nurbs::basis::binomial(n, k);
+    (0..=2 * p)
+        .map(|k| {
+            let lo = k.saturating_sub(p);
+            (lo..=k.min(p)).map(|i| bin(p, i) * bin(p, k - i) * f[i] * g[k - i]).sum::<f64>() / bin(2 * p, k)
+        })
+        .collect()
+}
+
+/// Exact tool for a blend along a straight edge between two planes whose
+/// sections at two stations are given (the same section shifted, for a
+/// constant blend; scaled about the edge, for a radius varying linearly
+/// along it). Corresponding points of the two sections span the blend's
+/// rulings, so the blend face is the ruled surface between them, cut by
+/// the end planes `(point, normal)`; the cuts are exact rational curves.
+pub fn ruled_edge_tool(st: [Station; 2], ends: [(DVec3, DVec3); 2]) -> Option<Body> {
+    let n = st[0].ctrl.len();
+    if st[1].ctrl.len() != n || (0..n).any(|i| (st[0].ctrl[i].w - st[1].ctrl[i].w).abs() > 1e-12) {
+        return None;
+    }
+    let dir = (st[1].t - st[0].t).normalize();
+    // Where the line through matching points of the stations meets a plane.
+    let meet = |p: DVec3, q: DVec3, (o, nrm): (DVec3, DVec3)| -> Option<DVec3> {
+        let d = (q - p).dot(nrm);
+        (d.abs() > 1e-12).then(|| p + (q - p) * ((o - p).dot(nrm) / d))
+    };
+    // A shifted section is cut by projecting it along the shift; otherwise
+    // the cut, `(b A - a B) / (b - a)` with `a`, `b` the stations' signed
+    // distances from the plane, is rational of twice the degree.
+    let shift = st[1].t - st[0].t;
+    let shifted = (0..n).all(|i| (st[1].ctrl[i].truncate() / st[1].ctrl[i].w - st[0].ctrl[i].truncate() / st[0].ctrl[i].w - shift).length() < 1e-9 * (1.0 + shift.length()));
+    let cut = |(o, nrm): (DVec3, DVec3)| -> Option<NurbsCurve> {
+        let cp: Vec<DVec4> = if shifted {
+            st[0].ctrl.iter().map(|h| meet(h.truncate() / h.w, h.truncate() / h.w + shift, (o, nrm)).map(|p| (p * h.w).extend(h.w))).collect::<Option<_>>()?
+        } else {
+            let dist = |s: &Station| -> Vec<f64> { s.ctrl.iter().map(|h| h.truncate().dot(nrm) - o.dot(nrm) * h.w).collect() };
+            let (da, db) = (dist(&st[0]), dist(&st[1]));
+            let w: Vec<f64> = st[0].ctrl.iter().map(|h| h.w).collect();
+            let gap: Vec<f64> = db.iter().zip(&da).map(|(b, a)| b - a).collect();
+            let weight = bernstein_mul(&w, &gap);
+            let mut xyz = vec![DVec3::ZERO; 2 * n - 1];
+            for axis in 0..3 {
+                let ca: Vec<f64> = st[0].ctrl.iter().map(|h| h[axis]).collect();
+                let cb: Vec<f64> = st[1].ctrl.iter().map(|h| h[axis]).collect();
+                let (x, y) = (bernstein_mul(&db, &ca), bernstein_mul(&da, &cb));
+                for k in 0..2 * n - 1 {
+                    xyz[k][axis] = x[k] - y[k];
+                }
+            }
+            if weight.iter().any(|w| w.abs() < 1e-12) || weight.iter().any(|w| w.signum() != weight[0].signum()) {
+                return None;
+            }
+            xyz.iter().zip(&weight).map(|(p, w)| (*p).extend(*w)).map(|h| if h.w < 0.0 { -h } else { h }).collect()
+        };
+        let deg = cp.len() - 1;
+        Some(NurbsCurve::new(deg, [vec![0.0; deg + 1], vec![1.0; deg + 1]].concat(), cp))
     };
     let mut b = Body::new(BodyKind::Solid);
     let mut tv = Vec::new();
@@ -454,14 +524,10 @@ pub fn smooth_edge_tool(t0: DVec3, a0: DVec3, c0: DVec3, ctrl: &[DVec4], dir: DV
     let mut cv = Vec::new();
     let mut curves = Vec::new();
     for end in ends {
-        tv.push(b.add_vertex(proj(t0, end)?));
-        av.push(b.add_vertex(proj(a0, end)?));
-        cv.push(b.add_vertex(proj(c0, end)?));
-        let cp: Vec<DVec4> = ctrl.iter().map(|h| {
-            let w = h.w;
-            proj(h.truncate() / w, end).map(|p| (p * w).extend(w))
-        }).collect::<Option<_>>()?;
-        curves.push(NurbsCurve::new(ctrl.len() - 1, [vec![0.0; ctrl.len()], vec![1.0; ctrl.len()]].concat(), cp));
+        tv.push(b.add_vertex(meet(st[0].t, st[1].t, end)?));
+        av.push(b.add_vertex(meet(st[0].a, st[1].a, end)?));
+        cv.push(b.add_vertex(meet(st[0].c, st[1].c, end)?));
+        curves.push(cut(end)?);
     }
     let line = |b: &mut Body, x: VertexId, y: VertexId| {
         let (p, q) = (b.vertex(x), b.vertex(y));

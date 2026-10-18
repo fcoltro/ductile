@@ -1210,8 +1210,11 @@ pub struct FilletTool {
     start_t: Option<f64>,
     pub radius: f64,
     pub shape: BlendShape,
+    /// Radius varying linearly along each edge, to `end_radius` at its end.
+    pub variable: bool,
+    pub end_radius: f64,
     typed: Option<f64>,
-    cache: std::cell::RefCell<Option<(f64, BlendShape, Option<Body>, Option<String>)>>,
+    cache: std::cell::RefCell<Option<((f64, BlendShape, bool, f64), Option<Body>, Option<String>)>>,
 }
 
 impl FilletTool {
@@ -1235,7 +1238,7 @@ impl FilletTool {
             .sum();
         let dir = (-n).try_normalize().unwrap_or(DVec3::Z);
         let shape = if chamfer { BlendShape::Chamfer } else { BlendShape::Round };
-        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, shape, typed: None, cache: std::cell::RefCell::new(None) })
+        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, shape, variable: false, end_radius: 1.0, typed: None, cache: std::cell::RefCell::new(None) })
     }
 
     fn value(&self) -> f64 {
@@ -1243,15 +1246,21 @@ impl FilletTool {
     }
 
     fn result(&self) -> (Option<Body>, Option<String>) {
-        use ductile_brep::ops::fillet::{blend_edges, Blend};
+        use ductile_brep::ops::fillet::{blend_edges, blend_edges_variable, Blend};
         let r = self.value();
-        if let Some((cr, cc, b, e)) = &*self.cache.borrow() {
-            if *cr == r && *cc == self.shape {
+        let key = (r, self.shape, self.variable, self.end_radius);
+        if let Some((k, b, e)) = &*self.cache.borrow() {
+            if *k == key {
                 return (b.clone(), e.clone());
             }
         }
         let out = if r <= 1e-9 {
             (None, None)
+        } else if self.variable && self.shape != BlendShape::Chamfer {
+            match blend_edges_variable(&self.body, &self.edges, r, self.end_radius.max(1e-6), self.shape == BlendShape::Smooth) {
+                Ok(b) => (Some(b), None),
+                Err(e) => (None, Some(e.to_string())),
+            }
         } else {
             let blend = match self.shape {
                 BlendShape::Round => Blend::Fillet(r),
@@ -1263,7 +1272,7 @@ impl FilletTool {
                 Err(e) => (None, Some(e.to_string())),
             }
         };
-        *self.cache.borrow_mut() = Some((r, self.shape, out.0.clone(), out.1.clone()));
+        *self.cache.borrow_mut() = Some((key, out.0.clone(), out.1.clone()));
         out
     }
 }
@@ -1277,7 +1286,7 @@ impl Tool for FilletTool {
         }
     }
     fn hint(&self) -> String {
-        match self.cache.borrow().as_ref().and_then(|c| c.3.clone()) {
+        match self.cache.borrow().as_ref().and_then(|c| c.2.clone()) {
             Some(e) => format!("{} failed: {e}", self.name()),
             None => format!("{}: drag or type a {} ({:.4}), click or Enter to finish", self.name(), if self.shape == BlendShape::Chamfer { "distance" } else { "radius" }, self.value()),
         }
@@ -1312,6 +1321,16 @@ impl Tool for FilletTool {
                 ch |= ui.radio_value(&mut self.shape, shape, label).changed();
             }
         });
+        if self.shape != BlendShape::Chamfer {
+            ch |= ui.checkbox(&mut self.variable, "Variable radius (straight edges)").changed();
+            if self.variable {
+                let mut e = self.end_radius;
+                if drag_value(ui, "End radius", &mut e, 0.01) {
+                    self.end_radius = e.max(1e-4);
+                    ch = true;
+                }
+            }
+        }
         ch
     }
     fn hidden_objects(&self) -> Vec<ObjectId> {

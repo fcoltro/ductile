@@ -221,7 +221,7 @@ fn is_line_between_planes(b: &Body, e: EdgeId, info: &EdgeInfo) -> bool {
 /// ending at the corner planes `caps` (point, normal) where it meets a
 /// corner patch, else at the face capping each end, else past the end.
 fn smooth_line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, r: f64, caps: &[(DVec3, DVec3)], size: f64) -> Result<Body, FilletError> {
-    let EdgeInfo { p0, p1, t, n1, n2, convex, .. } = *info;
+    let EdgeInfo { p0, t, n1, n2, convex, .. } = *info;
     let sgn = if convex { -1.0 } else { 1.0 };
     let m = DMat3::from_cols(n1, n2, t).transpose();
     let o = m.inverse() * DVec3::new(sgn * r, sgn * r, 0.0);
@@ -230,6 +230,15 @@ fn smooth_line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, r: f64, 
         return Err(FilletError::TooLarge);
     }
     let ctrl = super::roll::section_ctrl(blend, p0 + o, q1, q2);
+    let ends = line_ends(b, e, info, caps, r);
+    super::corner::smooth_edge_tool(p0, q1, q2, &ctrl, t, ends).ok_or(FilletError::Unsupported)
+}
+
+/// End planes `(point, normal)` for a tool along the straight edge `e`,
+/// in order along the edge: a corner plane from `caps` near the end, else
+/// the planar face capping it, else a plane past the end.
+fn line_ends(b: &Body, e: EdgeId, info: &EdgeInfo, caps: &[(DVec3, DVec3)], r: f64) -> [(DVec3, DVec3); 2] {
+    let EdgeInfo { p0, p1, t, .. } = *info;
     let margin = r * 4.0 + p0.distance(p1) * 0.05;
     let ed = b.edge(e);
     let mut ends = Vec::new();
@@ -253,7 +262,69 @@ fn smooth_line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, r: f64, 
     if (ends[0].0 - p0).dot(t) > (ends[1].0 - p0).dot(t) {
         ends.swap(0, 1);
     }
-    super::corner::smooth_edge_tool(p0, q1, q2, &ctrl, t, [ends[0], ends[1]]).ok_or(FilletError::Unsupported)
+    [ends[0], ends[1]]
+}
+
+/// Blends straight edges between planes with a radius varying linearly
+/// along each edge, from `r0` at its start vertex to `r1` at its end. The
+/// round blend between two planes is then a cone tangent to both; the
+/// smooth (G2) one is its curvature-continuous counterpart. Each blend runs
+/// out into the faces capping the edge's ends; edges must not share a
+/// vertex.
+pub fn blend_edges_variable(body: &Body, edges: &[EdgeId], r0: f64, r1: f64, smooth: bool) -> Result<Body, FilletError> {
+    if r0 <= 0.0 || r1 <= 0.0 {
+        return Err(FilletError::TooLarge);
+    }
+    let size = body.bbox().diagonal().max(1e-6) * 4.0;
+    let mut seen = BTreeSet::new();
+    let (mut cut, mut add) = (Vec::new(), Vec::new());
+    for &e in edges {
+        let ed = body.edge(e);
+        if !seen.insert(ed.v0) || !seen.insert(ed.v1) {
+            return Err(FilletError::Unsupported);
+        }
+        let info = edge_info(body, e)?;
+        if !is_line_between_planes(body, e, &info) {
+            return Err(FilletError::Unsupported);
+        }
+        let EdgeInfo { p0, t, n1, n2, convex, .. } = info;
+        let (start, len) = (body.vertex(ed.v0), ed.start().distance(ed.end()));
+        // Radius at a point on the edge's line.
+        let radius = |p: DVec3| {
+            let f = (p - start).dot((ed.end() - start) / len) / len;
+            r0 + (r1 - r0) * f
+        };
+        let blend = if smooth { Blend::Smooth(1.0) } else { Blend::Fillet(1.0) };
+        let sgn = if convex { -1.0 } else { 1.0 };
+        let m = DMat3::from_cols(n1, n2, t).transpose().inverse();
+        let station = |p: DVec3| -> Result<super::corner::Station, FilletError> {
+            let r = radius(p);
+            if r <= 0.0 {
+                return Err(FilletError::TooLarge);
+            }
+            let o = m * DVec3::new(sgn * r, sgn * r, 0.0);
+            let (q1, q2) = (p + o - n1 * o.dot(n1), p + o - n2 * o.dot(n2));
+            if (q1 - p).length().max((q2 - p).length()) > size {
+                return Err(FilletError::TooLarge);
+            }
+            Ok(super::corner::Station { t: p, a: q1, c: q2, ctrl: super::roll::section_ctrl(blend, p + o, q1, q2) })
+        };
+        let ends = line_ends(body, e, &info, &[], r0.max(r1));
+        let tool = super::corner::ruled_edge_tool([station(p0)?, station(info.p1)?], ends).ok_or(FilletError::Unsupported)?;
+        if convex {
+            cut.push(tool);
+        } else {
+            add.push(tool);
+        }
+    }
+    let mut out = body.clone();
+    for t in &cut {
+        out = boolean(&out, t, BoolOp::Difference)?;
+    }
+    for t in &add {
+        out = boolean(&out, t, BoolOp::Union)?;
+    }
+    Ok(out)
 }
 
 fn edge_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> Result<Body, FilletError> {
@@ -758,5 +829,58 @@ mod smooth_tests {
         assert!(crease < 2e-3, "crease {crease}");
         let (vf, vb) = (vol(&f), vol(&b));
         assert!(vf < vb && vf > vb - 1.5, "{vf} vs {vb}");
+    }
+
+    #[test]
+    fn variable_round_and_smooth_blends() {
+        // A box edge whose radius grows from 0.3 to 0.8 along it: the
+        // round blend is a cone, removing (1 - pi/4) r^2 per unit length.
+        let (w, d, h) = (4.0, 3.0, 2.0);
+        let b = make_box(&Frame::WORLD, DVec3::new(w, d, h));
+        let e = b.edge_ids().find(|e| {
+            let ed = b.edge(*e);
+            ed.start().z > 1.9 && ed.end().z > 1.9 && ed.start().y.abs() < 1e-9 && ed.end().y.abs() < 1e-9
+        }).unwrap();
+        let (r0, r1) = (0.3, 0.8);
+        let mean_sq = (r0 * r0 + r0 * r1 + r1 * r1) / 3.0;
+        let f = blend_edges_variable(&b, &[e], r0, r1, false).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        assert_eq!(f.faces.len(), 7);
+        let removed = w * d * h - vol(&f);
+        let expect = (1.0 - PI / 4.0) * mean_sq * w;
+        assert!((removed - expect).abs() < 1e-3 * expect, "{removed} vs {expect}");
+        // The radius really varies: the blend is narrow at one end, wide
+        // at the other.
+        let ed = b.edge(e);
+        let (start, end) = (ed.start(), ed.end());
+        let width = |p: DVec3| f.vertices.iter().filter(|v| (v.point - p).dot(end - start).abs() < 1e-6 && v.point.z > h - 1e-6).map(|v| v.point.y).filter(|y| *y > 1e-9).fold(f64::INFINITY, f64::min);
+        assert!((width(start) - r0).abs() < 1e-9 && (width(end) - r1).abs() < 1e-9, "{} {}", width(start), width(end));
+        let f = blend_edges_variable(&b, &[e], r0, r1, true).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        let removed = w * d * h - vol(&f);
+        let expect = smooth_corner_area(1.0) * mean_sq * w;
+        assert!((removed - expect).abs() < 1e-3 * expect, "{removed} vs {expect}");
+    }
+
+    #[test]
+    fn variable_blend_between_slanted_ends() {
+        // A sheared box: the top front edge ends in slanted faces, so the
+        // cone is cut by oblique planes (exact rational quartics).
+        let pts = [(0.0, 0.0, 0.0), (4.0, 0.0, 0.0), (4.0, 3.0, 0.0), (0.0, 3.0, 0.0), (1.0, 0.0, 2.0), (5.0, 0.0, 2.0), (5.0, 3.0, 2.0), (1.0, 3.0, 2.0)].map(|(x, y, z)| DVec3::new(x, y, z));
+        let faces = vec![vec![0, 3, 2, 1], vec![4, 5, 6, 7], vec![0, 1, 5, 4], vec![1, 2, 6, 5], vec![2, 3, 7, 6], vec![3, 0, 4, 7]];
+        let b = polyhedron(&pts, &faces, BodyKind::Solid);
+        let e = b.edge_ids().find(|e| {
+            let ed = b.edge(*e);
+            ed.start().z > 1.9 && ed.end().z > 1.9 && ed.start().y.abs() < 1e-9 && ed.end().y.abs() < 1e-9
+        }).unwrap();
+        for smooth in [false, true] {
+            let f = blend_edges_variable(&b, &[e], 0.3, 0.8, smooth).unwrap();
+            assert_eq!(open_edges(&f), 0);
+            assert!(vol(&f) < vol(&b));
+            // Nearly constant radius matches the constant blend.
+            let near = blend_edges_variable(&b, &[e], 0.5, 0.5 + 1e-7, smooth).unwrap();
+            let constant = blend_edges(&b, &[e], if smooth { Blend::Smooth(0.5) } else { Blend::Fillet(0.5) }).unwrap();
+            assert!((vol(&near) - vol(&constant)).abs() < 1e-4, "{} vs {}", vol(&near), vol(&constant));
+        }
     }
 }

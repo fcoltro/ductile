@@ -48,6 +48,9 @@ code from them.
   curvature-continuous corner patches where three of them meet, between
   faces at any angle (a box, a hexagonal prism), and meet in clean mitres
   where a corner's third edge stays sharp.
+  Straight edges between planes can also take a radius varying linearly
+  along the edge (Variable radius in the Fillet panel): the round blend is
+  then an exact cone, the smooth one its G2 counterpart.
 - Shell (Alt+S): hollow a solid into walls of a given thickness, opening
   the selected faces, or leaving an inner void when none are selected.
   Offset solid (Alt+O) grows or shrinks a whole solid, Offset faces
@@ -70,7 +73,7 @@ code from them.
 - Move / rotate / scale / mirror, linear and radial arrays (Alt+A,
   Alt+Shift+A), undo/redo.
 
-In progress: variable-radius fillets; bridge and extend curves.
+In progress: bridge and extend curves.
 
 ## Layout
 

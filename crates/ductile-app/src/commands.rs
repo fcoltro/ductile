@@ -788,6 +788,14 @@ pub fn demo_scene(doc: &mut Document) {
     let rims = pick(&soap, &|e| (e.start().z - e.end().z).abs() < 1e-9 && (e.start().z.abs() < 1e-9 || (e.start().z - 2.0).abs() < 1e-9));
     let soap = blend_edges(&soap, &rims, Blend::Smooth(0.5)).unwrap_or(soap);
     doc.add_body("Soap", soap);
+    // Variable-radius blends: a smooth one widening along the top front
+    // edge, a round one tapering down the back corner.
+    let wedge = make_box(&at(13.0, -12.0, 0.0), DVec3::new(5.0, 3.0, 2.5));
+    let top_front = pick(&wedge, &|e| e.start().z > 2.4 && e.end().z > 2.4 && (e.start().y + 12.0).abs() < 1e-9 && (e.end().y + 12.0).abs() < 1e-9);
+    let wedge = ductile_brep::ops::fillet::blend_edges_variable(&wedge, &top_front, 0.3, 1.4, true).unwrap_or(wedge);
+    let back = pick(&wedge, &|e| (e.start() - e.end()).z.abs() > 2.4 && [e.start(), e.end()].iter().all(|p| (p.x - 18.0).abs() < 1e-9 && (p.y + 9.0).abs() < 1e-9));
+    let wedge = ductile_brep::ops::fillet::blend_edges_variable(&wedge, &back, 0.2, 1.0, false).unwrap_or(wedge);
+    doc.add_body("Variable blends", wedge);
     // Capsule end: cylinder with a hemispherical cap.
     let cap = op(make_cylinder(&at(13.0, 3.0, 0.0), 2.5, 4.0), make_sphere(DVec3::new(13.0, 3.0, 4.0), 2.5), BoolOp::Union);
     doc.add_body("Capsule", cap);
