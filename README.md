@@ -45,7 +45,8 @@ code from them.
   Fillet (Shift+F) with curves selected rounds their corners (or just the
   selected vertices'); Offset curve (Alt+C) offsets them in their plane,
   rounding outside corners; Trim (Alt+T) deletes the pieces you click
-  between curve crossings. Bridge (Alt+B) joins two curve ends with a new
+  between curve crossings; Join (J) merges curves that meet end to end
+  into one. Bridge (Alt+B) joins two curve ends with a new
   curve that meets them with G0 to G3 continuity and adjustable tension;
   Extend (Alt+X) lengthens open curves past their ends, naturally (lines
   and arcs stay lines and arcs, splines continue their own polynomial) or
@@ -106,6 +107,7 @@ code from them.
   across curvature-continuous (G2) ones. Headless: `--zebra`.
 - Move / rotate / scale / mirror, linear and radial arrays (Alt+A,
   Alt+Shift+A), undo/redo.
+- Hide (H), isolate the selection (Shift+H), show everything (Alt+H).
 - Transform gizmo: selecting something shows axis arrows and rotation rings
   at it; drag an arrow to move along that axis or a ring to turn about it
   (type a value while dragging for an exact one). Headless: `--select N`.

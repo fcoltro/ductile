@@ -3,7 +3,7 @@
 
 use crate::app::DuctileApp;
 use crate::document::{Document, Pick, SelectMode};
-use crate::tools::{ArrayTool, BoxTool, CurveEditTool, TrimTool, delete_selected, duplicate_selected, BridgeTool, ExtendTool, ThickenTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
+use crate::tools::{ArrayTool, BoxTool, CurveEditTool, TrimTool, delete_selected, duplicate_selected, join_selected, BridgeTool, ExtendTool, ThickenTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
 use ductile_geom::{DMat4, DVec3, Frame};
@@ -26,6 +26,7 @@ pub enum Command {
     SelectAll,
     DeselectAll,
     Hide,
+    Isolate,
     UnhideAll,
     ModeVertex,
     ModeEdge,
@@ -59,6 +60,7 @@ pub enum Command {
     OffsetSolid,
     OffsetFaces,
     OffsetCurve,
+    JoinCurves,
     Trim,
     BridgeCurve,
     ExtendCurve,
@@ -108,6 +110,7 @@ impl Command {
         Command::SelectAll,
         Command::DeselectAll,
         Command::Hide,
+        Command::Isolate,
         Command::UnhideAll,
         Command::ModeVertex,
         Command::ModeEdge,
@@ -141,6 +144,7 @@ impl Command {
         Command::OffsetSolid,
         Command::OffsetFaces,
         Command::OffsetCurve,
+        Command::JoinCurves,
         Command::Trim,
         Command::BridgeCurve,
         Command::ExtendCurve,
@@ -191,6 +195,7 @@ impl Command {
             SelectAll => "Select all",
             DeselectAll => "Deselect all",
             Hide => "Hide selected",
+            Isolate => "Isolate selected",
             UnhideAll => "Unhide all",
             ModeVertex => "Select vertices",
             ModeEdge => "Select edges",
@@ -224,6 +229,7 @@ impl Command {
             OffsetSolid => "Offset solid",
             OffsetFaces => "Offset faces",
             OffsetCurve => "Offset curve",
+            JoinCurves => "Join curves",
             Trim => "Trim curves",
             BridgeCurve => "Bridge curves",
             ExtendCurve => "Extend curve",
@@ -271,6 +277,7 @@ impl Command {
             SelectAll => "Ctrl+A",
             DeselectAll => "Esc",
             Hide => "H",
+            Isolate => "Shift+H",
             UnhideAll => "Alt+H",
             ModeVertex => "1",
             ModeEdge => "2",
@@ -296,6 +303,7 @@ impl Command {
             OffsetSolid => "Alt+O",
             OffsetFaces => "Alt+F",
             OffsetCurve => "Alt+C",
+            JoinCurves => "J",
             Trim => "Alt+T",
             BridgeCurve => "Alt+B",
             ExtendCurve => "Alt+X",
@@ -348,7 +356,8 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::Delete, _, _, _) | (Key::X, false, false, false) => Delete,
         (Key::Escape, _, _, _) => DeselectAll,
         (Key::H, false, _, true) => UnhideAll,
-        (Key::H, false, _, false) => Hide,
+        (Key::H, false, true, false) => Isolate,
+        (Key::H, false, false, false) => Hide,
         (Key::Num1, false, _, _) => ModeVertex,
         (Key::Num2, false, _, _) => ModeEdge,
         (Key::Num3, false, _, _) => ModeFace,
@@ -381,6 +390,7 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::O, false, false, true) => OffsetSolid,
         (Key::F, false, false, true) => OffsetFaces,
         (Key::C, false, false, true) => OffsetCurve,
+        (Key::J, false, false, false) => JoinCurves,
         (Key::T, false, false, true) => Trim,
         (Key::B, false, false, true) => BridgeCurve,
         (Key::X, false, false, true) => ExtendCurve,
@@ -515,6 +525,25 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 app.palette_open = false;
             } else {
                 app.doc.selection.clear();
+            }
+        }
+        Isolate => {
+            let keep = app.doc.selected_objects();
+            if !keep.is_empty() {
+                for o in app.doc.objects.iter_mut() {
+                    o.visible = keep.contains(&o.id);
+                }
+                app.status = "Isolated; Alt+H shows everything again".into();
+            }
+        }
+        JoinCurves => {
+            app.status = match join_selected(&mut app.doc) {
+                Ok(id) => {
+                    app.doc.selection.clear();
+                    app.doc.selection.insert(Pick::Object(id));
+                    "Curves joined".into()
+                }
+                Err(e) => e,
             }
         }
         Hide => {

@@ -1087,6 +1087,21 @@ pub fn duplicate_selected(doc: &mut Document) -> Vec<ObjectId> {
     made
 }
 
+/// Joins the selected curves into one curve object, replacing them; ends
+/// that meet share a vertex, so the result chains through them.
+pub fn join_selected(doc: &mut Document) -> Result<ObjectId, String> {
+    let ids: Vec<ObjectId> = doc.selected_objects().into_iter().filter(|id| doc.object(*id).is_some_and(|o| o.body.kind == ductile_brep::BodyKind::Wire)).collect();
+    if ids.len() < 2 {
+        return Err("Join curves: select two or more curves".into());
+    }
+    let segs: Vec<ductile_brep::profile::Segment> = selected_chains(doc).into_iter().flat_map(|c| c.segments).collect();
+    doc.checkpoint("Join curves");
+    for id in &ids {
+        doc.remove(*id);
+    }
+    Ok(doc.add_body("Curve", ductile_brep::profile::wire_from_segments(&segs)))
+}
+
 /// Sweeps the selected closed curve along the selected open one.
 pub fn sweep_selected(doc: &Document) -> Result<Body, String> {
     let chains = selected_chains(doc);
@@ -3040,6 +3055,23 @@ mod tests {
         assert_eq!(doc.object(id).unwrap().body.faces.len(), 5);
         doc.undo();
         assert_eq!(doc.object(id).unwrap().body.faces.len(), 6);
+    }
+
+    #[test]
+    fn joins_curves_end_to_end() {
+        use ductile_brep::profile::{wire_chains, wire_from_segments, Segment};
+        let line = |a: DVec3, b: DVec3| wire_from_segments(&[Segment::new(ductile_geom::Curve3::line_through(a, b), 0.0, a.distance(b))]);
+        let mut doc = Document::default();
+        let a = doc.add_body("A", line(DVec3::ZERO, DVec3::X));
+        let b = doc.add_body("B", line(DVec3::X, DVec3::new(1.0, 1.0, 0.0)));
+        doc.selection.insert(Pick::Object(a));
+        assert!(join_selected(&mut doc).is_err());
+        doc.selection.insert(Pick::Object(b));
+        let id = join_selected(&mut doc).unwrap();
+        assert_eq!(doc.objects.len(), 1);
+        let body = &doc.object(id).unwrap().body;
+        assert_eq!((body.edges.len(), body.vertices.len()), (2, 3));
+        assert_eq!(wire_chains(body).len(), 1);
     }
 
     #[test]
