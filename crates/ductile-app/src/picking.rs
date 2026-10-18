@@ -109,7 +109,7 @@ pub fn pick(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, mode: Sele
         }
         SelectMode::Face => face_hit.map(|h| Pick::Face(h.object, h.face)),
         SelectMode::Edge => pick_edge(doc, cam, cursor, size, tol_px, face_hit.as_ref()).map(|(o, e)| Pick::Edge(o, e)),
-        SelectMode::Vertex => pick_vertex(doc, cam, cursor, size, 10.0, face_hit.as_ref()).map(|(o, v)| Pick::Vertex(o, v)),
+        SelectMode::Vertex => pick_control(doc, cam, cursor, size, 10.0).or_else(|| pick_vertex(doc, cam, cursor, size, 10.0, face_hit.as_ref()).map(|(o, v)| Pick::Vertex(o, v))),
     }
 }
 
@@ -160,6 +160,21 @@ pub fn pick_vertex(
     best.map(|(_, o, v)| (o, v))
 }
 
+/// Nearest curve control point (of visible wire objects) to the cursor.
+pub fn pick_control(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, tol_px: f64) -> Option<Pick> {
+    let mut best: Option<(f64, Pick)> = None;
+    for o in doc.objects.iter().filter(|o| o.visible && o.body.kind == ductile_brep::BodyKind::Wire) {
+        for (e, i, p) in ductile_brep::profile::control_points(&o.body) {
+            let Some((s, _)) = to_screen(cam, p, size) else { continue };
+            let d = s.distance(cursor);
+            if d < tol_px && best.map(|x| d < x.0).unwrap_or(true) {
+                best = Some((d, Pick::Control(o.id, e, i)));
+            }
+        }
+    }
+    best.map(|x| x.1)
+}
+
 /// Picks every entity of the mode whose screen projection lies inside the rectangle.
 pub fn pick_box(doc: &Document, cam: &Camera, a: DVec2, b: DVec2, size: DVec2, mode: SelectMode) -> Vec<Pick> {
     let lo = a.min(b);
@@ -192,6 +207,13 @@ pub fn pick_box(doc: &Document, cam: &Camera, a: DVec2, b: DVec2, size: DVec2, m
                 for (vi, v) in o.body.vertices.iter().enumerate() {
                     if inside(v.point) {
                         out.push(Pick::Vertex(o.id, VertexId(vi as u32)));
+                    }
+                }
+                if o.body.kind == ductile_brep::BodyKind::Wire {
+                    for (e, i, p) in ductile_brep::profile::control_points(&o.body) {
+                        if inside(p) {
+                            out.push(Pick::Control(o.id, e, i));
+                        }
                     }
                 }
             }

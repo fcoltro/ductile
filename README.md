@@ -20,7 +20,8 @@ code from them.
 - Curves on the construction plane: polyline (L), spline through points
   (Shift+L, open or closed C2), three-point arc (Shift+A), rectangle
   (Shift+R), circle (Shift+O), ellipse (Shift+E), regular polygon (Shift+P).
-  Curves drawn separately that meet end to end form one profile.
+  Curves drawn separately that meet end to end form one profile. In vertex
+  mode (1) spline control points show and can be selected and moved (G).
 - Extrude (E): push/pull planar faces, or turn closed planar curves (with
   holes) into solids, with live preview.
 - Revolve (V) closed curves by any angle about a selected edge or the
@@ -41,7 +42,7 @@ code from them.
   (`crates/ductile-io/tests/occ_import.rs`).
 - Move / rotate / scale / mirror, undo/redo.
 
-In progress: curve editing, mitred sweeps around sharp path corners, general
+In progress: mitred sweeps around sharp path corners, general
 rolling-ball NURBS fillets, STEP assemblies.
 
 ## Layout

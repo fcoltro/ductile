@@ -245,6 +245,53 @@ pub fn wire_chains(b: &Body) -> Vec<Loop3> {
     out
 }
 
+/// Control points of the NURBS edges of a wire body: (edge, index, point).
+pub fn control_points(b: &Body) -> Vec<(crate::topo::EdgeId, u32, DVec3)> {
+    let mut out = Vec::new();
+    for e in b.edge_ids() {
+        if let Curve3::Nurbs(n) = &b.edge(e).curve {
+            for (i, p) in n.control_points().into_iter().enumerate() {
+                out.push((e, i as u32, p));
+            }
+        }
+    }
+    out
+}
+
+/// The body with the given control points transformed by `m`. The ends of a
+/// closed curve move together, and edge end vertices follow their curves.
+pub fn move_controls(b: &Body, moves: &[(crate::topo::EdgeId, u32)], m: &ductile_geom::DMat4) -> Body {
+    let mut out = b.clone();
+    for e in b.edge_ids() {
+        let idx: Vec<usize> = moves.iter().filter(|(x, _)| *x == e).map(|(_, i)| *i as usize).collect();
+        if idx.is_empty() {
+            continue;
+        }
+        let edge = &mut out.edges[e.idx()];
+        let Curve3::Nurbs(n) = &mut edge.curve else { continue };
+        let last = n.ctrl.len() - 1;
+        let closed = (n.ctrl[0].truncate() / n.ctrl[0].w).distance(n.ctrl[last].truncate() / n.ctrl[last].w) < 1e-9;
+        let mut targets: Vec<usize> = idx.iter().copied().filter(|i| *i <= last).collect();
+        if closed {
+            if targets.contains(&0) && !targets.contains(&last) {
+                targets.push(last);
+            } else if targets.contains(&last) && !targets.contains(&0) {
+                targets.push(0);
+            }
+        }
+        for i in targets {
+            let h = n.ctrl[i];
+            let p = m.transform_point3(h.truncate() / h.w);
+            n.ctrl[i] = (p * h.w).extend(h.w);
+        }
+        let (v0, v1, t0, t1) = (edge.v0, edge.v1, edge.t0, edge.t1);
+        let (p0, p1) = (edge.curve.point(t0), edge.curve.point(t1));
+        out.vertices[v0.idx()].point = p0;
+        out.vertices[v1.idx()].point = p1;
+    }
+    out
+}
+
 /// Plane through planar loops, with the normal of the first loop; `None` if
 /// the loops are not coplanar.
 pub fn loops_plane(loops: &[Loop3]) -> Option<Frame> {
@@ -266,6 +313,29 @@ pub fn loops_plane(loops: &[Loop3]) -> Option<Frame> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_a_control_point_reshapes_the_curve() {
+        let pts = [DVec3::ZERO, DVec3::new(1.0, 1.0, 0.0), DVec3::new(2.0, 0.0, 0.0), DVec3::new(3.0, 1.0, 0.0)];
+        let c = ductile_geom::NurbsCurve::interpolate(&pts, 3);
+        let (t0, t1) = c.domain();
+        let w = wire_from_segments(&[Segment::new(Curve3::Nurbs(c), t0, t1)]);
+        let cps = control_points(&w);
+        assert_eq!(cps.len(), 4);
+        let up = ductile_geom::DMat4::from_translation(DVec3::Z);
+        // Moving the end control point drags the end vertex with it.
+        let moved = move_controls(&w, &[(cps[3].0, 3)], &up);
+        assert!(moved.vertex(moved.edge(cps[3].0).v1).distance(DVec3::new(3.0, 1.0, 1.0)) < 1e-12);
+        assert!(moved.vertex(moved.edge(cps[3].0).v0).distance(DVec3::ZERO) < 1e-12);
+        // A closed spline keeps its ends together.
+        let closed = ductile_geom::NurbsCurve::interpolate_closed(&pts);
+        let (t0, t1) = closed.domain();
+        let w = wire_from_segments(&[Segment::new(Curve3::Nurbs(closed), t0, t1)]);
+        let moved = move_controls(&w, &[(crate::topo::EdgeId(0), 0)], &up);
+        let e = moved.edge(crate::topo::EdgeId(0));
+        assert!(e.curve.point(e.t0).distance(e.curve.point(e.t1)) < 1e-12);
+        assert!(e.curve.point(e.t0).distance(DVec3::Z) < 1e-12);
+    }
 
     #[test]
     fn chains_rectangle_and_open_polyline() {

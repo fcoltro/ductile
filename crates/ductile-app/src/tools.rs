@@ -400,6 +400,8 @@ pub enum TransformKind {
 pub struct TransformTool {
     pub kind: TransformKind,
     targets: Vec<ObjectId>,
+    /// Selected curve control points; when any, only these move.
+    controls: Vec<(ObjectId, ductile_brep::EdgeId, u32)>,
     pivot: DVec3,
     start: Option<DVec3>,
     current: Option<DVec3>,
@@ -411,15 +413,36 @@ pub struct TransformTool {
 
 impl TransformTool {
     pub fn new(kind: TransformKind, doc: &Document) -> Self {
+        let controls: Vec<_> = doc.selection.iter().filter_map(|p| if let Pick::Control(o, e, i) = p { Some((*o, *e, *i)) } else { None }).collect();
         let targets = doc.selected_objects();
         let mut bb = ductile_geom::BBox3::EMPTY;
-        for id in &targets {
-            if let Some(o) = doc.object(*id) {
-                bb = bb.union(&o.body.bbox());
+        if controls.is_empty() {
+            for id in &targets {
+                if let Some(o) = doc.object(*id) {
+                    bb = bb.union(&o.body.bbox());
+                }
+            }
+        } else {
+            for (o, e, i) in &controls {
+                if let Some(ductile_geom::Curve3::Nurbs(n)) = doc.object(*o).map(|ob| ob.body.edge(*e).curve.clone()) {
+                    if let Some(p) = n.control_points().get(*i as usize) {
+                        bb = bb.union(&ductile_geom::BBox3::from_points([*p]));
+                    }
+                }
             }
         }
         let pivot = if bb.is_empty() { DVec3::ZERO } else { bb.center() };
-        Self { kind, targets, pivot, start: None, current: None, axis: None, typed: None, value: 0.0 }
+        Self { kind, targets, controls, pivot, start: None, current: None, axis: None, typed: None, value: 0.0 }
+    }
+
+    /// The object's body after applying `m` to it, or to its selected
+    /// control points.
+    fn moved(&self, id: ObjectId, body: &Body, m: &DMat4) -> Body {
+        if self.controls.is_empty() {
+            return body.transformed(m);
+        }
+        let mine: Vec<_> = self.controls.iter().filter(|c| c.0 == id).map(|c| (c.1, c.2)).collect();
+        ductile_brep::profile::move_controls(body, &mine, m)
     }
 
     pub fn has_targets(&self) -> bool {
@@ -553,7 +576,7 @@ impl Tool for TransformTool {
         let mut out: Option<Body> = None;
         for id in &self.targets {
             if let Some(o) = doc.object(*id) {
-                let b = o.body.transformed(&m);
+                let b = self.moved(*id, &o.body, &m);
                 match &mut out {
                     None => out = Some(b),
                     Some(acc) => acc.append(&b),
@@ -610,7 +633,7 @@ impl Tool for TransformTool {
         }
         for id in self.targets.clone() {
             if let Some(o) = doc.object(id) {
-                let b = o.body.transformed(&m);
+                let b = self.moved(id, &o.body, &m);
                 doc.replace_body(id, b);
             }
         }
@@ -1539,6 +1562,31 @@ mod tests {
         doc.selection = doc.objects.iter().map(|o| Pick::Object(o.id)).collect();
         let b = sweep_selected(&doc).unwrap();
         assert!((volume(&b) - PI * 0.25 * 4.0).abs() < 1e-2, "{}", volume(&b));
+    }
+
+    #[test]
+    fn move_tool_drags_selected_control_points() {
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        let mut sp = CurveTool::new(CurveKind::Spline);
+        for p in [DVec3::ZERO, DVec3::new(2.0, 1.0, 0.0), DVec3::new(4.0, 0.0, 0.0)] {
+            click(&mut sp, &doc, p, true);
+        }
+        sp.accept();
+        assert!(sp.commit(&mut doc));
+        let id = doc.objects[0].id;
+        let e = ductile_brep::EdgeId(0);
+        doc.selection.clear();
+        doc.selection.insert(Pick::Control(id, e, 1));
+        let mut t = TransformTool::new(TransformKind::Move, &doc);
+        t.axis = Some(2);
+        t.typed_value(Some(1.5));
+        assert!(t.commit(&mut doc));
+        let b = &doc.objects[0].body;
+        let ductile_geom::Curve3::Nurbs(n) = &b.edge(e).curve else { panic!() };
+        let before = ductile_geom::NurbsCurve::interpolate(&[DVec3::ZERO, DVec3::new(2.0, 1.0, 0.0), DVec3::new(4.0, 0.0, 0.0)], 3);
+        assert!((n.control_points()[1] - before.control_points()[1] - DVec3::Z * 1.5).length() < 1e-9);
+        assert!((n.control_points()[0] - before.control_points()[0]).length() < 1e-12);
     }
 
     #[test]

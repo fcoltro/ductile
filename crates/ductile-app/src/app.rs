@@ -649,6 +649,24 @@ fn vertex_overlay(doc: &Document, out: &mut Vec<LineInstance>) {
             };
             out.push(LineInstance::point(v.point, col, s));
         }
+        // Curve control polygons, editable with Move in vertex mode.
+        if show_all && o.body.kind == ductile_brep::BodyKind::Wire {
+            let cps = ductile_brep::profile::control_points(&o.body);
+            for w in cps.windows(2).filter(|w| w[0].0 == w[1].0) {
+                out.push(LineInstance::new(w[0].2, w[1].2, [0.55, 0.6, 0.75, 0.8], 1.0));
+            }
+            for (e, i, p) in cps {
+                let pk = Pick::Control(o.id, e, i);
+                let (col, s) = if doc.selection.contains(&pk) {
+                    ([1.0, 0.75, 0.2, 1.0], 9.0)
+                } else if doc.hover == Some(pk) {
+                    ([1.0, 0.9, 0.55, 1.0], 9.0)
+                } else {
+                    ([0.55, 0.75, 1.0, 1.0], 6.0)
+                };
+                out.push(LineInstance::point(p, col, s));
+            }
+        }
     }
 }
 
