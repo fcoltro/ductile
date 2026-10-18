@@ -4869,7 +4869,7 @@ impl Tool for IsoparamTool {
         }
     }
     fn pointer(&mut self, doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
-        let hit = crate::picking::pick_face(doc, &p.ray).filter(|h| !doc.is_locked(h.object));
+        let hit = crate::picking::pick_face(doc, &p.ray).filter(|h| !doc.is_locked(h.object) && doc.object(h.object).is_some_and(|o| o.body.mesh.is_none()));
         if let Some(h) = &hit {
             if let Some(ob) = doc.object(h.object) {
                 let s = &ob.body.face(h.face).surface;

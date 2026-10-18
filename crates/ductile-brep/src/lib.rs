@@ -10,4 +10,4 @@ pub mod tess;
 pub mod topo;
 
 pub use tess::{tessellate, BodyMesh, TessOptions};
-pub use topo::{Body, BodyKind, Coedge, EdgeId, FaceId, LoopId, VertexId};
+pub use topo::{Body, BodyKind, Coedge, EdgeId, FaceId, LoopId, TriMesh, VertexId};

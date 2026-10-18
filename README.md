@@ -144,6 +144,10 @@ code from them.
   and silhouettes as an SVG drawing, with the lines behind surfaces dashed
   in their own group. Headless: `--export-hidden-line OUT.svg` (with
   `--camera` to choose the view).
+- Mesh import (File > Import mesh, or `ductile scan.stl`): OBJ and STL
+  (binary or ASCII) come in as reference meshes, shaded smooth across
+  gentle bends and sharp at creases, that move, hide, snap and measure
+  like any object. An OBJ's objects become a group.
 - STEP import (File > Import STEP, or `ductile part.step`): planes,
   cylinders, cones, spheres, tori, B-spline and rational surfaces, surfaces
   of extrusion and revolution, in any length unit. Parts written by

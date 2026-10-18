@@ -114,6 +114,9 @@ fn estimate_turning(curve: &ductile_geom::Curve3, t0: f64, t1: f64) -> f64 {
 }
 
 pub fn tessellate(body: &Body, opts: &TessOptions) -> BodyMesh {
+    if let Some(m) = &body.mesh {
+        return BodyMesh { faces: vec![mesh_face(m, 40f64.to_radians())], edges: vec![] };
+    }
     let mut edges: Vec<Vec<(f64, DVec3)>> = body.edge_ids().map(|e| tessellate_edge(body, e, opts)).collect();
     refine_edges_for_faces(body, &mut edges, opts);
     let faces = body.face_ids().map(|f| tessellate_face(body, f, &edges, opts)).collect();
@@ -837,4 +840,49 @@ impl SegmentGrid {
         }
         best
     }
+}
+
+/// A mesh body's triangles for display: each corner shaded smooth with the
+/// triangles around it that turn less than `crease` from its own.
+pub fn mesh_face(m: &crate::TriMesh, crease: f64) -> FaceMesh {
+    let n = m.positions.len();
+    let tri_n: Vec<DVec3> = m
+        .triangles
+        .iter()
+        .map(|t| {
+            let p = t.map(|i| m.positions.get(i as usize).copied().unwrap_or_default());
+            (p[1] - p[0]).cross(p[2] - p[0])
+        })
+        .collect();
+    let mut around: Vec<Vec<u32>> = vec![vec![]; n];
+    for (ti, t) in m.triangles.iter().enumerate() {
+        for &v in t {
+            if (v as usize) < n {
+                around[v as usize].push(ti as u32);
+            }
+        }
+    }
+    let cos = crease.cos();
+    let mut out = FaceMesh { positions: vec![], normals: vec![], uvs: vec![], triangles: vec![] };
+    for (ti, t) in m.triangles.iter().enumerate() {
+        if t.iter().any(|&v| v as usize >= n) {
+            continue;
+        }
+        let own = tri_n[ti].normalize_or_zero();
+        let base = out.positions.len() as u32;
+        for &v in t {
+            let mut sum = DVec3::ZERO;
+            for &o in &around[v as usize] {
+                let on = tri_n[o as usize];
+                if on.normalize_or_zero().dot(own) >= cos {
+                    sum += on;
+                }
+            }
+            out.positions.push(m.positions[v as usize]);
+            out.normals.push(sum.try_normalize().unwrap_or(own));
+            out.uvs.push(DVec2::ZERO);
+        }
+        out.triangles.push([base, base + 1, base + 2]);
+    }
+    out
 }

@@ -39,7 +39,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                     }
                 }
                 ui.separator();
-                for c in [Command::Save, Command::SaveAs, Command::ImportStep, Command::ImportSvg, Command::ExportStep, Command::ExportStl, Command::ExportObj, Command::ExportHiddenLine] {
+                for c in [Command::Save, Command::SaveAs, Command::ImportStep, Command::ImportSvg, Command::ImportMesh, Command::ExportStep, Command::ExportStl, Command::ExportObj, Command::ExportHiddenLine] {
                     menu_item(app, ui, c);
                 }
             });
@@ -497,7 +497,10 @@ fn properties(app: &mut DuctileApp, ui: &mut egui::Ui) {
     });
     let b = &o.body;
     ui.label(
-        RichText::new(format!("{} faces · {} edges · {} vertices", b.faces.len(), b.edges.len(), b.vertices.len()))
+        RichText::new(match &b.mesh {
+            Some(m) => format!("Mesh · {} triangles · {} points", m.triangles.len(), m.positions.len()),
+            None => format!("{} faces · {} edges · {} vertices", b.faces.len(), b.edges.len(), b.vertices.len()),
+        })
             .color(theme::TEXT_DIM),
     );
     let bb = b.bbox();

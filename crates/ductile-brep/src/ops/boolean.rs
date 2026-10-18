@@ -528,7 +528,7 @@ fn boolean_once(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     mark("split");
     // 4. Classify fragments.
     // Only split fragments need meshing; whole faces keep their meshes.
-    let mut fb_body = Body { kind: BodyKind::Sheet, vertices: w.vertices.clone(), edges: w.edges.clone(), loops: vec![], faces: vec![] };
+    let mut fb_body = Body { kind: BodyKind::Sheet, vertices: w.vertices.clone(), edges: w.edges.clone(), loops: vec![], faces: vec![], mesh: None };
     for fr in frags.iter_mut() {
         if fr.mesh.is_some() {
             let face = w.face(fr.orig);
@@ -553,7 +553,7 @@ fn boolean_once(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
                     Some(k) => (&fb_body, &fb_body.faces[k]),
                     None => (&w, w.face(fr.orig)),
                 };
-                let mut one = Body { kind: BodyKind::Sheet, vertices: src.vertices.clone(), edges: src.edges.clone(), loops: vec![], faces: vec![] };
+                let mut one = Body { kind: BodyKind::Sheet, vertices: src.vertices.clone(), edges: src.edges.clone(), loops: vec![], faces: vec![], mesh: None };
                 let loops: Vec<Vec<Coedge>> = face.loops.iter().map(|l| src.loops[l.idx()].coedges.clone()).collect();
                 one.add_face(face.surface.clone(), face.reversed, loops);
                 fine = tessellate(&one, &fine_opts);

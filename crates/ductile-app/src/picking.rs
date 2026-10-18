@@ -113,7 +113,8 @@ fn pick_any(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, mode: Sele
             // Wires and sheets edges: pick by edge proximity.
             pick_edge(doc, cam, cursor, size, tol_px, None).map(|(o, _)| Pick::Object(o))
         }
-        SelectMode::Face => face_hit.map(|h| Pick::Face(h.object, h.face)),
+        // Meshes have no faces of their own: they select whole.
+        SelectMode::Face => face_hit.map(|h| if doc.object(h.object).is_some_and(|o| o.body.mesh.is_some()) { Pick::Object(h.object) } else { Pick::Face(h.object, h.face) }),
         SelectMode::Edge => pick_edge(doc, cam, cursor, size, tol_px, face_hit.as_ref()).map(|(o, e)| Pick::Edge(o, e)),
         SelectMode::Vertex => pick_control(doc, cam, cursor, size, 10.0).or_else(|| pick_vertex(doc, cam, cursor, size, 10.0, face_hit.as_ref()).map(|(o, v)| Pick::Vertex(o, v))),
     }

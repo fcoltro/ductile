@@ -95,7 +95,7 @@ fn merge_planar_faces(b: &Body, tol: f64) -> Body {
     if groups.values().all(|g| g.len() == 1) {
         return b.clone();
     }
-    let mut out = Body { kind: b.kind, vertices: b.vertices.clone(), edges: b.edges.clone(), loops: vec![], faces: vec![] };
+    let mut out = Body { kind: b.kind, vertices: b.vertices.clone(), edges: b.edges.clone(), loops: vec![], faces: vec![], mesh: None };
     let mut order: Vec<&Vec<FaceId>> = groups.values().collect();
     order.sort_by_key(|g| g[0]);
     for g in order {
@@ -178,7 +178,7 @@ fn merge_band_faces(b: &mut Body, tol: f64) -> bool {
         }
         let Some(loops) = merged else { continue };
         let (surface, reversed) = (fa.surface.clone(), fa.reversed);
-        let mut out = Body { kind: b.kind, vertices: b.vertices.clone(), edges: b.edges.clone(), loops: vec![], faces: vec![] };
+        let mut out = Body { kind: b.kind, vertices: b.vertices.clone(), edges: b.edges.clone(), loops: vec![], faces: vec![], mesh: None };
         for h in b.face_ids() {
             if h == f {
                 out.add_face(surface.clone(), reversed, loops.clone());

@@ -101,6 +101,15 @@ pub enum BodyKind {
     Sheet,
     /// Edges only (curves).
     Wire,
+    /// A triangle mesh carried as it is (imported OBJ or STL), for reference.
+    Mesh,
+}
+
+/// Triangles with shared corners, for a [`BodyKind::Mesh`] body.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TriMesh {
+    pub positions: Vec<DVec3>,
+    pub triangles: Vec<[u32; 3]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -110,11 +119,19 @@ pub struct Body {
     pub edges: Vec<Edge>,
     pub loops: Vec<Loop>,
     pub faces: Vec<Face>,
+    /// The triangles of a mesh body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<TriMesh>,
 }
 
 impl Body {
     pub fn new(kind: BodyKind) -> Self {
-        Self { kind, vertices: vec![], edges: vec![], loops: vec![], faces: vec![] }
+        Self { kind, vertices: vec![], edges: vec![], loops: vec![], faces: vec![], mesh: None }
+    }
+
+    /// A mesh body holding `mesh`.
+    pub fn from_mesh(mesh: TriMesh) -> Self {
+        Self { mesh: Some(mesh), ..Self::new(BodyKind::Mesh) }
     }
 
     pub fn add_vertex(&mut self, p: DVec3) -> VertexId {
@@ -218,7 +235,7 @@ impl Body {
     }
 
     pub fn bbox(&self) -> BBox3 {
-        let mut b = BBox3::from_points(self.vertices.iter().map(|v| v.point));
+        let mut b = BBox3::from_points(self.vertices.iter().map(|v| v.point).chain(self.mesh.iter().flat_map(|m| m.positions.iter().copied())));
         for e in &self.edges {
             b = b.union(&e.curve.bbox(e.t0, e.t1));
         }
@@ -244,6 +261,16 @@ impl Body {
         }
         for f in out.faces.iter_mut() {
             f.surface = f.surface.transformed(m);
+        }
+        if let Some(t) = out.mesh.as_mut() {
+            for p in t.positions.iter_mut() {
+                *p = m.transform_point3(*p);
+            }
+            if mirror {
+                for tri in t.triangles.iter_mut() {
+                    tri.swap(1, 2);
+                }
+            }
         }
         if mirror {
             // Mirroring flips handedness. Analytic surfaces compute their

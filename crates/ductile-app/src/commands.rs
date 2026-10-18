@@ -18,6 +18,7 @@ pub enum Command {
     SaveAs,
     ImportStep,
     ImportSvg,
+    ImportMesh,
     ExportStep,
     ExportStl,
     ExportObj,
@@ -142,6 +143,7 @@ impl Command {
         Command::SaveAs,
         Command::ImportStep,
         Command::ImportSvg,
+        Command::ImportMesh,
         Command::ExportStep,
         Command::ExportStl,
         Command::ExportObj,
@@ -267,6 +269,7 @@ impl Command {
             SaveAs => "Save as…",
             ImportStep => "Import STEP…",
             ImportSvg => "Import SVG curves…",
+            ImportMesh => "Import mesh (OBJ, STL)…",
             ExportStep => "Export STEP…",
             ExportStl => "Export STL…",
             ExportObj => "Export OBJ…",
@@ -453,6 +456,17 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                     path.set_extension("ductile");
                 }
                 save_file(app, &path);
+            }
+        }
+        ImportMesh => {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "stl"]).pick_file() {
+                app.status = match import_mesh(&mut app.doc, &path) {
+                    Ok(n) => {
+                        app.frame_selection();
+                        format!("Imported {n} triangle(s) from {}", path.display())
+                    }
+                    Err(e) => format!("Mesh import failed: {e}"),
+                };
             }
         }
         ImportSvg => {
@@ -1015,6 +1029,38 @@ pub fn import_svg(doc: &mut Document, path: &std::path::Path) -> Result<usize, S
     Ok(chains.len())
 }
 
+/// Adds an OBJ or STL file's meshes as reference mesh objects (an OBJ's
+/// objects grouped under the file's name); returns the triangle count.
+pub fn import_mesh(doc: &mut Document, path: &std::path::Path) -> Result<usize, String> {
+    let stem = path.file_stem().map_or("Mesh".to_string(), |s| s.to_string_lossy().into_owned());
+    let meshes = if is_ext(path, "stl") {
+        vec![(stem.clone(), ductile_io::mesh::read_stl(&std::fs::read(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?)]
+    } else {
+        ductile_io::mesh::read_obj(&std::fs::read_to_string(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?
+    };
+    doc.checkpoint("Import mesh");
+    doc.selection.clear();
+    let mut n = 0;
+    for (name, m) in &meshes {
+        n += m.triangles.len();
+        let id = doc.add_body(if name.is_empty() { &stem } else { name }, ductile_brep::Body::from_mesh(m.clone()));
+        doc.selection.insert(Pick::Object(id));
+    }
+    if meshes.len() > 1 {
+        if let Some(g) = doc.group_selected() {
+            if let Some(g) = doc.groups.iter_mut().find(|x| x.id == g) {
+                g.name = stem;
+            }
+        }
+    }
+    doc.mode = SelectMode::Object;
+    Ok(n)
+}
+
+fn is_ext(path: &std::path::Path, ext: &str) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(ext))
+}
+
 fn is_step(path: &std::path::Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("step") || e.eq_ignore_ascii_case("stp"))
 }
@@ -1049,6 +1095,10 @@ pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), Strin
     if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
         doc.clear();
         return import_svg(doc, path).map(|_| ());
+    }
+    if is_ext(path, "stl") || is_ext(path, "obj") {
+        doc.clear();
+        return import_mesh(doc, path).map(|_| ());
     }
     let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let nd = ductile_io::native::NativeDocument::from_json(&s).map_err(|e| e.to_string())?;

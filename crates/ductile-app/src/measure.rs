@@ -201,6 +201,7 @@ pub fn measure(doc: &Document) -> Option<Measurement> {
                         ductile_brep::BodyKind::Solid => format!("Volume {} · area {}", fmt(ob.mesh.volume()), fmt(ob.mesh.area())),
                         ductile_brep::BodyKind::Sheet => format!("Area {}", fmt(ob.mesh.area())),
                         ductile_brep::BodyKind::Wire => format!("Length {}", fmt(ob.body.edges.iter().map(|e| e.length()).sum())),
+                        ductile_brep::BodyKind::Mesh => format!("Mesh · {} triangles · area {}", ob.mesh.triangle_count(), fmt(ob.mesh.area())),
                     }
                 }
                 Pick::Vertex(o, v) => {
