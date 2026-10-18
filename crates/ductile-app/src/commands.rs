@@ -84,6 +84,7 @@ pub enum Command {
     ToggleXray,
     ToggleZebra,
     ToggleSnap,
+    SetCPlane,
     Palette,
     Help,
 }
@@ -163,6 +164,7 @@ impl Command {
         Command::ToggleXray,
         Command::ToggleZebra,
         Command::ToggleSnap,
+        Command::SetCPlane,
         Command::Palette,
         Command::Help,
     ];
@@ -243,6 +245,7 @@ impl Command {
             ToggleXray => "Toggle x-ray",
             ToggleZebra => "Toggle zebra stripes",
             ToggleSnap => "Toggle snapping",
+            SetCPlane => "Construction plane: face / view / world",
             Palette => "Command palette",
             Help => "Help",
         }
@@ -314,6 +317,7 @@ impl Command {
             FrameSelection => "F",
             ToggleXray => "Alt+Z",
             ToggleZebra => "Alt+R",
+            SetCPlane => "Alt+V",
             Palette => "Space",
             Help => "F1",
             _ => "",
@@ -356,6 +360,7 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::E, false, true, false) => Ellipse,
         (Key::P, false, true, false) => Polygon,
         (Key::V, false, false, false) => Revolve,
+        (Key::V, false, false, true) => SetCPlane,
         (Key::L, false, false, true) => Loft,
         (Key::P, false, false, true) => Patch,
         (Key::K, false, false, true) => Thicken,
@@ -692,6 +697,21 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         ViewRight => app.camera.set_view(DVec3::X),
         ViewIso => app.camera.set_view(DVec3::new(1.0, -1.0, 0.8)),
         ToggleOrtho => app.toggle_projection(),
+        SetCPlane => {
+            let face = app.doc.selected_faces().into_iter().find_map(|(o, f)| app.doc.object(o).and_then(|ob| crate::tools::cplane_on_face(&ob.body, f)));
+            let world = Frame::WORLD;
+            let is_world = app.cplane.frame.origin.length() < 1e-12 && (app.cplane.frame.z - world.z).length() < 1e-12;
+            (app.cplane.frame, app.status) = match face {
+                Some(fr) => (fr, "Construction plane set on the selected face; Alt+V again with nothing selected to go back".into()),
+                None if is_world => {
+                    let z = (app.camera.eye() - app.camera.target).normalize();
+                    let up = if z.z.abs() > 0.99 { DVec3::Y } else { DVec3::Z };
+                    let x = up.cross(z).normalize();
+                    (Frame::new(app.camera.target, z, x), "Construction plane set square to the view".into())
+                }
+                None => (world, "Construction plane back on the world XY plane".into()),
+            };
+        }
         FrameSelection => app.frame_selection(),
         ToggleGrid => app.show_grid = !app.show_grid,
         ToggleEdges => app.show_edges = !app.show_edges,

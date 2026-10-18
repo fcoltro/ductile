@@ -873,6 +873,23 @@ fn cut_inputs(doc: &Document, what: &str) -> Result<(Vec<ObjectId>, Cutter), Str
     Ok((solids, Cutter::Curves(chains, dir)))
 }
 
+/// A construction plane lying on planar face `f`: its normal facing out of
+/// the solid, its x axis along the face's longest straight edge, and its
+/// origin at the middle of the face's corners.
+pub fn cplane_on_face(b: &Body, f: FaceId) -> Option<Frame> {
+    let face = b.face(f);
+    let ductile_geom::Surface::Plane { frame } = &face.surface else { return None };
+    let z = if face.reversed { -frame.z } else { frame.z };
+    let edges: Vec<&ductile_brep::topo::Edge> = b.face_loops(f).take(1).flat_map(|l| l.coedges.iter()).map(|c| b.edge(c.edge)).collect();
+    let longest = edges.iter().filter(|e| e.curve.is_linear()).max_by(|a, c| a.length().total_cmp(&c.length()));
+    let x = longest.map(|e| e.end() - e.start()).unwrap_or(frame.x);
+    let x = (x - z * x.dot(z)).try_normalize().unwrap_or(frame.x);
+    let pts: Vec<DVec3> = b.face_loops(f).take(1).flat_map(|l| l.coedges.iter()).map(|c| b.vertex(b.coedge_vertices(*c).0)).collect();
+    let mid = if pts.is_empty() { frame.origin } else { pts.iter().copied().sum::<DVec3>() / pts.len() as f64 };
+    let origin = mid - z * (mid - frame.origin).dot(z);
+    Some(Frame::new(origin, z, x))
+}
+
 /// The curves where each pair of selected solids cross, one wire body per
 /// pair that meets.
 pub fn intersection_curves_selected(doc: &Document) -> Result<Vec<Body>, String> {
@@ -2321,7 +2338,7 @@ impl DraftTool {
         }
         let faces: Vec<FaceId> = picked.iter().filter(|(x, _)| *x == id).map(|(_, f)| *f).collect();
         let b = &o.body;
-        let pts: Vec<DVec3> = faces.iter().flat_map(|f| b.face_loops(*f).flat_map(|l| l.coedges.iter()).map(|c| b.edge(c.edge).start()).collect::<Vec<_>>()).collect();
+        let pts: Vec<DVec3> = faces.iter().flat_map(|f| b.face_loops(*f).flat_map(|l| l.coedges.iter()).map(|c| b.vertex(b.coedge_vertices(*c).0)).collect::<Vec<_>>()).collect();
         let lo = pts.iter().map(|p| p.dot(pull)).fold(f64::MAX, f64::min);
         let hi = pts.iter().map(|p| p.dot(pull)).fold(f64::MIN, f64::max);
         let tops: Vec<DVec3> = pts.iter().copied().filter(|p| p.dot(pull) > hi - 1e-9 * (1.0 + hi.abs())).collect();
@@ -2967,6 +2984,38 @@ mod tests {
         let bottom = d.vertices.iter().map(|v| v.point).filter(|p| p.z < 0.5).map(|p| p.x).fold(f64::MIN, f64::max);
         assert!((top - (2.0 - 5f64.to_radians().tan())).abs() < 1e-9, "{top}");
         assert!((bottom - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn construction_plane_sits_on_a_face() {
+        let b = ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 2.0, 3.0));
+        let top = b.face_ids().find(|f| b.face_normal(*f, 0.5, 0.5).z > 0.9).unwrap();
+        let fr = cplane_on_face(&b, top).unwrap();
+        assert!((fr.origin - DVec3::new(2.0, 1.0, 3.0)).length() < 1e-9);
+        assert!((fr.z - DVec3::Z).length() < 1e-9 && fr.x.y.abs() < 1e-9);
+        let side = b.face_ids().find(|f| b.face_normal(*f, 0.5, 0.5).x < -0.9).unwrap();
+        assert!((cplane_on_face(&b, side).unwrap().z + DVec3::X).length() < 1e-9);
+    }
+
+    #[test]
+    fn draws_on_a_face_construction_plane() {
+        let b = ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 2.0, 3.0));
+        let side = b.face_ids().find(|f| b.face_normal(*f, 0.5, 0.5).x < -0.9).unwrap();
+        let cp = CPlane { frame: cplane_on_face(&b, side).unwrap() };
+        set_current_cplane(cp);
+        let mut doc = Document::default();
+        let mut r = CurveTool::new(CurveKind::Rectangle);
+        let at = |x: f64, y: f64| cp.frame.to_world(DVec3::new(x, y, 0.0));
+        for (p, last) in [(at(-0.5, -0.5), false), (at(0.5, 0.5), true)] {
+            let info = PointerInfo { ray: Ray { origin: p - DVec3::X * 10.0, dir: DVec3::X }, point: Some(p), plane_point: Some(p), clicked: true, world_per_px: 0.01 };
+            let done = matches!(r.pointer(&doc, &cp, &info), ToolOutcome::Finished);
+            assert_eq!(done, last);
+        }
+        assert!(r.commit(&mut doc));
+        let w = &doc.objects[0].body;
+        // The rectangle lies on the face, at x = 0.
+        assert!(w.vertices.iter().all(|v| v.point.x.abs() < 1e-9), "{:?}", w.vertices);
+        set_current_cplane(CPlane::default());
     }
 
     #[test]

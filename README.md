@@ -30,6 +30,9 @@ code from them.
   a sharp edge. Otherwise the solid becomes an open sheet. Duplicate
   (Ctrl+D) in face or edge mode copies the selected faces out as a sheet
   or the selected edges out as curves.
+- Construction plane (Alt+V): onto a selected planar face, so curves are
+  drawn on it; with nothing selected, square to the view, then back to the
+  world XY plane.
 - Curves on the construction plane: polyline (L), spline through points
   (Shift+L, open or closed C2), three-point arc (Shift+A), rectangle
   (Shift+R), circle (Shift+O), ellipse (Shift+E), regular polygon (Shift+P).
