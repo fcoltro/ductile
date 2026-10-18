@@ -90,6 +90,8 @@ pub enum Command {
     ToggleZebra,
     ToggleSnap,
     SetCPlane,
+    SetCPlaneOnly,
+    CPlaneView,
     Palette,
     Help,
     Repeat,
@@ -180,6 +182,8 @@ impl Command {
         Command::ToggleZebra,
         Command::ToggleSnap,
         Command::SetCPlane,
+        Command::SetCPlaneOnly,
+        Command::CPlaneView,
         Command::Palette,
         Command::Help,
         Command::Repeat,
@@ -270,7 +274,9 @@ impl Command {
             ToggleXray => "Toggle x-ray",
             ToggleZebra => "Toggle zebra stripes",
             ToggleSnap => "Toggle snapping",
-            SetCPlane => "Construction plane: face / view / world",
+            SetCPlane => "Construction plane from selection, and look at it",
+            SetCPlaneOnly => "Construction plane from selection",
+            CPlaneView => "Construction plane facing the view",
             Palette => "Command palette",
             Help => "Help",
             Repeat => "Repeat last command",
@@ -304,7 +310,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
     // Shift+R repeats modeling commands, not navigation or selection.
     let fleeting = matches!(
         cmd,
-        Repeat | Palette | Help | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleSnap | SetCPlane
+        Repeat | Palette | Help | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
     );
     if !fleeting {
         app.last_command = Some(cmd);
@@ -663,20 +669,27 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         ViewRight => app.camera.set_view(DVec3::X),
         ViewIso => app.camera.set_view(DVec3::new(1.0, -1.0, 0.8)),
         ToggleOrtho => app.toggle_projection(),
-        SetCPlane => {
-            let face = app.doc.selected_faces().into_iter().find_map(|(o, f)| app.doc.object(o).and_then(|ob| crate::tools::cplane_on_face(&ob.body, f)));
-            let world = Frame::WORLD;
-            let is_world = app.cplane.frame.origin.length() < 1e-12 && (app.cplane.frame.z - world.z).length() < 1e-12;
-            (app.cplane.frame, app.status) = match face {
-                Some(fr) => (fr, format!("Construction plane set on the selected face; {} again with nothing selected to go back", SetCPlane.shortcut_text())),
-                None if is_world => {
-                    let z = (app.camera.eye() - app.camera.target).normalize();
-                    let up = if z.z.abs() > 0.99 { DVec3::Y } else { DVec3::Z };
-                    let x = up.cross(z).normalize();
-                    (Frame::new(app.camera.target, z, x), "Construction plane set square to the view".into())
+        SetCPlane | SetCPlaneOnly => {
+            let view = (app.camera.eye() - app.camera.target).normalize();
+            match crate::cplane::from_selection(&app.doc, view) {
+                Some((fr, how)) => {
+                    app.cplane.frame = fr;
+                    if cmd == SetCPlane {
+                        app.camera.target = fr.origin;
+                        app.camera.set_view(fr.z);
+                    }
+                    app.status = format!("Construction plane {how}; {} with nothing selected goes back to the world plane", SetCPlane.shortcut_text());
                 }
-                None => (world, "Construction plane back on the world XY plane".into()),
-            };
+                None if app.doc.selection.is_empty() => {
+                    app.cplane.frame = Frame::WORLD;
+                    app.status = "Construction plane back on the world XY plane".into();
+                }
+                None => app.status = "Select a planar face, a face and an edge, two parallel faces, points or a flat curve".into(),
+            }
+        }
+        CPlaneView => {
+            app.cplane.frame = crate::cplane::facing(app.camera.eye() - app.camera.target, DVec3::ZERO);
+            app.status = "Construction plane square to the view through the origin".into();
         }
         FrameSelection => app.frame_selection(),
         ToggleGrid => app.show_grid = !app.show_grid,

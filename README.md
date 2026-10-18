@@ -33,9 +33,13 @@ code from them.
   a sharp edge. Otherwise the solid becomes an open sheet. Duplicate
   (Shift+D) in face or edge mode copies the selected faces out as a sheet
   or the selected edges out as curves.
-- Construction plane (Space): onto a selected planar face, so curves are
-  drawn on it; with nothing selected, square to the view, then back to the
-  world XY plane.
+- Construction planes from the selection, as in Plasticity: Space sets one
+  and turns the view to it, Shift+Space sets it without moving the view.
+  A planar face gives its plane; a face and an edge, the plane standing on
+  the face along the edge; two opposing faces, the plane midway; two
+  points, the plane through them seen edge-on; three or more points or a
+  flat curve, the plane they lie in. Ctrl+Space faces the view; Space with
+  nothing selected goes back to the world XY plane.
 - Curves on the construction plane: polyline (Shift+A), spline through points
   (open or closed C2), three-point arc, rectangle,
   circle, ellipse, regular polygon,

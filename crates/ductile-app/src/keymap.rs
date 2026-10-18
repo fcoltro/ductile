@@ -123,6 +123,8 @@ const DEFAULTS: &[(Command, &str)] = {
         (Mirror, "Alt+X"),
         (FrameSelection, "/"),
         (SetCPlane, "Space"),
+        (SetCPlaneOnly, "Shift+Space"),
+        (CPlaneView, "Ctrl+Space"),
         (ToggleXray, "Alt+Z"),
         (ToggleZebra, "Alt+R"),
         (Help, "F1"),
