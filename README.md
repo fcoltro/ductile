@@ -134,6 +134,10 @@ code from them.
 - Files: File > Open recent lists the last files opened or saved, and the
   open document is autosaved every two minutes while it has unsaved
   changes (File > Recover autosave brings it back after a crash).
+- SVG import (File > Import SVG curves, or `ductile logo.svg`): every
+  shape's outline (paths, rectangles, circles, ellipses, polygons, with
+  their transforms) becomes curves in a group named after the file, one
+  SVG unit to one model unit, ready to extrude.
 - STEP import (File > Import STEP, or `ductile part.step`): planes,
   cylinders, cones, spheres, tori, B-spline and rational surfaces, surfaces
   of extrusion and revolution, in any length unit. Parts written by

@@ -6,6 +6,7 @@ pub mod native;
 pub mod step;
 pub mod step_parse;
 pub mod step_read;
+pub mod svg;
 
 #[derive(Debug, thiserror::Error)]
 pub enum IoError {

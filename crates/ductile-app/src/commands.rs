@@ -17,6 +17,7 @@ pub enum Command {
     Save,
     SaveAs,
     ImportStep,
+    ImportSvg,
     ExportStep,
     ExportStl,
     ExportObj,
@@ -137,6 +138,7 @@ impl Command {
         Command::Save,
         Command::SaveAs,
         Command::ImportStep,
+        Command::ImportSvg,
         Command::ExportStep,
         Command::ExportStl,
         Command::ExportObj,
@@ -258,6 +260,7 @@ impl Command {
             Save => "Save",
             SaveAs => "Save as…",
             ImportStep => "Import STEP…",
+            ImportSvg => "Import SVG curves…",
             ExportStep => "Export STEP…",
             ExportStl => "Export STL…",
             ExportObj => "Export OBJ…",
@@ -441,6 +444,17 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                     path.set_extension("ductile");
                 }
                 save_file(app, &path);
+            }
+        }
+        ImportSvg => {
+            if let Some(path) = rfd::FileDialog::new().add_filter("SVG", &["svg"]).pick_file() {
+                app.status = match import_svg(&mut app.doc, &path) {
+                    Ok(n) => {
+                        app.frame_selection();
+                        format!("Imported {n} curve(s) from {}", path.display())
+                    }
+                    Err(e) => format!("SVG import failed: {e}"),
+                };
             }
         }
         ImportStep => {
@@ -952,6 +966,30 @@ fn boolean_selected(app: &mut DuctileApp, op: BoolOp) {
     app.status = format!("{name} done");
 }
 
+/// Adds an SVG drawing's outlines as curves, one per subpath, in a group
+/// named after the file and selected.
+pub fn import_svg(doc: &mut Document, path: &std::path::Path) -> Result<usize, String> {
+    let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let chains = ductile_io::svg::read_svg(&s).map_err(|e| e.to_string())?;
+    if chains.is_empty() {
+        return Err("the drawing has no shapes".into());
+    }
+    doc.checkpoint("Import SVG");
+    doc.selection.clear();
+    for c in &chains {
+        let id = doc.add_body("Curve", ductile_brep::profile::wire_from_segments(c));
+        doc.selection.insert(Pick::Object(id));
+    }
+    if let Some(g) = doc.group_selected() {
+        let name = path.file_stem().map_or("SVG".to_string(), |s| s.to_string_lossy().into_owned());
+        if let Some(g) = doc.groups.iter_mut().find(|x| x.id == g) {
+            g.name = name;
+        }
+    }
+    doc.mode = SelectMode::Object;
+    Ok(chains.len())
+}
+
 fn is_step(path: &std::path::Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("step") || e.eq_ignore_ascii_case("stp"))
 }
@@ -982,6 +1020,10 @@ pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), Strin
     if is_step(path) {
         doc.clear();
         return import_step(doc, path).map(|_| ());
+    }
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg")) {
+        doc.clear();
+        return import_svg(doc, path).map(|_| ());
     }
     let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let nd = ductile_io::native::NativeDocument::from_json(&s).map_err(|e| e.to_string())?;
@@ -1022,7 +1064,8 @@ pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), Strin
 pub fn open_file(app: &mut DuctileApp, path: &std::path::Path) {
     match load_into(&mut app.doc, path) {
         Ok(()) => {
-            app.doc.path = (!is_step(path)).then(|| path.to_path_buf());
+            let native = !is_step(path) && !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+            app.doc.path = native.then(|| path.to_path_buf());
             app.doc.dirty = false;
             crate::recent::push(path);
             app.frame_selection();
