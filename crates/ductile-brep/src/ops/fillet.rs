@@ -962,3 +962,45 @@ mod smooth_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod arc_tests {
+    use super::*;
+    use crate::ops::boolean::open_edges;
+    use crate::primitives::{make_box, make_cylinder};
+    use crate::tess::{tessellate, TessOptions};
+    use ductile_geom::Frame;
+    use std::f64::consts::PI;
+
+    fn vol(b: &Body) -> f64 {
+        tessellate(b, &TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume()
+    }
+
+    #[test]
+    fn fillets_the_arc_ends_of_a_groove() {
+        // A half-round groove along the top of a box: its ends are
+        // half-circle edges whose tools must stop at the top face.
+        let bx = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let groove = boolean(&bx, &make_cylinder(&Frame::new(DVec3::new(-1.0, 1.5, 2.0), DVec3::X, DVec3::Y), 0.7, 6.0), BoolOp::Difference).unwrap();
+        let arcs: Vec<EdgeId> = groove.edge_ids().filter(|e| matches!(groove.edge(*e).curve, Curve3::Circle { .. }) && !groove.edge(*e).is_closed()).collect();
+        assert_eq!(arcs.len(), 2);
+        let before = vol(&groove);
+        for e in &arcs {
+            let r = blend_edges(&groove, &[*e], Blend::Fillet(0.2)).unwrap();
+            assert_eq!(open_edges(&r), 0);
+            let cut = before - vol(&r);
+            // Pappus: half a turn of the corner section, area (1 - pi/4) r^2,
+            // whose centroid sits (10 - 3 pi)/(12 - 3 pi) r out from the
+            // groove's radius.
+            let r: f64 = 0.2;
+            let rho = 0.7 + (10.0 - 3.0 * PI) / (12.0 - 3.0 * PI) * r;
+            let expect = PI * rho * (1.0 - PI / 4.0) * r * r;
+            assert!((cut - expect).abs() < 1e-3 * expect.max(0.1), "{cut} {expect}");
+        }
+        // A seam picked with real edges is passed over.
+        let seam = groove.edge_ids().find(|e| groove.edge_faces(*e).len() == 2 && groove.edge_faces(*e)[0].0 == groove.edge_faces(*e)[1].0);
+        if let Some(s) = seam {
+            assert!(blend_edges(&groove, &[s, arcs[0]], Blend::Fillet(0.2)).is_ok());
+        }
+    }
+}
