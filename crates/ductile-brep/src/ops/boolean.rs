@@ -194,6 +194,9 @@ fn boolean_once(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
     };
     let mesh_a = tessellate(a, &mesh_opts);
     let mesh_b = tessellate(b, &mesh_opts);
+    if timing {
+        eprintln!("  boolean operands: {} faces {} tris, {} faces {} tris", a.faces.len(), mesh_a.triangle_count(), b.faces.len(), mesh_b.triangle_count());
+    }
     mark("mesh");
     let na_faces = a.faces.len();
     let na_edges = a.edges.len();
@@ -533,7 +536,24 @@ fn boolean_once(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
             Some(k) => &frag_mesh.faces[k],
             None => face_mesh(fr.orig),
         };
-        let Some(p) = interior_point(m) else { continue };
+        // A sliver can come out of the coarse mesh with no triangles at
+        // all; mesh it alone, finely, before giving up on it.
+        let fine;
+        let p = match (interior_point(m), fr.mesh) {
+            (Some(p), _) => p,
+            (None, Some(k)) => {
+                let mut one = Body { kind: BodyKind::Sheet, vertices: fb_body.vertices.clone(), edges: fb_body.edges.clone(), loops: vec![], faces: vec![] };
+                let face = &fb_body.faces[k];
+                let loops: Vec<Vec<Coedge>> = face.loops.iter().map(|l| fb_body.loops[l.idx()].coedges.clone()).collect();
+                one.add_face(face.surface.clone(), face.reversed, loops);
+                fine = tessellate(&one, &fine_opts);
+                match interior_point(&fine.faces[0]) {
+                    Some(p) => p,
+                    None => continue,
+                }
+            }
+            (None, None) => continue,
+        };
         // Triangle centroids sag below curved surfaces: snap onto the face.
         let surf = &w.face(fr.orig).surface;
         let uv = surf.project(p, None);

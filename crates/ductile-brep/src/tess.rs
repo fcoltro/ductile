@@ -493,7 +493,13 @@ pub fn tessellate_face(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>], opts
             let grid = SegmentGrid::new(&segs, min_clear.max(1e-9));
             for i in 1..nu {
                 for j in 1..nv {
-                    let uv = DVec2::new(lo.x + du * i as f64, lo.y + dv * j as f64);
+                    // A regular grid is all cocircular quadruples, which
+                    // sends every Delaunay test down its slow exact path:
+                    // nudge each point by a tiny fixed pseudo-random offset.
+                    let h = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (j as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+                    let h = h ^ (h >> 29);
+                    let (ju, jv) = ((h & 0xFFFF) as f64 / 65535.0 - 0.5, ((h >> 16) & 0xFFFF) as f64 / 65535.0 - 0.5);
+                    let uv = DVec2::new(lo.x + du * (i as f64 + 0.02 * ju), lo.y + dv * (j as f64 + 0.02 * jv));
                     if !point_in_loops(uv, &uv_loops) {
                         continue;
                     }
@@ -585,18 +591,19 @@ pub fn tessellate_face(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>], opts
 /// Metric scales and interior grid steps for a face spanning `lo..hi`.
 fn face_steps(surf: &Surface, lo: DVec2, hi: DVec2, opts: &TessOptions) -> (f64, f64, f64, f64) {
     let (su, sv, mut step_u, mut step_v) = surface_metrics(surf, lo, hi, opts);
-    // Straight directions (cylinder rulings) need no subdivision on their
-    // own, but trimmed faces still need interior points there, or long
-    // triangles would join distant boundary samples across the curvature.
-    if step_u.is_finite() && !step_v.is_finite() && sv > 0.0 {
-        step_v = step_u * su / sv;
-    } else if step_v.is_finite() && !step_u.is_finite() && su > 0.0 {
-        step_u = step_v * sv / su;
-    }
     // Keep grid cells within a bounded aspect ratio in 3D: a surface that
     // is straight one way (a ruled loft) would otherwise get one interior
     // row, and Delaunay fans off the dense boundary then cut through it.
     const ASPECT: f64 = 4.0;
+    // Straight directions (cylinder rulings) need no subdivision on their
+    // own, but trimmed faces still need interior points there, or long
+    // triangles would join distant boundary samples across the curvature;
+    // cells as long as the aspect bound allows are enough for that.
+    if step_u.is_finite() && !step_v.is_finite() && sv > 0.0 {
+        step_v = ASPECT * step_u * su / sv;
+    } else if step_v.is_finite() && !step_u.is_finite() && su > 0.0 {
+        step_u = ASPECT * step_v * sv / su;
+    }
     if step_u.is_finite() && step_v.is_finite() {
         step_v = step_v.min(ASPECT * step_u * su / sv);
         step_u = step_u.min(ASPECT * step_v * sv / su);
