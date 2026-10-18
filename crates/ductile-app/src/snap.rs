@@ -87,7 +87,7 @@ pub fn find(doc: &Document, cam: &Camera, cplane: &Frame, cursor: DVec2, size: D
     let hit = picking::pick_face(doc, ray);
     let cx = Ctx { doc, cam, cursor, size, hit };
     let mut best: Option<(f64, Snap)> = None;
-    let mut offer = |p: DVec3, label: &'static str, best: &mut Option<(f64, Snap)>| {
+    let offer = |p: DVec3, label: &'static str, best: &mut Option<(f64, Snap)>| {
         if let Some(d) = cx.px(p) {
             if d < POINT_PX && best.is_none_or(|b| d < b.0) {
                 *best = Some((d, Snap { point: p, label }));

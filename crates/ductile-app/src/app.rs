@@ -66,6 +66,8 @@ pub struct DuctileApp {
     pub pending: Vec<Command>,
     /// The last modeling command run, for Shift+R.
     pub last_command: Option<Command>,
+    /// When the document was last autosaved.
+    last_autosave: std::time::Instant,
     /// The command whose shortcut the next key press sets.
     pub assigning: Option<Command>,
     pub snap_enabled: bool,
@@ -132,6 +134,7 @@ impl DuctileApp {
             last_cursor: None,
             pending: vec![],
             last_command: None,
+            last_autosave: std::time::Instant::now(),
             assigning: None,
             snap_enabled: true,
             snap_marker: None,
@@ -988,6 +991,16 @@ impl eframe::App for DuctileApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_keys(&ctx);
+        // Every couple of minutes with unsaved changes, keep a copy to
+        // recover from (File > Recover autosave).
+        if self.doc.dirty && self.tool.is_none() && self.last_autosave.elapsed() > std::time::Duration::from_secs(120) {
+            self.last_autosave = std::time::Instant::now();
+            if let Some(p) = crate::recent::autosave_path() {
+                if let Err(e) = commands::write_native(&self.doc, &p) {
+                    self.status = format!("Autosave failed: {e}");
+                }
+            }
+        }
         let cmds = std::mem::take(&mut self.pending);
         for c in cmds {
             commands::run(self, c);

@@ -114,6 +114,9 @@ code from them.
 - STEP (AP214) export of exact solids and surfaces, checked against
   OpenCascade; several objects are written as an assembly with one named part each. STL and
   OBJ export. Headless: `ductile --demo --export-step out.step`.
+- Files: File > Open recent lists the last files opened or saved, and the
+  open document is autosaved every two minutes while it has unsaved
+  changes (File > Recover autosave brings it back after a crash).
 - STEP import (File > Import STEP, or `ductile part.step`): planes,
   cylinders, cones, spheres, tori, B-spline and rational surfaces, surfaces
   of extrusion and revolution, in any length unit. Parts written by

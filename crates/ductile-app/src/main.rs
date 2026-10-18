@@ -16,6 +16,7 @@ mod keymap;
 mod document;
 mod icons;
 mod picking;
+mod recent;
 mod render;
 mod screenshot;
 mod snap;

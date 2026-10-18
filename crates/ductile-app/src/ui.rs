@@ -13,7 +13,32 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
             ui.label(RichText::new("Ductile").strong().color(theme::ACCENT));
             ui.separator();
             ui.menu_button("File", |ui| {
-                for c in [Command::New, Command::Open, Command::Save, Command::SaveAs, Command::ImportStep, Command::ExportStep, Command::ExportStl, Command::ExportObj] {
+                for c in [Command::New, Command::Open] {
+                    menu_item(app, ui, c);
+                }
+                let recent = crate::recent::list();
+                ui.add_enabled_ui(!recent.is_empty(), |ui| {
+                    ui.menu_button("Open recent", |ui| {
+                        for p in recent {
+                            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            if ui.button(name).on_hover_text(p.display().to_string()).clicked() {
+                                crate::commands::open_file(app, &p);
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+                if let Some(p) = crate::recent::autosave_path().filter(|p| p.exists()) {
+                    if ui.button("Recover autosave").on_hover_text("Open the copy kept while you work").clicked() {
+                        crate::commands::open_file(app, &p);
+                        // Not the document's own file: Save asks where.
+                        app.doc.path = None;
+                        app.doc.dirty = true;
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                for c in [Command::Save, Command::SaveAs, Command::ImportStep, Command::ExportStep, Command::ExportStl, Command::ExportObj] {
                     menu_item(app, ui, c);
                 }
             });

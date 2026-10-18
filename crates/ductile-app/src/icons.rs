@@ -106,7 +106,7 @@ pub fn paint(cmd: Command, painter: &Painter, rect: Rect, color: Color32) -> boo
         }
         Command::Ellipse => p.ellipse((0.5, 0.5), 0.4, 0.24),
         Command::Polygon => {
-            let pts: Vec<(f32, f32)> = (0..6).map(|i| (i as f32 / 6.0 * TAU - PI / 2.0)).map(|a| (0.5 + 0.36 * a.cos(), 0.5 + 0.36 * a.sin())).collect();
+            let pts: Vec<(f32, f32)> = (0..6).map(|i| i as f32 / 6.0 * TAU - PI / 2.0).map(|a| (0.5 + 0.36 * a.cos(), 0.5 + 0.36 * a.sin())).collect();
             p.closed(&pts);
         }
         Command::Extrude => {

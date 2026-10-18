@@ -6,7 +6,7 @@ use crate::document::{Document, Pick, SelectMode};
 use crate::tools::{ArrayTool, BoxTool, CurveEditTool, TrimTool, delete_selected, duplicate_selected, join_selected, BridgeTool, ExtendTool, ThickenTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
-use ductile_geom::{DMat4, DVec3, Frame};
+use ductile_geom::{DVec3, Frame};
 use egui::{Key, Modifiers};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -854,6 +854,7 @@ pub fn open_file(app: &mut DuctileApp, path: &std::path::Path) {
         Ok(()) => {
             app.doc.path = (!is_step(path)).then(|| path.to_path_buf());
             app.doc.dirty = false;
+            crate::recent::push(path);
             app.frame_selection();
             app.status = format!("Opened {}", path.display());
         }
@@ -861,10 +862,10 @@ pub fn open_file(app: &mut DuctileApp, path: &std::path::Path) {
     }
 }
 
-pub fn save_file(app: &mut DuctileApp, path: &std::path::Path) {
+/// Writes the document as a native file.
+pub fn write_native(doc: &Document, path: &std::path::Path) -> Result<(), String> {
     let nd = ductile_io::native::NativeDocument::new(
-        app.doc
-            .objects
+        doc.objects
             .iter()
             .map(|o| ductile_io::native::NativeObject {
                 name: o.name.clone(),
@@ -874,11 +875,18 @@ pub fn save_file(app: &mut DuctileApp, path: &std::path::Path) {
             })
             .collect(),
     );
-    let res = nd.to_json().map_err(|e| e.to_string()).and_then(|s| std::fs::write(path, s).map_err(|e| e.to_string()));
-    match res {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    nd.to_json().map_err(|e| e.to_string()).and_then(|s| std::fs::write(path, s).map_err(|e| e.to_string()))
+}
+
+pub fn save_file(app: &mut DuctileApp, path: &std::path::Path) {
+    match write_native(&app.doc, path) {
         Ok(()) => {
             app.doc.path = Some(path.to_path_buf());
             app.doc.dirty = false;
+            crate::recent::push(path);
             app.status = format!("Saved {}", path.display());
         }
         Err(e) => app.status = format!("Save failed: {e}"),
