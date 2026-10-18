@@ -15,6 +15,7 @@ pub enum Command {
     Open,
     Save,
     SaveAs,
+    ImportStep,
     ExportStep,
     ExportStl,
     ExportObj,
@@ -71,6 +72,7 @@ impl Command {
         Command::Open,
         Command::Save,
         Command::SaveAs,
+        Command::ImportStep,
         Command::ExportStep,
         Command::ExportStl,
         Command::ExportObj,
@@ -128,6 +130,7 @@ impl Command {
             Open => "Open…",
             Save => "Save",
             SaveAs => "Save as…",
+            ImportStep => "Import STEP…",
             ExportStep => "Export STEP…",
             ExportStl => "Export STL…",
             ExportObj => "Export OBJ…",
@@ -288,7 +291,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             app.status = "New document".into();
         }
         Open => {
-            if let Some(path) = rfd::FileDialog::new().add_filter("Ductile", &["ductile"]).pick_file() {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Ductile", &["ductile"]).add_filter("STEP", &["step", "stp"]).pick_file() {
                 open_file(app, &path);
             }
         }
@@ -302,6 +305,18 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                     path.set_extension("ductile");
                 }
                 save_file(app, &path);
+            }
+        }
+        ImportStep => {
+            if let Some(path) = rfd::FileDialog::new().add_filter("STEP", &["step", "stp"]).pick_file() {
+                app.doc.checkpoint("Import STEP");
+                app.status = match import_step(&mut app.doc, &path) {
+                    Ok(msg) => {
+                        app.frame_selection();
+                        msg
+                    }
+                    Err(e) => format!("STEP import failed: {e}"),
+                };
             }
         }
         ExportStep => {
@@ -520,8 +535,37 @@ fn boolean_selected(app: &mut DuctileApp, op: BoolOp) {
     app.status = format!("{name} done");
 }
 
-/// Replaces the document's objects with those of a native file.
+fn is_step(path: &std::path::Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("step") || e.eq_ignore_ascii_case("stp"))
+}
+
+/// Adds the solids of a STEP file to the document and selects them;
+/// returns a status line that mentions anything that was skipped.
+pub fn import_step(doc: &mut Document, path: &std::path::Path) -> Result<String, String> {
+    let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let imp = ductile_io::step_read::read_step(&s).map_err(|e| e.to_string())?;
+    if imp.bodies.is_empty() {
+        return Err(imp.warnings.first().cloned().unwrap_or_else(|| "no solids found".into()));
+    }
+    doc.selection.clear();
+    let n = imp.bodies.len();
+    for b in imp.bodies {
+        let id = doc.add_body(&b.name, b.body);
+        doc.selection.insert(Pick::Object(id));
+    }
+    let mut msg = format!("Imported {n} body(ies) from {}", path.display());
+    if let Some(w) = imp.warnings.first() {
+        msg += &format!(" ({} warning(s): {w})", imp.warnings.len());
+    }
+    Ok(msg)
+}
+
+/// Replaces the document's objects with those of a native or STEP file.
 pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), String> {
+    if is_step(path) {
+        doc.clear();
+        return import_step(doc, path).map(|_| ());
+    }
     let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let nd = ductile_io::native::NativeDocument::from_json(&s).map_err(|e| e.to_string())?;
     doc.clear();
@@ -541,7 +585,7 @@ pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), Strin
 pub fn open_file(app: &mut DuctileApp, path: &std::path::Path) {
     match load_into(&mut app.doc, path) {
         Ok(()) => {
-            app.doc.path = Some(path.to_path_buf());
+            app.doc.path = (!is_step(path)).then(|| path.to_path_buf());
             app.doc.dirty = false;
             app.frame_selection();
             app.status = format!("Opened {}", path.display());

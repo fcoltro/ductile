@@ -473,7 +473,7 @@ fn find_edge(w: &Body, index: &HashMap<(u32, u32), Vec<EdgeId>>, va: VertexId, v
 }
 
 /// Cuts edges at the given (parameter, vertex) positions, rewriting loops.
-fn apply_splits(w: &mut Body, splits: HashMap<EdgeId, Vec<(f64, VertexId)>>) {
+pub(crate) fn apply_splits(w: &mut Body, splits: HashMap<EdgeId, Vec<(f64, VertexId)>>) {
     let mut pieces: HashMap<EdgeId, Vec<EdgeId>> = HashMap::new();
     for (e, mut list) in splits {
         list.sort_by(|a, b| a.0.total_cmp(&b.0));

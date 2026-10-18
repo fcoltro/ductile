@@ -25,7 +25,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
             ui.label(RichText::new("Ductile").strong().color(theme::ACCENT));
             ui.separator();
             ui.menu_button("File", |ui| {
-                for c in [Command::New, Command::Open, Command::Save, Command::SaveAs, Command::ExportStep, Command::ExportStl, Command::ExportObj] {
+                for c in [Command::New, Command::Open, Command::Save, Command::SaveAs, Command::ImportStep, Command::ExportStep, Command::ExportStl, Command::ExportObj] {
                     menu_item(app, ui, c);
                 }
             });

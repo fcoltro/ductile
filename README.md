@@ -28,10 +28,15 @@ code from them.
   patches where three filleted edges meet.
 - STEP (AP214) export of exact solids, checked against OpenCascade; STL and
   OBJ export. Headless: `ductile --demo --export-step out.step`.
+- STEP import (File > Import STEP, or `ductile part.step`): planes,
+  cylinders, cones, spheres, tori, B-spline and rational surfaces, surfaces
+  of extrusion and revolution, in any length unit. Parts written by
+  OpenCascade import with the volumes OpenCascade reports for them
+  (`crates/ductile-io/tests/occ_import.rs`).
 - Move / rotate / scale / mirror, undo/redo.
 
 In progress: arcs and curve editing, sweep and loft, general
-rolling-ball NURBS fillets, STEP import.
+rolling-ball NURBS fillets, STEP assemblies.
 
 ## Layout
 

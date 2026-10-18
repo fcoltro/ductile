@@ -34,7 +34,7 @@ fn main() -> eframe::Result {
                 }
             }
             "--help" | "-h" => {
-                println!("usage: ductile [FILE.ductile] [--demo] [--screenshot OUT.png] [--camera X,Y,Z,DIST,YAW,PITCH] [--export-step OUT.step]");
+                println!("usage: ductile [FILE.ductile|FILE.step] [--demo] [--screenshot OUT.png] [--camera X,Y,Z,DIST,YAW,PITCH] [--export-step OUT.step]");
                 return Ok(());
             }
             other => opts.open = Some(other.into()),

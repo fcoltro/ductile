@@ -187,7 +187,7 @@ impl Region {
 /// share a vertex.
 pub fn wire_from_segments(segments: &[Segment]) -> Body {
     let mut b = Body::new(BodyKind::Wire);
-    let mut vert = |b: &mut Body, p: DVec3| -> VertexId {
+    let vert = |b: &mut Body, p: DVec3| -> VertexId {
         match b.vertices.iter().position(|v| v.point.distance(p) < 1e-7) {
             Some(i) => VertexId(i as u32),
             None => b.add_vertex(p),

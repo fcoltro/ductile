@@ -38,6 +38,27 @@ impl NurbsSurface {
         self.ctrl[i * self.nv + j]
     }
 
+    /// True if the surface closes on itself in u: the first and last
+    /// control columns coincide on clamped knots.
+    pub fn closed_u(&self) -> bool {
+        let size = self.ctrl.iter().map(|h| (h.truncate() / h.w).abs().max_element()).fold(1.0, f64::max);
+        let clamped = self.knots_u[0] == self.knots_u[self.degree_u] && self.knots_u[self.nu] == self.knots_u[self.nu + self.degree_u];
+        clamped && (0..self.nv).all(|j| {
+            let (a, b) = (self.cp(0, j), self.cp(self.nu - 1, j));
+            (a.truncate() / a.w).distance(b.truncate() / b.w) < 1e-9 * size
+        })
+    }
+
+    /// True if the surface closes on itself in v.
+    pub fn closed_v(&self) -> bool {
+        let size = self.ctrl.iter().map(|h| (h.truncate() / h.w).abs().max_element()).fold(1.0, f64::max);
+        let clamped = self.knots_v[0] == self.knots_v[self.degree_v] && self.knots_v[self.nv] == self.knots_v[self.nv + self.degree_v];
+        clamped && (0..self.nu).all(|i| {
+            let (a, b) = (self.cp(i, 0), self.cp(i, self.nv - 1));
+            (a.truncate() / a.w).distance(b.truncate() / b.w) < 1e-9 * size
+        })
+    }
+
     pub fn domain(&self) -> ((f64, f64), (f64, f64)) {
         (
             (self.knots_u[self.degree_u], self.knots_u[self.nu]),

@@ -55,6 +55,7 @@ impl Surface {
     pub fn period_u(&self) -> Option<f64> {
         match self {
             Surface::Cylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => Some(TAU),
+            Surface::Nurbs(n) if n.closed_u() => Some(n.domain().0 .1 - n.domain().0 .0),
             _ => None,
         }
     }
@@ -62,8 +63,38 @@ impl Surface {
     pub fn period_v(&self) -> Option<f64> {
         match self {
             Surface::Torus { .. } => Some(TAU),
+            Surface::Nurbs(n) if n.closed_v() => Some(n.domain().1 .1 - n.domain().1 .0),
             _ => None,
         }
+    }
+
+    /// Start of the base period in each periodic direction.
+    pub fn period_start(&self) -> DVec2 {
+        match self {
+            Surface::Nurbs(n) => DVec2::new(n.domain().0 .0, n.domain().1 .0),
+            _ => DVec2::ZERO,
+        }
+    }
+
+    /// Wraps periodic coordinates into the base period `[start, start + period)`,
+    /// with `slack` letting values just below the start stay put.
+    pub fn wrap_periodic(&self, mut uv: DVec2, slack: f64) -> DVec2 {
+        let st = self.period_start();
+        if let Some(p) = self.period_u() {
+            uv.x = st.x - slack + (uv.x - st.x + slack).rem_euclid(p);
+        }
+        if let Some(p) = self.period_v() {
+            uv.y = st.y - slack + (uv.y - st.y + slack).rem_euclid(p);
+        }
+        uv
+    }
+
+    /// Parameters of a periodic NURBS surface brought into its domain.
+    fn nurbs_param(n: &NurbsSurface, u: f64, v: f64) -> (f64, f64) {
+        let ((u0, u1), (v0, v1)) = n.domain();
+        let u = if (u < u0 || u > u1) && n.closed_u() { u0 + (u - u0).rem_euclid(u1 - u0) } else { u };
+        let v = if (v < v0 || v > v1) && n.closed_v() { v0 + (v - v0).rem_euclid(v1 - v0) } else { v };
+        (u, v)
     }
 
     /// Parameter bounds; `None` means unbounded in that direction.
@@ -96,7 +127,10 @@ impl Surface {
                 let r = major + minor * v.cos();
                 frame.to_world(DVec3::new(r * u.cos(), r * u.sin(), minor * v.sin()))
             }
-            Surface::Nurbs(n) => n.point(u, v),
+            Surface::Nurbs(n) => {
+                let (u, v) = Self::nurbs_param(n, u, v);
+                n.point(u, v)
+            }
         }
     }
 
@@ -164,6 +198,7 @@ impl Surface {
                 )
             }
             Surface::Nurbs(n) => {
+                let (u, v) = Self::nurbs_param(n, u, v);
                 let d = n.derivs(u, v, 2);
                 SurfDerivs { p: d[0][0], du: d[1][0], dv: d[0][1], duu: d[2][0], duv: d[1][1], dvv: d[0][2] }
             }
@@ -236,7 +271,13 @@ impl Surface {
                 let rho = (l.x * l.x + l.y * l.y).sqrt();
                 DVec2::new(u, wrap_angle(l.z.atan2(rho - major), 0.0))
             }
-            Surface::Nurbs(n) => return project_nurbs(n, p, hint),
+            Surface::Nurbs(n) => {
+                let uv = project_nurbs(n, p, hint.map(|h| self.wrap_periodic(h, 0.0)));
+                return match hint {
+                    Some(h) => self.align_periodic(uv, h),
+                    None => uv,
+                };
+            }
         };
         match hint {
             Some(h) => self.align_periodic(uv, h),

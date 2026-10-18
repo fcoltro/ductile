@@ -114,7 +114,8 @@ fn estimate_turning(curve: &ductile_geom::Curve3, t0: f64, t1: f64) -> f64 {
 }
 
 pub fn tessellate(body: &Body, opts: &TessOptions) -> BodyMesh {
-    let edges: Vec<Vec<(f64, DVec3)>> = body.edge_ids().map(|e| tessellate_edge(body, e, opts)).collect();
+    let mut edges: Vec<Vec<(f64, DVec3)>> = body.edge_ids().map(|e| tessellate_edge(body, e, opts)).collect();
+    refine_edges_for_faces(body, &mut edges, opts);
     let faces = body.face_ids().map(|f| tessellate_face(body, f, &edges, opts)).collect();
     BodyMesh { faces, edges: edges.into_iter().map(|e| e.into_iter().map(|(_, p)| p).collect()).collect() }
 }
@@ -178,7 +179,7 @@ pub fn face_coedge_uvs(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> V
             if let (Some(p), true) = (pu, du < 1e-6) {
                 // Constant-u seam. Moving +v with interior on the left => high u.
                 let going_up = (b.y > a.y) != flip;
-                let base = ductile_geom::wrap_angle(a.x, -1e-7);
+                let base = surf.wrap_periodic(a, 1e-7).x;
                 let target = if going_up { base + p } else { base };
                 for x in s.iter_mut() {
                     x.uv.x = target;
@@ -187,7 +188,7 @@ pub fn face_coedge_uvs(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> V
             } else if let (Some(p), true) = (pv, dv < 1e-6) {
                 // Constant-v seam. Moving +u with interior on the left => low v.
                 let going_right = (b.x > a.x) != flip;
-                let base = ductile_geom::wrap_angle(a.y, -1e-7);
+                let base = surf.wrap_periodic(a, 1e-7).y;
                 let target = if going_right { base } else { base + p };
                 for x in s.iter_mut() {
                     x.uv.y = target;
@@ -211,15 +212,15 @@ pub fn face_coedge_uvs(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> V
                 let s = &mut coedge_uvs[i];
                 {
                     let first = s[0].uv;
-                    // The first fixed coedge anchors the loop in the base period.
-                    let pe = prev_end.unwrap_or_else(|| {
-                        DVec2::new(
-                            pu.map(|_| ductile_geom::wrap_angle(first.x, -1e-7)).unwrap_or(first.x),
-                            pv.map(|_| ductile_geom::wrap_angle(first.y, -1e-7)).unwrap_or(first.y),
-                        )
-                    });
-                    let aligned = surf.align_periodic(first, pe);
-                    let mut shift = aligned - first;
+                    let mut shift = match prev_end {
+                        Some(pe) => surf.align_periodic(first, pe) - first,
+                        None => {
+                            // The first fixed coedge anchors the loop: its whole
+                            // range goes into the base period.
+                            let lo = s.iter().fold(DVec2::splat(f64::INFINITY), |m, x| m.min(x.uv));
+                            surf.wrap_periodic(lo, 1e-7) - lo
+                        }
+                    };
                     // Never move the fixed seam coordinate.
                     if pu.is_some() && s.iter().all(|x| (x.uv.x - first.x).abs() < 1e-9) {
                         shift.x = 0.0;
@@ -424,27 +425,17 @@ pub fn tessellate_face(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>], opts
     if loops.is_empty() || loops[0].len() < 3 {
         return FaceMesh::default();
     }
-    let uv_loops: Vec<Vec<DVec2>> = loops.iter().map(|l| l.iter().map(|s| s.uv).collect()).collect();
 
     // Parameter-space bounding box.
     let mut lo = DVec2::splat(f64::INFINITY);
     let mut hi = DVec2::splat(f64::NEG_INFINITY);
-    for l in &uv_loops {
-        for p in l {
-            lo = lo.min(*p);
-            hi = hi.max(*p);
-        }
+    for s in loops.iter().flatten() {
+        lo = lo.min(s.uv);
+        hi = hi.max(s.uv);
     }
     // Metric scale so the triangulation is roughly isotropic in 3D.
-    let (su, sv, mut step_u, mut step_v) = surface_metrics(surf, lo, hi, opts);
-    // Straight directions (cylinder rulings) need no subdivision on their
-    // own, but trimmed faces still need interior points there, or long
-    // triangles would join distant boundary samples across the curvature.
-    if step_u.is_finite() && !step_v.is_finite() && sv > 0.0 {
-        step_v = step_u * su / sv;
-    } else if step_v.is_finite() && !step_u.is_finite() && su > 0.0 {
-        step_u = step_v * sv / su;
-    }
+    let (su, sv, step_u, step_v) = face_steps(surf, lo, hi, opts);
+    let uv_loops: Vec<Vec<DVec2>> = loops.iter().map(|l| l.iter().map(|s| s.uv).collect()).collect();
     let scale = DVec2::new(su, sv);
 
     let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> = ConstrainedDelaunayTriangulation::new();
@@ -574,6 +565,91 @@ pub fn tessellate_face(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>], opts
         }
     }
     mesh
+}
+
+/// Metric scales and interior grid steps for a face spanning `lo..hi`.
+fn face_steps(surf: &Surface, lo: DVec2, hi: DVec2, opts: &TessOptions) -> (f64, f64, f64, f64) {
+    let (su, sv, mut step_u, mut step_v) = surface_metrics(surf, lo, hi, opts);
+    // Straight directions (cylinder rulings) need no subdivision on their
+    // own, but trimmed faces still need interior points there, or long
+    // triangles would join distant boundary samples across the curvature.
+    if step_u.is_finite() && !step_v.is_finite() && sv > 0.0 {
+        step_v = step_u * su / sv;
+    } else if step_v.is_finite() && !step_u.is_finite() && su > 0.0 {
+        step_u = step_v * sv / su;
+    }
+    // Keep grid cells within a bounded aspect ratio in 3D: a surface that
+    // is straight one way (a ruled loft) would otherwise get one interior
+    // row, and Delaunay fans off the dense boundary then cut through it.
+    const ASPECT: f64 = 4.0;
+    if step_u.is_finite() && step_v.is_finite() {
+        step_v = step_v.min(ASPECT * step_u * su / sv);
+        step_u = step_u.min(ASPECT * step_v * sv / su);
+    }
+    (su, sv, step_u, step_v)
+}
+
+/// Splits edge samples wherever an adjacent face would see a boundary
+/// segment longer than its own grid step. An edge that is straight in 3D
+/// (a loft's top line) is sampled once, but the surface it bounds may curve
+/// along it, and triangles fanning off the long segment would cut through
+/// the surface. Splitting the edge itself keeps neighbouring faces watertight.
+fn refine_edges_for_faces(body: &Body, edges: &mut [Vec<(f64, DVec3)>], opts: &TessOptions) {
+    let mut need: Vec<Vec<usize>> = edges.iter().map(|s| vec![1; s.len().saturating_sub(1)]).collect();
+    for f in body.face_ids() {
+        if body.face(f).loops.is_empty() {
+            continue;
+        }
+        let surf = &body.face(f).surface;
+        let loops = face_coedge_uvs(body, f, edges);
+        let mut lo = DVec2::splat(f64::INFINITY);
+        let mut hi = DVec2::splat(f64::NEG_INFINITY);
+        for (_, l) in loops.iter().flatten() {
+            for s in l {
+                lo = lo.min(s.uv);
+                hi = hi.max(s.uv);
+            }
+        }
+        if !(lo.x <= hi.x && lo.y <= hi.y) {
+            continue;
+        }
+        let (_, _, step_u, step_v) = face_steps(surf, lo, hi, opts);
+        if !step_u.is_finite() && !step_v.is_finite() {
+            continue;
+        }
+        for (c, l) in loops.iter().flatten() {
+            let n = l.len();
+            if n != edges[c.edge.idx()].len() {
+                continue;
+            }
+            for i in 0..n - 1 {
+                let d = (l[i + 1].uv - l[i].uv).abs();
+                let k = (d.x / step_u).max(d.y / step_v).ceil();
+                if k > 1.0 {
+                    let seg = if c.reversed { n - 2 - i } else { i };
+                    let slot = &mut need[c.edge.idx()][seg];
+                    *slot = (*slot).max((k as usize).min(1000));
+                }
+            }
+        }
+    }
+    for (e, samples) in body.edge_ids().zip(edges.iter_mut()) {
+        if need[e.idx()].iter().all(|&k| k == 1) {
+            continue;
+        }
+        let curve = &body.edge(e).curve;
+        let mut out = Vec::new();
+        for (i, &k) in need[e.idx()].iter().enumerate() {
+            let (t0, t1) = (samples[i].0, samples[i + 1].0);
+            out.push(samples[i]);
+            for j in 1..k {
+                let t = t0 + (t1 - t0) * j as f64 / k as f64;
+                out.push((t, curve.point(t)));
+            }
+        }
+        out.push(*samples.last().unwrap());
+        *samples = out;
+    }
 }
 
 /// Loops for a closed surface with no trimming (whole torus / sphere in one face).
