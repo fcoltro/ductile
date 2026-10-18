@@ -62,7 +62,7 @@ pub fn pick_face(doc: &Document, ray: &Ray) -> Option<FaceHit> {
     best
 }
 
-fn to_screen(cam: &Camera, p: DVec3, size: DVec2) -> Option<(DVec2, f64)> {
+pub(crate) fn to_screen(cam: &Camera, p: DVec3, size: DVec2) -> Option<(DVec2, f64)> {
     let n = cam.project(p)?;
     if n.z < -1.0 || n.z > 1.0 {
         return None;
@@ -75,7 +75,7 @@ fn seg_dist(p: DVec2, a: DVec2, b: DVec2) -> f64 {
 }
 
 /// Whether `p` is visible (not occluded by a face hit nearer than it).
-fn visible(cam: &Camera, doc: &Document, p: DVec3, occluder: Option<&FaceHit>) -> bool {
+pub(crate) fn visible(cam: &Camera, doc: &Document, p: DVec3, occluder: Option<&FaceHit>) -> bool {
     match occluder {
         None => true,
         Some(h) => {

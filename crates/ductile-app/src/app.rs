@@ -61,7 +61,7 @@ pub struct DuctileApp {
     /// The command whose shortcut the next key press sets.
     pub assigning: Option<Command>,
     pub snap_enabled: bool,
-    snap_marker: Option<DVec3>,
+    snap_marker: Option<(DVec3, Option<&'static str>)>,
     screenshot_done: Arc<std::sync::atomic::AtomicBool>,
     pub pending_finish: bool,
     pub pending_cancel: bool,
@@ -311,52 +311,15 @@ impl DuctileApp {
         }
     }
 
-    /// Snapped pointer position: vertices, circle centres, edge midpoints,
-    /// points on edges and faces, and the grid.
-    fn snap(&self, cursor: DVec2, size: DVec2, ray: &crate::camera::Ray, ctrl: bool) -> (Option<DVec3>, Option<DVec3>) {
+    /// Snapped pointer position (with the snap's label): object snaps,
+    /// then the grid.
+    fn snap(&self, cursor: DVec2, size: DVec2, ray: &crate::camera::Ray, ctrl: bool) -> (Option<DVec3>, Option<DVec3>, Option<&'static str>) {
         let f = self.cplane.frame;
         let plane_pt = ray.hit_plane(f.origin, f.z);
         if self.snap_enabled {
-            if let Some((o, v)) = picking::pick_vertex(&self.doc, &self.camera, cursor, size, 10.0, None) {
-                return (self.doc.object(o).map(|ob| ob.body.vertex(v)), plane_pt);
-            }
-            // Centres of circles and arcs (concentric drawing, holes).
-            let to_px = |p: DVec3| self.camera.project(p).map(|n| DVec2::new((n.x * 0.5 + 0.5) * size.x, (0.5 - n.y * 0.5) * size.y));
-            let centre = self
-                .doc
-                .objects
-                .iter()
-                .filter(|o| o.visible)
-                .flat_map(|o| o.body.edges.iter())
-                .filter_map(|e| match &e.curve {
-                    ductile_geom::Curve3::Circle { frame, .. } | ductile_geom::Curve3::Ellipse { frame, .. } => Some(frame.origin),
-                    _ => None,
-                })
-                .filter_map(|c| to_px(c).map(|px| (px.distance(cursor), c)))
-                .filter(|(d, _)| *d < 10.0)
-                .min_by(|a, b| a.0.total_cmp(&b.0));
-            if let Some((_, c)) = centre {
-                return (Some(c), plane_pt);
-            }
-            if let Some((o, e)) = picking::pick_edge(&self.doc, &self.camera, cursor, size, 8.0, None) {
-                if let Some(ob) = self.doc.object(o) {
-                    let edge = ob.body.edge(e);
-                    let mid = edge.mid();
-                    let to_s = |p: DVec3| {
-                        self.camera.project(p).map(|n| DVec2::new((n.x * 0.5 + 0.5) * size.x, (0.5 - n.y * 0.5) * size.y))
-                    };
-                    if let Some(ms) = to_s(mid) {
-                        if ms.distance(cursor) < 12.0 {
-                            return (Some(mid), plane_pt);
-                        }
-                    }
-                    // Closest point on the edge to the view ray.
-                    let t = edge.curve.closest_param_in(ray.at((mid - ray.origin).dot(ray.dir)), edge.t0, edge.t1);
-                    return (Some(edge.curve.point(t)), plane_pt);
-                }
-            }
-            if let Some(h) = picking::pick_face(&self.doc, ray) {
-                return (Some(h.point), plane_pt);
+            let anchor = self.tool.as_ref().and_then(|t| t.anchor());
+            if let Some(s) = crate::snap::find(&self.doc, &self.camera, &f, cursor, size, ray, anchor) {
+                return (Some(s.point), plane_pt, Some(s.label));
             }
         }
         let grid = plane_pt.map(|p| {
@@ -369,7 +332,7 @@ impl DuctileApp {
                 p
             }
         });
-        (grid, plane_pt)
+        (grid, plane_pt, None)
     }
 
     fn viewport(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
@@ -426,7 +389,7 @@ impl DuctileApp {
                         self.doc.hover = picking::pick(&self.doc, &self.camera, c, size, mode);
                     }
                 }
-                let (pt, plane_pt) = self.snap(c, size, &ray, mods.ctrl);
+                let (pt, plane_pt, label) = self.snap(c, size, &ray, mods.ctrl);
                 let info = PointerInfo {
                     ray,
                     point: pt,
@@ -452,7 +415,7 @@ impl DuctileApp {
                     ToolOutcome::Continue => {}
                 }
                 if let Some(p) = pt {
-                    self.snap_marker = Some(p);
+                    self.snap_marker = Some((p, label));
                 }
             } else {
                 let cp = egui::pos2(rect.min.x + c.x as f32, rect.min.y + c.y as f32);
@@ -524,11 +487,10 @@ impl DuctileApp {
         if let Some(t) = &self.tool {
             t.guides(&mut overlay);
         }
-        if let Some(p) = self.snap_marker.take() {
-            if self.tool.is_some() {
-                overlay.push(LineInstance::point(p, [0.3, 0.9, 1.0, 1.0], 6.0));
-            }
-        }
+        let snap_label = self.snap_marker.take().filter(|_| self.tool.is_some()).map(|(p, label)| {
+            overlay.push(LineInstance::point(p, [0.3, 0.9, 1.0, 1.0], 6.0));
+            (p, label)
+        });
         vertex_overlay(&self.doc, &mut overlay);
         let ppp = ui.ctx().pixels_per_point();
         let px = [(rect.width() * ppp).round() as u32, (rect.height() * ppp).round() as u32];
@@ -540,6 +502,17 @@ impl DuctileApp {
         } else {
             ui.painter().rect_filled(rect, 0.0, egui::Color32::from_gray(20));
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "wgpu renderer unavailable", egui::FontId::proportional(16.0), egui::Color32::GRAY);
+        }
+        // The snap's label beside its marker.
+        if let Some((p, Some(label))) = snap_label {
+            if let Some(n) = self.camera.project(p) {
+                let at = egui::pos2(rect.min.x + (n.x as f32 * 0.5 + 0.5) * rect.width() + 10.0, rect.min.y + (0.5 - n.y as f32 * 0.5) * rect.height() - 10.0);
+                let painter = ui.painter();
+                let galley = painter.layout_no_wrap(label.to_string(), egui::FontId::proportional(12.0), egui::Color32::from_gray(235));
+                let bg = egui::Rect::from_min_size(at, galley.size()).expand(3.0);
+                painter.rect_filled(bg, 3.0, egui::Color32::from_black_alpha(190));
+                painter.galley(at, galley, egui::Color32::WHITE);
+            }
         }
         if let Some(bs) = &self.box_select {
             let r = egui::Rect::from_two_pos(bs.start, bs.current);

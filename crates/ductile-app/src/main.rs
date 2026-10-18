@@ -15,6 +15,7 @@ mod icons;
 mod picking;
 mod render;
 mod screenshot;
+mod snap;
 mod theme;
 mod tools;
 mod ui;

@@ -75,6 +75,11 @@ pub trait Tool {
     fn busy(&self) -> bool {
         false
     }
+    /// The last point placed, which snapping infers lines, perpendiculars
+    /// and tangents from.
+    fn anchor(&self) -> Option<DVec3> {
+        None
+    }
 }
 
 fn drag_value(ui: &mut egui::Ui, label: &str, v: &mut f64, speed: f64) -> bool {
@@ -138,6 +143,9 @@ fn height_from_ray(base: DVec3, axis: DVec3, ray: &Ray) -> f64 {
 }
 
 impl Tool for BoxTool {
+    fn anchor(&self) -> Option<DVec3> {
+        self.corner
+    }
     fn name(&self) -> &'static str {
         "Box"
     }
@@ -1524,6 +1532,9 @@ impl CurveTool {
 }
 
 impl Tool for CurveTool {
+    fn anchor(&self) -> Option<DVec3> {
+        self.points.last().copied()
+    }
     fn name(&self) -> &'static str {
         match self.kind {
             CurveKind::Polyline => "Curve",

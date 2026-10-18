@@ -119,6 +119,10 @@ code from them.
 - Transform gizmo: selecting something shows axis arrows and rotation rings
   at it; drag an arrow to move along that axis or a ring to turn about it
   (type a value while dragging for an exact one). Headless: `--select N`.
+- Snapping while drawing and placing, labelled beside the marker as in
+  Plasticity: End, Middle, 1/4, 3/4, Center, Intersection, Perpendicular
+  and Tangent to the last point, the X / Y / Z lines through it, then
+  curves, edges and faces. Snaps hidden behind a solid are ignored.
 
 In progress: more of Plasticity's curve and surface tools.
 
