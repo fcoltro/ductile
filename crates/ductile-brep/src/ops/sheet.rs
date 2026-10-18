@@ -355,6 +355,225 @@ pub fn thicken(sheet: &Body, t: f64) -> Result<Body, crate::ops::offset::OffsetE
     Ok(b)
 }
 
+/// The surface beyond one side of a patch: the neighbouring face's surface
+/// and a point inside that face (telling which way is away from it).
+pub type Neighbour = Option<(Surface, DVec3)>;
+
+/// Fills a closed boundary like [`patch`], but meeting the faces beyond its
+/// segments tangentially (G1): `neighbours[i]` is the face beyond
+/// `boundary.segments[i]`, or None for a free side. The patch is fitted
+/// with its boundary rows fixed, its cross-boundary derivatives in the
+/// neighbours' tangent planes, and the rest faired.
+pub fn patch_g1(boundary: &Loop3, neighbours: &[Neighbour]) -> Option<Body> {
+    if neighbours.iter().all(Option::is_none) || neighbours.len() != boundary.segments.len() {
+        return patch(boundary, &[]);
+    }
+    let [bottom, right, top, left] = four_sides(boundary)?;
+    let segs = &boundary.segments;
+    // Per segment, the sign that turns n x t away from its neighbour.
+    let signs: Vec<f64> = segs
+        .iter()
+        .zip(neighbours)
+        .map(|(s, nb)| {
+            let Some((surf, inside)) = nb else { return 1.0 };
+            let (m, t) = mid_point_tangent(s);
+            let uv = surf.project(m, None);
+            let d = surf.normal(uv.x, uv.y).cross(t);
+            if d.dot(*inside - m) > 0.0 { -1.0 } else { 1.0 }
+        })
+        .collect();
+    let cross = |p: DVec3| -> Option<(DVec3, DVec3)> {
+        // The boundary segment through p.
+        let (i, t) = segs
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i, s.curve.closest_param_in(p, s.t0.min(s.t1), s.t0.max(s.t1))))
+            .min_by(|a, b| segs[a.0].curve.point(a.1).distance(p).total_cmp(&segs[b.0].curve.point(b.1).distance(p)))?;
+        let (surf, _) = neighbours[i].as_ref()?;
+        let uv = surf.project(p, None);
+        let n = surf.normal(uv.x, uv.y);
+        let d = n.cross(segs[i].tangent_at(t)).try_normalize()?;
+        Some((n, d * signs[i]))
+    };
+    let s = fit_g1([&bottom, &right, &top.reversed(), &left.reversed()], &cross)?;
+    let mut sw = Sewer::new(BodyKind::Sheet, tolerance(std::slice::from_ref(boundary)));
+    sw.patch(s);
+    Some(sw.body)
+}
+
+/// Least-squares patch through four boundary curves (bottom and top in
+/// +u, left and right in +v, as for Coons) whose derivative across each
+/// side lies in the plane with normal `n` and leans along `d`, where
+/// `cross(p) = (n, d)` at a boundary point `p` (d pointing into the patch);
+/// sides where `cross` is None are free.
+fn fit_g1(sides: [&NurbsCurve; 4], cross: &dyn Fn(DVec3) -> Option<(DVec3, DVec3)>) -> Option<NurbsSurface> {
+    use crate::ops::corner::Lsq;
+    use ductile_geom::nurbs::{basis::{basis_funs, ders_basis_funs, find_span}, make_compatible};
+    let prep = |c: &NurbsCurve| {
+        let c = if c.is_rational() {
+            let (a, b) = c.domain();
+            let n = 8 * c.ctrl.len().max(4);
+            let pts: Vec<DVec3> = (0..=n).map(|i| c.point(a + (b - a) * i as f64 / n as f64)).collect();
+            NurbsCurve::interpolate(&pts, 3)
+        } else {
+            c.clone()
+        };
+        if c.degree < 3 { c.elevated_to(3) } else { c }
+    };
+    let refine = |mut cs: Vec<NurbsCurve>, n: usize| {
+        while cs[0].ctrl.len() < n {
+            let k = &cs[0].knots;
+            let (i, _) = k.windows(2).enumerate().max_by(|a, b| (a.1[1] - a.1[0]).total_cmp(&(b.1[1] - b.1[0])))?;
+            let mid = 0.5 * (k[i] + k[i + 1]);
+            cs = cs.iter().map(|c| c.insert_knot(mid, 1)).collect();
+        }
+        Some(cs)
+    };
+    let uc = refine(make_compatible(&[prep(sides[0]), prep(sides[2])]), 8)?;
+    let vc = refine(make_compatible(&[prep(sides[3]), prep(sides[1])]), 8)?;
+    let (p, q) = (uc[0].degree, vc[0].degree);
+    let (ku, kv) = (uc[0].knots.clone(), vc[0].knots.clone());
+    let (nu, nv) = (uc[0].ctrl.len(), vc[0].ctrl.len());
+    let cp = |c: &NurbsCurve, i: usize| c.ctrl[i].truncate() / c.ctrl[i].w;
+    // Fixed boundary rows, unknown interior.
+    #[derive(Clone, Copy)]
+    enum S {
+        F(DVec3),
+        V(usize),
+    }
+    let mut n_var = 0;
+    let mut grid = vec![vec![S::F(DVec3::ZERO); nv]; nu];
+    for (i, col) in grid.iter_mut().enumerate() {
+        for (j, slot) in col.iter_mut().enumerate() {
+            *slot = if j == 0 {
+                S::F(cp(&uc[0], i))
+            } else if j == nv - 1 {
+                S::F(cp(&uc[1], i))
+            } else if i == 0 {
+                S::F(cp(&vc[0], j))
+            } else if i == nu - 1 {
+                S::F(cp(&vc[1], j))
+            } else {
+                n_var += 1;
+                S::V(n_var - 1)
+            };
+        }
+    }
+    let mut lsq = Lsq::new(3 * n_var);
+    // A row sum_k w_k * (component c of grid point k) = rhs, per component.
+    let add = |lsq: &mut Lsq, terms: &[((usize, usize), DVec3)], rhs: f64, w: f64| {
+        let mut coef = Vec::new();
+        let mut r = rhs;
+        for &((i, j), a) in terms {
+            match grid[i][j] {
+                S::F(x) => r -= a.dot(x),
+                S::V(k) => {
+                    for c in 0..3 {
+                        if a[c] != 0.0 {
+                            coef.push((3 * k + c, a[c]));
+                        }
+                    }
+                }
+            }
+        }
+        if !coef.is_empty() {
+            lsq.row(&coef, r, w);
+        }
+    };
+    let du = cp(&vc[0], nv / 2).distance(cp(&vc[1], nv / 2)).max(1e-9);
+    let dv = cp(&uc[0], nu / 2).distance(cp(&uc[1], nu / 2)).max(1e-9);
+    // Cross-boundary rows. side: 0 bottom, 1 right, 2 top, 3 left.
+    for side in 0..4 {
+        let along_u = side % 2 == 0;
+        let (curve, knots, deg, n) = if along_u { (&uc[side / 2], &ku, p, nu) } else { (&vc[if side == 3 { 0 } else { 1 }], &kv, q, nv) };
+        let (other_k, other_deg, other_n) = if along_u { (&kv, q, nv) } else { (&ku, p, nu) };
+        let at_end = side == 1 || side == 2;
+        // Derivative across the side, into the patch: f (P_inner - P_edge).
+        let f = if at_end { other_deg as f64 / (other_k[other_n - 1 + other_deg] - other_k[other_n - 1]) } else { other_deg as f64 / (other_k[other_deg + 1] - other_k[1]) };
+        let (edge, inner) = if at_end { (other_n - 1, other_n - 2) } else { (0, 1) };
+        let reach = if along_u { dv } else { du };
+        let samples = 4 * n;
+        for s in 0..samples {
+            let t = knots[deg] + (knots[n] - knots[deg]) * (s as f64 + 0.5) / samples as f64;
+            let Some((nrm, d)) = cross(curve.point(t)) else { continue };
+            let span = find_span(n - 1, deg, t, knots);
+            let b = basis_funs(span, t, deg, knots);
+            let idx = |k: usize, row: usize| if along_u { (k, row) } else { (row, k) };
+            // The derivative (into the patch) as terms per component.
+            let terms = |dir: DVec3| -> Vec<((usize, usize), DVec3)> {
+                let mut v = Vec::new();
+                for (m, bm) in b.iter().enumerate() {
+                    let k = span - deg + m;
+                    // Into the patch: from the edge row to the inner row.
+                    v.push((idx(k, inner), dir * (f * bm)));
+                    v.push((idx(k, edge), dir * (-f * bm)));
+                }
+                v
+            };
+            // In the neighbour's tangent plane (hard), leaning along d (soft).
+            add(&mut lsq, &terms(nrm), 0.0, 30.0);
+            for c in 0..3 {
+                let mut e = DVec3::ZERO;
+                e[c] = 1.0;
+                add(&mut lsq, &terms(e), reach * d[c], 0.3);
+            }
+        }
+    }
+    // Fairness: the surface's energy, integrated over a grid of samples.
+    // Third derivatives (change of curvature) by default, so round shapes
+    // stay round; a little second derivative energy keeps it regular.
+    let m = 3 * nu.max(nv);
+    let unit = [DVec3::X, DVec3::Y, DVec3::Z];
+    let (ud, vd) = ((ku[p], ku[nu]), (kv[q], kv[nv]));
+    for a in 0..m {
+        let u = ud.0 + (ud.1 - ud.0) * (a as f64 + 0.5) / m as f64;
+        let su = find_span(nu - 1, p, u, &ku);
+        let bu = ders_basis_funs(su, u, p, 3.min(p), &ku);
+        for c in 0..m {
+            let v = vd.0 + (vd.1 - vd.0) * (c as f64 + 0.5) / m as f64;
+            let sv = find_span(nv - 1, q, v, &kv);
+            let bv = ders_basis_funs(sv, v, q, 3.min(q), &kv);
+            // d^(r+s) S / du^r dv^s as terms.
+            let term = |r: usize, s: usize, e: DVec3| -> Vec<((usize, usize), DVec3)> {
+                let mut t = Vec::new();
+                if r > p || s > q {
+                    return t;
+                }
+                for i in 0..=p {
+                    for j in 0..=q {
+                        let w = bu[r][i] * bv[s][j];
+                        if w != 0.0 {
+                            t.push(((su - p + i, sv - q + j), e * w));
+                        }
+                    }
+                }
+                t
+            };
+            let w0 = 1.0 / m as f64;
+            for e in unit {
+                for (r, s, w) in [(3, 0, 1.0), (2, 1, 3.0), (1, 2, 3.0), (0, 3, 1.0)] {
+                    add(&mut lsq, &term(r, s, e), 0.0, w0 * f64::sqrt(w) * du.min(dv));
+                }
+                for (r, s, w) in [(2, 0, 1.0), (1, 1, 2.0), (0, 2, 1.0)] {
+                    add(&mut lsq, &term(r, s, e), 0.0, w0 * f64::sqrt(w) * 0.05);
+                }
+            }
+        }
+    }
+    let x = lsq.solve();
+    let mut ctrl = Vec::with_capacity(nu * nv);
+    for col in &grid {
+        for slot in col {
+            let pt = match *slot {
+                S::F(p) => p,
+                S::V(k) => DVec3::new(x[3 * k], x[3 * k + 1], x[3 * k + 2]),
+            };
+            ctrl.push(pt.extend(1.0));
+        }
+    }
+    Some(NurbsSurface::new(p, q, ku, kv, nu, nv, ctrl))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,5 +702,65 @@ mod tests {
         // Thin enough that the curvature terms of the offset volume stay
         // within a tenth of a percent.
         assert!((v / (0.1 * area(&skew)) - 1.0).abs() < 2e-3, "{v} vs {}", 0.1 * area(&skew));
+    }
+
+    #[test]
+    fn tangent_patch_continues_a_sphere() {
+        // The four arcs bounding |x|, |y| <= a on the top of a unit sphere.
+        let a: f64 = 0.4;
+        let r = (1.0 - a * a).sqrt();
+        let z = |x: f64, y: f64| (1.0 - x * x - y * y).sqrt();
+        let arc = |fixed_x: bool, c: f64, from: f64, to: f64| {
+            // Circle in the plane x = c (or y = c), radius r, angle measured from +z.
+            let (origin, normal, xdir) = if fixed_x { (DVec3::new(c, 0.0, 0.0), DVec3::X, DVec3::Z) } else { (DVec3::new(0.0, c, 0.0), DVec3::Y, DVec3::Z) };
+            let frame = Frame::new(origin, normal, xdir);
+            let ang = |w: f64| {
+                let l = frame.to_local(if fixed_x { DVec3::new(c, w, z(c, w)) } else { DVec3::new(w, c, z(w, c)) });
+                l.y.atan2(l.x)
+            };
+            let (t0, t1) = (ang(from), ang(to));
+            let s = Segment::new(Curve3::Circle { frame, radius: r }, t0.min(t1), t0.max(t1));
+            if t0 > t1 { s.flipped() } else { s }
+        };
+        let segs = vec![arc(false, -a, -a, a), arc(true, a, -a, a), arc(false, a, a, -a), arc(true, -a, a, -a)];
+        let lp = chain(segs);
+        for w in 0..4 {
+            assert!(lp.segments[w].end().distance(lp.segments[(w + 1) % 4].start()) < 1e-9, "{w}");
+        }
+        let sphere = Surface::Sphere { frame: Frame::WORLD, radius: 1.0 };
+        let nb: Vec<Neighbour> = (0..4)
+            .map(|k| {
+                // A point of the sphere outside each side.
+                let m = lp.segments[k].curve.point(0.5 * (lp.segments[k].t0 + lp.segments[k].t1));
+                let out = DVec3::new(m.x, m.y, 0.0).normalize() * 0.8;
+                Some((sphere.clone(), DVec3::new(out.x, out.y, z(out.x, out.y))))
+            })
+            .collect();
+        let check = |b: &Body| {
+            let Surface::Nurbs(s) = &b.faces[0].surface else { panic!() };
+            let mut dev: f64 = 0.0;
+            let mut ang: f64 = 0.0;
+            for i in 0..=20 {
+                for j in 0..=20 {
+                    let (u, v) = (i as f64 / 20.0, j as f64 / 20.0);
+                    let p = s.point(u, v);
+                    dev = dev.max((p.length() - 1.0).abs());
+                    if i == 0 || j == 0 || i == 20 || j == 20 {
+                        let d = s.derivs(u, v, 1);
+                        let n = d[1][0].cross(d[0][1]).normalize();
+                        ang = ang.max(n.dot(p.normalize()).abs().min(1.0).acos());
+                    }
+                }
+            }
+            (dev, ang.to_degrees())
+        };
+        let (dev_c, ang_c) = check(&patch(&lp, &[]).unwrap());
+        let (dev_g, ang_g) = check(&patch_g1(&lp, &nb).unwrap());
+        // Coons meets the sphere at over 2 degrees and sags 0.008; the
+        // tangent patch meets it within hundredths of a degree and follows
+        // it within a thousandth.
+        assert!(ang_c > 1.0, "{ang_c}");
+        assert!(ang_g < 0.05, "{ang_g}");
+        assert!(dev_g < 1.5e-3 && dev_g < dev_c / 5.0, "{dev_g} vs {dev_c}");
     }
 }

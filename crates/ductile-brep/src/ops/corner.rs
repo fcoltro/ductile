@@ -187,17 +187,17 @@ impl CornerMap {
 }
 
 /// Least-squares system of scalar equations over unknown coordinates.
-struct Lsq {
+pub(crate) struct Lsq {
     ata: Vec<Vec<f64>>,
     atb: Vec<f64>,
 }
 
 impl Lsq {
-    fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         Self { ata: vec![vec![0.0; n]; n], atb: vec![0.0; n] }
     }
 
-    fn row(&mut self, coef: &[(usize, f64)], rhs: f64, w: f64) {
+    pub(crate) fn row(&mut self, coef: &[(usize, f64)], rhs: f64, w: f64) {
         let w2 = w * w;
         for &(u, x) in coef {
             self.atb[u] += w2 * x * rhs;
@@ -207,7 +207,7 @@ impl Lsq {
         }
     }
 
-    fn solve(mut self) -> Vec<f64> {
+    pub(crate) fn solve(mut self) -> Vec<f64> {
         for (i, r) in self.ata.iter_mut().enumerate() {
             r[i] += 1e-12;
         }
