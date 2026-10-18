@@ -44,10 +44,10 @@ code from them.
   top rim in one go; or a side edge between a spline face and a plane,
   closed off by the caps it runs into. Blends can be round, smooth (G2:
   curvature-continuous sections that leave the faces with zero curvature,
-  for class-A reflections) or chamfered. Smooth blends on a box get
-  curvature-continuous corner patches where three of them meet (faces at
-  any angle, e.g. a hexagonal prism), and meet
-  in clean mitres where a corner's third edge stays sharp.
+  for class-A reflections) or chamfered. Smooth blends get faired,
+  curvature-continuous corner patches where three of them meet, between
+  faces at any angle (a box, a hexagonal prism), and meet in clean mitres
+  where a corner's third edge stays sharp.
 - Shell (Alt+S): hollow a solid into walls of a given thickness, opening
   the selected faces, or leaving an inner void when none are selected.
   Offset solid (Alt+O) grows or shrinks a whole solid, Offset faces
