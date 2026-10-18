@@ -1478,6 +1478,146 @@ impl Tool for ShellTool {
     }
 }
 
+// ---------------------------------------------------------- Curve edits ----
+
+/// Rounds the corners of the selected curves (only the selected vertices'
+/// corners when any are picked), or offsets the curves in their plane.
+pub struct CurveEditTool {
+    targets: Vec<(ObjectId, std::sync::Arc<Body>)>,
+    corners: Vec<DVec3>,
+    pub offset: bool,
+    pub value: f64,
+    base: DVec3,
+    dir: DVec3,
+    start_t: Option<f64>,
+    typed: Option<f64>,
+}
+
+impl CurveEditTool {
+    pub fn new(doc: &Document, offset: bool) -> Option<Self> {
+        let targets: Vec<_> = doc
+            .selected_objects()
+            .into_iter()
+            .filter_map(|id| doc.object(id).filter(|o| o.body.kind == ductile_brep::BodyKind::Wire).map(|o| (id, o.body.clone())))
+            .collect();
+        if targets.is_empty() {
+            return None;
+        }
+        let corners: Vec<DVec3> = doc.selection.iter().filter_map(|p| if let Pick::Vertex(o, v) = p { doc.object(*o).map(|ob| ob.body.vertex(*v)) } else { None }).collect();
+        let b = &targets[0].1;
+        let base = b.vertices.first().map(|v| v.point).unwrap_or(DVec3::ZERO);
+        let plane = current_cplane().frame;
+        // Drag across the curve, in its plane.
+        let e0 = &b.edges[0];
+        let t = e0.curve.tangent(e0.t0).normalize_or_zero();
+        let dir = plane.z.cross(t).try_normalize().unwrap_or(plane.x);
+        Some(Self { targets, corners, offset, value: 0.0, base, dir, start_t: None, typed: None })
+    }
+
+    fn amount(&self) -> f64 {
+        self.typed.unwrap_or(self.value)
+    }
+
+    fn edited(&self, b: &Body) -> Option<Body> {
+        use ductile_brep::profile::{loops_plane, wire_chains, wire_from_segments};
+        let v = self.amount();
+        if v.abs() < 1e-9 {
+            return None;
+        }
+        let chains = wire_chains(b);
+        let normal = loops_plane(&chains).map(|f| f.z).unwrap_or(current_cplane().frame.z);
+        let mut segs = Vec::new();
+        for c in &chains {
+            let closed = c.is_closed();
+            let out = if self.offset {
+                // Positive grows closed curves: offset to the right of a
+                // counter-clockwise loop.
+                let ccw = closed && c.normal().dot(normal) > 0.0;
+                let d = if ccw { -v } else { v };
+                ductile_brep::curves::offset_chain(&c.segments, closed, d, normal)
+            } else {
+                let at = (!self.corners.is_empty()).then_some(self.corners.as_slice());
+                ductile_brep::curves::fillet_corners(&c.segments, closed, v.abs(), at)
+            };
+            if out.is_empty() {
+                return None;
+            }
+            segs.extend(out);
+        }
+        Some(wire_from_segments(&segs))
+    }
+}
+
+impl Tool for CurveEditTool {
+    fn name(&self) -> &'static str {
+        if self.offset {
+            "Offset curve"
+        } else {
+            "Fillet curve"
+        }
+    }
+    fn hint(&self) -> String {
+        format!("{}: drag or type a {} ({:.4}), click or Enter to finish", self.name(), if self.offset { "distance" } else { "radius" }, self.amount())
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if self.typed.is_none() {
+            let t = height_from_ray(self.base, self.dir, &p.ray);
+            let t0 = *self.start_t.get_or_insert(t);
+            let d = t - t0;
+            self.value = if self.offset { snap_len(d.abs(), p.world_per_px).copysign(d) } else { snap_len(d.abs(), p.world_per_px) };
+        }
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let mut out: Option<Body> = None;
+        for (_, b) in &self.targets {
+            if let Some(e) = self.edited(b) {
+                match &mut out {
+                    None => out = Some(e),
+                    Some(o) => o.append(&e),
+                }
+            }
+        }
+        out
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut v = self.amount();
+        let ch = drag_value(ui, if self.offset { "Distance" } else { "Radius" }, &mut v, 0.01);
+        if ch {
+            self.typed = Some(v);
+        }
+        ch
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        // An offset adds a curve; a fillet replaces it.
+        if self.offset {
+            vec![]
+        } else {
+            self.targets.iter().map(|t| t.0).collect()
+        }
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v;
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let mut any = false;
+        for (id, b) in self.targets.clone() {
+            let Some(e) = self.edited(&b) else { continue };
+            any = true;
+            if self.offset {
+                let name = doc.object(id).map(|o| o.name.clone()).unwrap_or_else(|| "Curve".into());
+                doc.add_body(&name, e);
+            } else {
+                doc.replace_body(id, e);
+            }
+        }
+        any
+    }
+}
+
 // ---------------------------------------------------------------- Array ----
 
 /// Copies of the selected objects in a row (along a construction plane axis,
@@ -1790,6 +1930,36 @@ mod tests {
         let mut o = ShellTool::new(&doc, OffsetMode::Solid).unwrap();
         o.typed_value(Some(0.1));
         assert!(o.commit(&mut doc));
+    }
+
+    #[test]
+    fn fillet_and_offset_a_drawn_rectangle() {
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        let mut r = CurveTool::new(CurveKind::Rectangle);
+        click(&mut r, &doc, DVec3::ZERO, true);
+        assert!(click(&mut r, &doc, DVec3::new(4.0, 3.0, 0.0), true));
+        assert!(r.commit(&mut doc));
+        let id = doc.objects[0].id;
+        doc.selection.insert(Pick::Object(id));
+        let mut f = CurveEditTool::new(&doc, false).unwrap();
+        f.typed_value(Some(0.5));
+        assert!(f.commit(&mut doc));
+        assert_eq!(doc.object(id).unwrap().body.edges.len(), 8);
+        doc.selection.insert(Pick::Object(id));
+        let mut o = CurveEditTool::new(&doc, true).unwrap();
+        o.typed_value(Some(0.25));
+        assert!(o.commit(&mut doc));
+        assert_eq!(doc.objects.len(), 2);
+        // The offset grows the loop: it extrudes to a larger area.
+        doc.selection.clear();
+        doc.selection.insert(Pick::Object(doc.objects[1].id));
+        let a = extrude_selected(&mut doc);
+        // Steiner: area + perimeter * d + pi d^2 for an outward offset.
+        let pi = std::f64::consts::PI;
+        let (area, perimeter) = (12.0 - (4.0 - pi) * 0.25, 10.0 + pi);
+        let expect = area + perimeter * 0.25 + pi * 0.0625;
+        assert!((a - expect).abs() < 2e-2, "{a} vs {expect}");
     }
 
     #[test]

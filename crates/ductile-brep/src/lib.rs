@@ -3,6 +3,7 @@
 
 pub mod ops;
 pub mod primitives;
+pub mod curves;
 pub mod profile;
 pub mod ssi;
 pub mod tess;

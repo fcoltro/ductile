@@ -22,6 +22,9 @@ code from them.
   (Shift+R), circle (Shift+O), ellipse (Shift+E), regular polygon (Shift+P).
   Curves drawn separately that meet end to end form one profile. In vertex
   mode (1) spline control points show and can be selected and moved (G).
+  Fillet (Shift+F) with curves selected rounds their corners (or just the
+  selected vertices'); Offset curve (Alt+C) offsets them in their plane,
+  rounding outside corners.
 - Extrude (E): push/pull planar faces, or turn closed planar curves (with
   holes) into solids, with live preview.
 - Revolve (V) closed curves by any angle about a selected edge or the
@@ -42,7 +45,8 @@ code from them.
   for class-A reflections) or chamfered.
 - Shell (Alt+S): hollow a solid into walls of a given thickness, opening
   the selected faces, or leaving an inner void when none are selected.
-  Offset solid (Alt+O) grows or shrinks a whole solid. Faces move along
+  Offset solid (Alt+O) grows or shrinks a whole solid, Offset faces
+  (Alt+F, or E on a curved face) pushes and pulls any faces. Faces move along
   their normals with exact offset surfaces for analytic faces, sharp edges
   stay sharp, and tangent faces (fillets) move together.
 - STEP (AP214) export of exact solids, checked against OpenCascade; STL and
@@ -55,7 +59,8 @@ code from them.
 - Zebra stripes (Alt+R, or the Zebra button) to judge surface continuity:
   stripes stay unbroken across tangent (G1) joins and keep their direction
   across curvature-continuous (G2) ones. Headless: `--zebra`.
-- Move / rotate / scale / mirror, undo/redo.
+- Move / rotate / scale / mirror, linear and radial arrays (Alt+A,
+  Alt+Shift+A), undo/redo.
 
 In progress: rolling-ball corners where filleted chains meet, mitred sweeps
 around sharp path corners, STEP assemblies.

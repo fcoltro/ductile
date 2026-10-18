@@ -3,7 +3,7 @@
 
 use crate::app::DuctileApp;
 use crate::document::{Document, Pick, SelectMode};
-use crate::tools::{ArrayTool, BoxTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
+use crate::tools::{ArrayTool, BoxTool, CurveEditTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
 use ductile_geom::{DMat4, DVec3, Frame};
@@ -52,6 +52,7 @@ pub enum Command {
     Shell,
     OffsetSolid,
     OffsetFaces,
+    OffsetCurve,
     Union,
     Subtract,
     Intersect,
@@ -121,6 +122,7 @@ impl Command {
         Command::Shell,
         Command::OffsetSolid,
         Command::OffsetFaces,
+        Command::OffsetCurve,
         Command::Union,
         Command::Subtract,
         Command::Intersect,
@@ -191,6 +193,7 @@ impl Command {
             Shell => "Shell (hollow, open selected faces)",
             OffsetSolid => "Offset solid",
             OffsetFaces => "Offset faces",
+            OffsetCurve => "Offset curve",
             Union => "Boolean union",
             Subtract => "Boolean subtract",
             Intersect => "Boolean intersect",
@@ -256,6 +259,7 @@ impl Command {
             Shell => "Alt+S",
             OffsetSolid => "Alt+O",
             OffsetFaces => "Alt+F",
+            OffsetCurve => "Alt+C",
             Union => "Shift+U",
             Loft => "Alt+L",
             Sweep => "Alt+W",
@@ -323,6 +327,7 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::S, false, false, true) => Shell,
         (Key::O, false, false, true) => OffsetSolid,
         (Key::F, false, false, true) => OffsetFaces,
+        (Key::C, false, false, true) => OffsetCurve,
         (Key::U, false, true, false) => Union,
         (Key::D, false, true, false) => Subtract,
         (Key::I, false, true, false) => Intersect,
@@ -506,7 +511,15 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         },
         Fillet | Chamfer => match FilletTool::new(&app.doc, cmd == Chamfer) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
-            None => app.status = "Select edges to blend (edge mode: 2)".into(),
+            // With curves selected, Fillet rounds their corners.
+            None => match (cmd == Fillet).then(|| CurveEditTool::new(&app.doc, false)).flatten() {
+                Some(t) => app.start_tool(std::boxed::Box::new(t)),
+                None => app.status = "Select edges to blend (edge mode: 2), or curves to round".into(),
+            },
+        },
+        OffsetCurve => match CurveEditTool::new(&app.doc, true) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select curves to offset".into(),
         },
         Shell | OffsetSolid | OffsetFaces => {
             let mode = match cmd {
