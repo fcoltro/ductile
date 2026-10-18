@@ -407,25 +407,9 @@ impl NurbsCurve {
     /// land on the points, then written out as clamped Bézier pieces so the
     /// rest of the kernel never sees an unclamped knot vector.
     pub fn interpolate_closed(pts: &[DVec3]) -> Self {
-        let n = pts.len();
-        assert!(n >= 3);
-        // (P[i-1] + 4 P[i] + P[i+1]) / 6 = Q[i], cyclically.
-        let mut a = vec![vec![0.0; n]; n];
-        for (i, row) in a.iter_mut().enumerate() {
-            row[(i + n - 1) % n] += 1.0 / 6.0;
-            row[i] += 4.0 / 6.0;
-            row[(i + 1) % n] += 1.0 / 6.0;
-        }
-        let p = solve_dense(a, pts.to_vec());
-        let mut ctrl = vec![pts[0]];
-        let mut knots = vec![0.0; 4];
-        for i in 0..n {
-            let (p0, p1) = (p[i], p[(i + 1) % n]);
-            ctrl.extend([(2.0 * p0 + p1) / 3.0, (p0 + 2.0 * p1) / 3.0, pts[(i + 1) % n]]);
-            let k = (i + 1) as f64 / n as f64;
-            knots.extend(if i + 1 == n { vec![k; 4] } else { vec![k; 3] });
-        }
-        Self::from_points(3, knots, &ctrl)
+        let h: Vec<DVec4> = pts.iter().map(|p| p.extend(1.0)).collect();
+        let (knots, ctrl) = interpolate_closed_hom(&h);
+        Self::new(3, knots, ctrl)
     }
 
     /// Polyline approximation with chord deviation below `tol`.
@@ -449,6 +433,32 @@ fn intersect_tangents(p0: DVec3, t0: DVec3, p2: DVec3, t2: DVec3) -> DVec3 {
     }
     let s = (b * e - c * d) / den;
     p0 + t0 * s
+}
+
+/// Closed C2 cubic interpolation of homogeneous points at uniform
+/// parameters on [0, 1] (the first point is not repeated). Returns the
+/// clamped knot vector and control points of its Bézier pieces; interpolating
+/// homogeneous points lets rows of a rational surface share one structure.
+pub fn interpolate_closed_hom(pts: &[DVec4]) -> (Vec<f64>, Vec<DVec4>) {
+    let n = pts.len();
+    assert!(n >= 3);
+    // (P[i-1] + 4 P[i] + P[i+1]) / 6 = Q[i], cyclically.
+    let mut a = vec![vec![0.0; n]; n];
+    for (i, row) in a.iter_mut().enumerate() {
+        row[(i + n - 1) % n] += 1.0 / 6.0;
+        row[i] += 4.0 / 6.0;
+        row[(i + 1) % n] += 1.0 / 6.0;
+    }
+    let p = solve_dense(a, pts.to_vec());
+    let mut ctrl = vec![pts[0]];
+    let mut knots = vec![0.0; 4];
+    for i in 0..n {
+        let (p0, p1) = (p[i], p[(i + 1) % n]);
+        ctrl.extend([(2.0 * p0 + p1) / 3.0, (p0 + 2.0 * p1) / 3.0, pts[(i + 1) % n]]);
+        let k = (i + 1) as f64 / n as f64;
+        knots.extend(if i + 1 == n { vec![k; 4] } else { vec![k; 3] });
+    }
+    (knots, ctrl)
 }
 
 /// Gauss–Legendre arc length of a parameterized speed function.

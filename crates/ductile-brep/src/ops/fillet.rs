@@ -123,11 +123,30 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     let set: BTreeSet<EdgeId> = edges.iter().copied().collect();
     let mut infos: HashMap<EdgeId, EdgeInfo> = HashMap::new();
     let mut tools: Vec<(EdgeId, Body)> = Vec::new();
+    // Closed edges with no exact tool are blended by rolling the ball
+    // along them directly; that keeps every other id valid until the end.
+    let mut base = body.clone();
+    let mut rolled = false;
+    let mut tooled: BTreeSet<EdgeId> = BTreeSet::new();
     for &e in &set {
         let info = edge_info(body, e)?;
-        tools.push((e, edge_tool(body, e, &info, blend, size)?));
-        infos.insert(e, info);
+        match edge_tool(body, e, &info, blend, size) {
+            Ok(t) => {
+                tools.push((e, t));
+                tooled.insert(e);
+                infos.insert(e, info);
+            }
+            Err(FilletError::Unsupported) if body.edge(e).is_closed() => {
+                base = super::roll::roll_closed_edge(&base, e, blend)?;
+                rolled = true;
+            }
+            Err(err) => return Err(err),
+        }
     }
+    if rolled {
+        base = super::heal::compact(&base);
+    }
+    let set = tooled;
     let corners = match blend {
         Blend::Fillet(r) => corner_tools(body, &set, &infos, r),
         Blend::Chamfer(_) => Vec::new(),
@@ -151,7 +170,7 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
         }
     }
     cut.extend(corners.into_iter().map(|(t, _)| t));
-    let mut out = body.clone();
+    let mut out = base;
     for t in &cut {
         out = boolean(&out, t, BoolOp::Difference)?;
     }

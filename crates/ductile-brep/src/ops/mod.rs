@@ -9,3 +9,4 @@ pub mod seams;
 pub mod fillet;
 pub mod loft;
 pub mod sweep;
+pub mod roll;

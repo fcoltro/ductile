@@ -750,6 +750,9 @@ pub fn demo_scene(doc: &mut Document) {
             ],
         };
         if let Some(b) = ductile_brep::ops::revolve::revolve_loop(&l, c, DVec3::Z) {
+            // Round the lip: a rolling-ball fillet between the flat top and the spline wall.
+            let lip = b.edge_ids().find(|e| b.edge(*e).is_closed() && b.edge(*e).start().z > c.z + 6.0);
+            let b = lip.and_then(|e| blend_edges(&b, &[e], Blend::Fillet(0.35)).ok()).unwrap_or(b);
             doc.add_body("Vase", b);
         }
     }
@@ -764,6 +767,8 @@ pub fn demo_scene(doc: &mut Document) {
         let q = [top + DVec3::new(-2.0, -2.0, 0.0), top + DVec3::new(2.0, -2.0, 0.0), top + DVec3::new(2.0, 2.0, 0.0), top + DVec3::new(-2.0, 2.0, 0.0)];
         let square = Loop3 { segments: (0..4).map(|i| Segment::line(q[i], q[(i + 1) % 4])).collect() };
         if let Some(b) = ductile_brep::ops::loft::loft(&[circle, mid, square]) {
+            let foot = b.edge_ids().find(|e| b.edge(*e).is_closed() && b.edge(*e).start().z < 0.1);
+            let b = foot.and_then(|e| blend_edges(&b, &[e], Blend::Fillet(0.4)).ok()).unwrap_or(b);
             doc.add_body("Loft", b);
         }
         let pts = [DVec3::new(-14.0, 6.0, 0.6), DVec3::new(-10.0, 10.0, 1.5), DVec3::new(-6.0, 7.0, 3.0), DVec3::new(-2.0, 12.0, 2.0)];
