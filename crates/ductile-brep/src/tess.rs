@@ -172,14 +172,29 @@ pub fn face_coedge_uvs(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> V
             let s = &mut coedge_uvs[i];
             let a = s.first().unwrap().uv;
             let b = s.last().unwrap().uv;
-            let du = s.iter().map(|x| x.uv.x).fold(f64::NEG_INFINITY, f64::max)
-                - s.iter().map(|x| x.uv.x).fold(f64::INFINITY, f64::min);
-            let dv = s.iter().map(|x| x.uv.y).fold(f64::NEG_INFINITY, f64::max)
-                - s.iter().map(|x| x.uv.y).fold(f64::INFINITY, f64::min);
+            // Spread of each coordinate, measured round the period (a seam
+            // point projects to either side of it) and ignoring poles.
+            let spread = |get: fn(DVec2) -> f64, period: Option<f64>| {
+                let vals: Vec<f64> = s.iter().filter(|x| !is_singular(surf, x.uv)).map(|x| get(x.uv)).collect();
+                let Some(&v0) = vals.first() else { return 0.0 };
+                vals.iter()
+                    .map(|v| {
+                        let d = (v - v0).abs();
+                        match period {
+                            Some(p) => (d % p).min(p - d % p),
+                            None => d,
+                        }
+                    })
+                    .fold(0.0, f64::max)
+            };
+            let du = spread(|q| q.x, pu);
+            let dv = spread(|q| q.y, pv);
+            // A point off any pole fixes the seam's own coordinate.
+            let regular = s.iter().find(|x| !is_singular(surf, x.uv)).map_or(a, |x| x.uv);
             if let (Some(p), true) = (pu, du < 1e-6) {
                 // Constant-u seam. Moving +v with interior on the left => high u.
                 let going_up = (b.y > a.y) != flip;
-                let base = surf.wrap_periodic(a, 1e-7).x;
+                let base = surf.wrap_periodic(regular, 1e-7).x;
                 let target = if going_up { base + p } else { base };
                 for x in s.iter_mut() {
                     x.uv.x = target;
@@ -188,7 +203,7 @@ pub fn face_coedge_uvs(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> V
             } else if let (Some(p), true) = (pv, dv < 1e-6) {
                 // Constant-v seam. Moving +u with interior on the left => low v.
                 let going_right = (b.x > a.x) != flip;
-                let base = surf.wrap_periodic(a, 1e-7).y;
+                let base = surf.wrap_periodic(regular, 1e-7).y;
                 let target = if going_right { base } else { base + p };
                 for x in s.iter_mut() {
                     x.uv.y = target;
@@ -700,7 +715,7 @@ fn surface_metrics(surf: &Surface, lo: DVec2, hi: DVec2, opts: &TessOptions) -> 
         }
         Surface::Nurbs(_) => {
             let n = 6;
-            let (mut su, mut sv, mut cu, mut cv) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            let (mut su, mut sv, mut cu, mut cv, mut ct) = (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
             for i in 0..=n {
                 for j in 0..=n {
                     let u = lo.x + (hi.x - lo.x) * i as f64 / n as f64;
@@ -715,6 +730,10 @@ fn surface_metrics(surf: &Surface, lo: DVec2, hi: DVec2, opts: &TessOptions) -> 
                         Some(n) => {
                             cu = cu.max(n.dot(d.duu).abs());
                             cv = cv.max(n.dot(d.dvv).abs());
+                            // Not next to a pole, where the normal swings.
+                            if d.du.cross(d.dv).length() > 1e-3 * d.du.length() * d.dv.length() {
+                                ct = ct.max(n.dot(d.duv).abs());
+                            }
                         }
                         None => {
                             cu = cu.max(d.duu.length());
@@ -722,6 +741,13 @@ fn surface_metrics(surf: &Surface, lo: DVec2, hi: DVec2, opts: &TessOptions) -> 
                         }
                     }
                 }
+            }
+            // Twist bends a cell's triangles off the surface by about
+            // |n·Suv| hu hv / 4: share it between the directions so that
+            // cells stay square on the surface.
+            if ct > 1e-12 && su > 1e-12 && sv > 1e-12 {
+                cu = cu.max(2.0 * ct * su / sv);
+                cv = cv.max(2.0 * ct * sv / su);
             }
             let step = |c: f64, s: f64| {
                 let h_chord = if c > 1e-12 { (8.0 * tol / c).sqrt() } else { f64::INFINITY };
@@ -731,7 +757,7 @@ fn surface_metrics(surf: &Surface, lo: DVec2, hi: DVec2, opts: &TessOptions) -> 
             };
             let span_u = hi.x - lo.x;
             let span_v = hi.y - lo.y;
-            (su.max(1e-9), sv.max(1e-9), step(cu, su).min(span_u / 2.0), step(cv, sv).min(span_v / 2.0))
+            (su.max(1e-9), sv.max(1e-9), step(cu, su).min(span_u / 2.0).max(span_u / 512.0), step(cv, sv).min(span_v / 2.0).max(span_v / 512.0))
         }
     }
 }
@@ -764,7 +790,7 @@ impl SegmentGrid {
         }
         let mut cell = cell;
         let extent = (hi - lo).max(DVec2::splat(1e-12));
-        while (extent.x / cell) * (extent.y / cell) > 4.0e6 {
+        while (extent.x / cell) * (extent.y / cell) > 4.0e6 || extent.x.max(extent.y) / cell > 8192.0 {
             cell *= 2.0;
         }
         let nx = (extent.x / cell).ceil() as usize + 1;

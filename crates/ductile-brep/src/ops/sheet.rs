@@ -297,6 +297,64 @@ fn half_length_param(c: &NurbsCurve, a: f64, b: f64) -> f64 {
     0.5 * (lo + hi)
 }
 
+/// Thickens a sheet into a solid `t` thick, on the side its normal points
+/// to (the other side for negative `t`): the sheet, its offset, and ruled
+/// walls joining their boundaries.
+pub fn thicken(sheet: &Body, t: f64) -> Result<Body, crate::ops::offset::OffsetError> {
+    use crate::ops::offset::{offset_body, OffsetError};
+    use crate::primitives::flip_orientation;
+    if sheet.kind != BodyKind::Sheet || sheet.faces.is_empty() || t.abs() < 1e-12 {
+        return Err(OffsetError::Unsupported);
+    }
+    if t < 0.0 {
+        return thicken(&flip_orientation(sheet.clone()), -t);
+    }
+    let top = offset_body(sheet, &|_| t)?;
+    let mut b = flip_orientation(sheet.clone());
+    b.kind = BodyKind::Solid;
+    let (nv, ne) = (b.vertices.len() as u32, b.edges.len() as u32);
+    b.append(&top);
+    // Each edge's uses by the faces of the bottom and the top.
+    let mut uses: Vec<Vec<Coedge>> = vec![Vec::new(); b.edges.len()];
+    for f in &b.faces {
+        for l in &f.loops {
+            for c in &b.loops[l.0 as usize].coedges {
+                uses[c.edge.idx()].push(*c);
+            }
+        }
+    }
+    let mut risers: std::collections::HashMap<u32, crate::topo::EdgeId> = std::collections::HashMap::new();
+    let boundary: Vec<u32> = (0..ne).filter(|e| uses[*e as usize].len() == 1).collect();
+    for e in boundary {
+        let rb = uses[e as usize][0].reversed;
+        let rt = uses[(e + ne) as usize][0].reversed;
+        let (bot, topc) = (b.edges[e as usize].clone(), b.edges[(e + ne) as usize].clone());
+        // The wall runs along the bottom edge from a to z.
+        let (a, z) = if rb { (bot.v0, bot.v1) } else { (bot.v1, bot.v0) };
+        let mut riser = |b: &mut Body, v: VertexId| *risers.entry(v.0).or_insert_with(|| b.add_line_edge(v, VertexId(v.0 + nv)));
+        let (ra, rz) = (riser(&mut b, a), riser(&mut b, z));
+        let lp = vec![Coedge::new(crate::topo::EdgeId(e), !rb), Coedge::new(rz, false), Coedge::new(crate::topo::EdgeId(e + ne), !rt), Coedge::new(ra, true)];
+        // Wall surface: flat when both edges are straight, else ruled.
+        let bn = bot.curve.to_nurbs(bot.t0, bot.t1);
+        let tn = topc.curve.to_nurbs(topc.t0, topc.t1);
+        let surface = if bot.curve.is_linear() && topc.curve.is_linear() {
+            let d = bot.end() - bot.start();
+            let up = topc.start() - bot.start();
+            Surface::Plane { frame: Frame::new(bot.start(), d.cross(up), d) }
+        } else {
+            Surface::Nurbs(NurbsSurface::ruled(&bn, &tn))
+        };
+        // Outward: along the wall's first edge crossed with the way up.
+        let tm = 0.5 * (bot.t0 + bot.t1);
+        let tan = bot.curve.tangent(tm) * if rb { 1.0 } else { -1.0 };
+        let m = bot.curve.point(tm);
+        let up = topc.curve.point(topc.curve.closest_param_in(m, topc.t0, topc.t1)) - m;
+        let rev = flipped(&surface, m + up * 0.5, tan.cross(up));
+        b.add_face(surface, rev, vec![lp]);
+    }
+    Ok(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +446,42 @@ mod tests {
         let b = patch(&tri, &[]).unwrap();
         assert_eq!(b.edges.len(), 4);
         assert!(area(&b) > 0.0);
+    }
+
+    fn volume(b: &Body) -> f64 {
+        tessellate(b, &TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume()
+    }
+
+    #[test]
+    fn thickened_sheets() {
+        use crate::ops::boolean::open_edges;
+        // A flat square, both ways.
+        let p = [DVec3::ZERO, DVec3::new(2.0, 0.0, 0.0), DVec3::new(2.0, 2.0, 0.0), DVec3::new(0.0, 2.0, 0.0)];
+        let sq = patch(&chain((0..4).map(|i| Segment::line(p[i], p[(i + 1) % 4])).collect()), &[]).unwrap();
+        for t in [0.5, -0.5] {
+            let b = thicken(&sq, t).unwrap();
+            assert_eq!(b.kind, BodyKind::Solid);
+            assert_eq!(b.faces.len(), 6);
+            assert_eq!(open_edges(&b), 0);
+            assert!((volume(&b) - 2.0).abs() < 1e-9, "{t}: {}", volume(&b));
+        }
+        // A dome: a hemispherical shell, outward.
+        let arc = Segment::new(Curve3::Circle { frame: Frame::new(DVec3::ZERO, DVec3::NEG_Y, DVec3::Z), radius: 2.0 }, 0.0, PI / 2.0);
+        let dome = revolve_sheet(&[chain(vec![arc])], DVec3::ZERO, DVec3::Z, 2.0 * PI).unwrap();
+        let out = dome.face_normal(crate::topo::FaceId(0), 0.3, 0.3).dot(DVec3::Z) > 0.0;
+        let t = if out { 0.2 } else { -0.2 };
+        let b = thicken(&dome, t).unwrap();
+        assert_eq!(open_edges(&b), 0);
+        let expect = 2.0 * PI / 3.0 * (2.2f64.powi(3) - 8.0);
+        assert!((volume(&b) - expect).abs() < 2e-2, "{} vs {expect}", volume(&b));
+        // A Coons patch on a curved boundary.
+        let q = [DVec3::new(0.0, 0.0, 0.0), DVec3::new(2.0, 0.0, 0.0), DVec3::new(2.0, 2.0, 1.0), DVec3::new(0.0, 2.0, 0.0)];
+        let skew = patch(&chain((0..4).map(|i| Segment::line(q[i], q[(i + 1) % 4])).collect()), &[]).unwrap();
+        let b = thicken(&skew, 0.1).unwrap();
+        assert_eq!(open_edges(&b), 0);
+        let v = volume(&b);
+        // Thin enough that the curvature terms of the offset volume stay
+        // within a tenth of a percent.
+        assert!((v / (0.1 * area(&skew)) - 1.0).abs() < 2e-3, "{v} vs {}", 0.1 * area(&skew));
     }
 }
