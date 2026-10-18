@@ -170,8 +170,13 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
         eprintln!("blend failed ({:?}); tangent chains {:?}", first.as_ref().err(), grown.iter().map(|e| e.0).collect::<Vec<_>>());
     }
     if grown.len() > edges.len() && grown.contains(&edges[0]) {
-        if let Ok(b) = blend_selected(body, &grown, blend) {
-            return Ok(b);
+        match blend_selected(body, &grown, blend) {
+            Ok(b) => return Ok(b),
+            // The run the edge belongs to cannot take the radius, so
+            // neither can the edge.
+            Err(FilletError::TooLarge) => return Err(FilletError::TooLarge),
+            Err(e) if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() => eprintln!("tangent chain: {e:?}"),
+            Err(_) => {}
         }
     }
     first

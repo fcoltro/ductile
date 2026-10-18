@@ -141,6 +141,7 @@ pub fn tangent_chains(body: &Body, edges: &[EdgeId]) -> Vec<(Vec<Link>, bool)> {
     out
 }
 
+#[derive(Clone)]
 struct Section {
     p1: DVec3,
     p2: DVec3,
@@ -267,7 +268,12 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
         let (p1, p2, ctrl) = match blend {
             Blend::Fillet(r) | Blend::Smooth(r) => {
                 let sgn = if cv { -1.0 } else { 1.0 };
-                let (c, p1, p2, h1, h2) = ball(body, (fa, sa), (fb, sb), q, normal, na, nb, sgn * r, (uva, uvb)).ok_or(FilletError::TooLarge)?;
+                let Some((c, p1, p2, h1, h2)) = ball(body, (fa, sa), (fb, sb), q, normal, na, nb, sgn * r, (uva, uvb)) else {
+                    if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+                        eprintln!("no ball at {q:.4} (edge {}, t {t:.4})", l.edge.0);
+                    }
+                    return Err(FilletError::TooLarge);
+                };
                 *hints = (Some(h1), Some(h2));
                 if p1.distance(q) > size || p2.distance(q) > size {
                     return Err(FilletError::TooLarge);
@@ -327,6 +333,102 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
             row.push(section(i, t, plane, &mut hints)?);
         }
         rows.push(row);
+    }
+    // An open end whose cap is not square to the blend: the sections
+    // there cross the cap, so the blend ends in the curve where its surface
+    // meets the cap, led into by a few curves on that surface from the
+    // last section clear of the cap.
+    if let Some((e0, e1)) = &ends {
+        const W: usize = 8;
+        let tol = 1e-7 * size;
+        // Per end: (row, at the row's start, deepest t kept, lead-in curves
+        // from the section clear of the cap to the cap curve).
+        let mut trims: Vec<(usize, bool, f64, Vec<Section>)> = Vec::new();
+        for (end, first) in [(e0, true), (e1, false)] {
+            let cap = &body.face(end.cap).surface;
+            let i = if first { 0 } else { k - 1 };
+            let sec = if first { &rows[i][0] } else { rows[i].last().unwrap() };
+            if crate::ssi::signed_distance(cap, sec.p1).abs() < tol && crate::ssi::signed_distance(cap, sec.p2).abs() < tol {
+                continue;
+            }
+            let l = chain[i];
+            let ed = body.edge(l.edge);
+            let (ta, tb) = if l.fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
+            let m = rows[i].len() - 1;
+            let step = (tb - ta) / m as f64;
+            let (t_end, inward) = if first { (ta, step) } else { (tb, -step) };
+            let mut at = |t: f64| -> Result<Section, FilletError> { section(i, t, None, &mut (None, None)) };
+            let off = |sec: &Section, w: f64| crate::ssi::signed_distance(cap, sec.curve.point(w));
+            // Where each section point (by its parameter w) meets the cap.
+            let mut tc = Vec::with_capacity(W + 1);
+            for n in 0..=W {
+                let w = n as f64 / W as f64;
+                let (mut t0, mut t1) = (t_end, t_end + 0.5 * inward);
+                let (mut f0, mut f1) = (off(&at(t0)?, w), off(&at(t1)?, w));
+                for _ in 0..40 {
+                    if f1.abs() < 1e-10 * size || (f1 - f0).abs() < 1e-300 {
+                        break;
+                    }
+                    let tn = t1 - f1 * (t1 - t0) / (f1 - f0);
+                    (t0, f0) = (t1, f1);
+                    t1 = tn;
+                    if ((t1 - t_end) / inward).abs() > 0.5 * m as f64 {
+                        return Err(super::fillet::unsupported(line!(), file!()));
+                    }
+                    f1 = off(&at(t1)?, w);
+                }
+                if f1.abs() > 1e-8 * size {
+                    return Err(super::fillet::unsupported(line!(), file!()));
+                }
+                tc.push(t1);
+            }
+            let deepest = tc.iter().map(|t| (t - t_end) / inward).fold(f64::MIN, f64::max);
+            let t_lim = t_end + inward * (deepest + 0.3);
+            let mut lead = vec![at(t_lim)?];
+            for lambda in [1.0 / 3.0, 2.0 / 3.0, 1.0] {
+                let pts: Vec<DVec3> = (0..=W).map(|n| {
+                    let w = n as f64 / W as f64;
+                    at(t_lim + lambda * (tc[n] - t_lim)).map(|s| s.curve.point(w))
+                }).collect::<Result<_, _>>()?;
+                let params: Vec<f64> = (0..=W).map(|n| n as f64 / W as f64).collect();
+                let curve = NurbsCurve::interpolate_with_params(&pts, 3, &params);
+                lead.push(Section { p1: pts[0], p2: pts[W], curve });
+            }
+            if first {
+                lead.reverse();
+            }
+            trims.push((i, first, t_end + inward * (deepest + 0.8), lead));
+        }
+        for i in 0..k {
+            let mine: Vec<&(usize, bool, f64, Vec<Section>)> = trims.iter().filter(|t| t.0 == i).collect();
+            if mine.is_empty() {
+                continue;
+            }
+            let l = chain[i];
+            let ed = body.edge(l.edge);
+            let (ta, tb) = if l.fwd { (ed.t0, ed.t1) } else { (ed.t1, ed.t0) };
+            let m = rows[i].len() - 1;
+            let row = std::mem::take(&mut rows[i]);
+            // Stations are spaced evenly from ta to tb.
+            let mut out: Vec<Section> = Vec::new();
+            for t in mine.iter().filter(|t| t.1) {
+                out.extend(t.3.iter().cloned());
+            }
+            for (s, sec) in row.into_iter().enumerate() {
+                let t = ta + (tb - ta) * s as f64 / m as f64;
+                let clear = mine.iter().all(|&&(_, first, keep, _)| if first { (t - keep) * (tb - ta) >= 0.0 } else { (keep - t) * (tb - ta) >= 0.0 });
+                if clear {
+                    out.push(sec);
+                }
+            }
+            for t in mine.iter().filter(|t| !t.1) {
+                out.extend(t.3.iter().cloned());
+            }
+            if out.len() < 2 {
+                return Err(super::fillet::unsupported(line!(), file!()));
+            }
+            rows[i] = out;
+        }
     }
     // Where another edge leaves a junction along one side's face (a
     // cylinder's seam, the edge between two faces of a split surface), the
@@ -655,6 +757,33 @@ mod tests {
             let r = blend_edges(&a, &cross, blend).unwrap();
             assert_eq!(open_edges(&r), 0, "{blend:?}");
             assert!(vol(&r) < vol(&a), "{blend:?}");
+        }
+    }
+
+    #[test]
+    fn ends_on_a_cap_met_at_an_angle() {
+        // A boss standing in a side hole: the curve where the boss meets
+        // the hole ends on the boss's bottom, which the hole's wall meets
+        // slantwise, so the blend ends in the curve where it crosses the
+        // bottom rather than in a section.
+        use crate::ops::boolean::{boolean, BoolOp};
+        use crate::ops::fillet::blend_edges;
+        use crate::primitives::{make_box, make_cylinder};
+        let bx = make_box(&Frame::WORLD, DVec3::new(4.0, 4.0, 2.0));
+        let h = make_cylinder(&Frame::new(DVec3::new(-1.0, 2.0, 1.0), DVec3::X, DVec3::Y), 0.6, 6.0);
+        let boss = make_cylinder(&Frame { origin: DVec3::new(2.0, 1.7, 1.2), ..Frame::WORLD }, 0.5, 1.5);
+        let a = boolean(&boolean(&bx, &h, BoolOp::Difference).unwrap(), &boss, BoolOp::Union).unwrap();
+        let e = a
+            .edge_ids()
+            .find(|e| {
+                let fs = a.edge_faces(*e);
+                fs.len() == 2 && fs[0].0 != fs[1].0 && fs.iter().all(|(f, _)| matches!(a.face(*f).surface, Surface::Cylinder { .. }))
+            })
+            .unwrap();
+        for blend in [Blend::Fillet(0.06), Blend::Chamfer(0.06)] {
+            let r = blend_edges(&a, &[e], blend).unwrap();
+            assert_eq!(open_edges(&r), 0, "{blend:?}");
+            assert!((vol(&r) - vol(&a)).abs() < 0.01 * vol(&a), "{blend:?}");
         }
     }
 

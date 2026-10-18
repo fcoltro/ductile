@@ -327,6 +327,14 @@ pub(crate) fn ball(
         let (m1, m2) = (body.face_normal(f1, h1.x, h1.y), body.face_normal(f2, h2.x, h2.y));
         let f = DVec3::new((c - p1).dot(m1) - sd, (c - p2).dot(m2) - sd, (c - q).dot(tan));
         if f.length() < 1e-11 * (1.0 + sd.abs()) {
+            // A face curved more tightly than the ball (an earlier, smaller
+            // fillet's arc, say) would cut into it next to the contact.
+            if !fits(s1, h1, c, sd.abs()) || !fits(s2, h2, c, sd.abs()) {
+                if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+                    eprintln!("ball of radius {:.4} at {c:.4} does not fit the faces", sd.abs());
+                }
+                return None;
+            }
             return Some((c, p1, p2, h1, h2));
         }
         let j = DMat3::from_cols(m1, m2, tan).transpose();
@@ -338,11 +346,39 @@ pub(crate) fn ball(
     None
 }
 
+/// Whether the ball of radius `r` about `c`, touching `s` at `h`, stays
+/// clear of `s` next to the contact: it does not where `s` curves more
+/// tightly than the ball.
+fn fits(s: &Surface, h: DVec2, c: DVec3, r: f64) -> bool {
+    let p = s.point(h.x, h.y);
+    let eps = 1e-6;
+    for dir in [DVec2::X, DVec2::Y] {
+        let du = (s.point(h.x + eps * dir.x, h.y + eps * dir.y) - p).length() / eps;
+        if du < 1e-12 {
+            continue;
+        }
+        let step = 0.3 * r / du;
+        for sg in [-1.0, 1.0] {
+            let x = h + dir * (sg * step);
+            if s.point(x.x, x.y).distance(c) < r * (1.0 - 1e-6) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Moves the end of edge `x` at vertex `v` to the point `p` on its curve,
 /// re-attaching it to vertex `nv`.
 pub(crate) fn move_end(b: &mut Body, x: EdgeId, v: VertexId, p: DVec3, nv: VertexId, size: f64) -> Result<(), FilletError> {
     let xe = b.edges[x.idx()].clone();
-    let t = xe.curve.closest_param_in(p, xe.t0 - (xe.t1 - xe.t0), xe.t1 + (xe.t1 - xe.t0));
+    let mut t = xe.curve.closest_param_in(p, xe.t0 - (xe.t1 - xe.t0), xe.t1 + (xe.t1 - xe.t0));
+    // On a circle the parameter found may be a turn away from the end
+    // being moved.
+    if let Some(period) = xe.curve.period() {
+        let old = if xe.v0 == v { xe.t0 } else { xe.t1 };
+        t += ((old - t) / period).round() * period;
+    }
     if xe.curve.point(t).distance(p) > 1e-5 * size {
         return Err(super::fillet::unsupported(line!(), file!()));
     }
@@ -356,6 +392,9 @@ pub(crate) fn move_end(b: &mut Body, x: EdgeId, v: VertexId, p: DVec3, nv: Verte
         edge.v1 = nv;
     }
     if edge.t1 <= edge.t0 {
+        if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+            eprintln!("edge {} cut back past its other end ({:.4} -> {:.4}, moving to {p:.4})", x.0, xe.t0, xe.t1);
+        }
         return Err(FilletError::TooLarge);
     }
     Ok(())
