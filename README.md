@@ -26,10 +26,12 @@ code from them.
 - Fillets (Shift+F) and chamfers (Shift+K) on edges between planes, on
   circular plane/cylinder edges (boss and hole rims), with spherical corner
   patches where three filleted edges meet.
-- Move / rotate / scale / mirror, undo/redo, STL and OBJ export.
+- STEP (AP214) export of exact solids, checked against OpenCascade; STL and
+  OBJ export. Headless: `ductile --demo --export-step out.step`.
+- Move / rotate / scale / mirror, undo/redo.
 
 In progress: arcs and curve editing, sweep and loft, general
-rolling-ball NURBS fillets, STEP import/export.
+rolling-ball NURBS fillets, STEP import.
 
 ## Layout
 

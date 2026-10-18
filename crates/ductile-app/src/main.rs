@@ -19,11 +19,13 @@ mod ui;
 fn main() -> eframe::Result {
     env_logger::init();
     let mut opts = app::Options { screenshot: None, open: None, demo: false, camera: None };
+    let mut export_step: Option<std::path::PathBuf> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--screenshot" => opts.screenshot = args.next().map(Into::into),
             "--demo" => opts.demo = true,
+            "--export-step" => export_step = args.next().map(Into::into),
             "--camera" => {
                 // x,y,z,distance,yaw,pitch (degrees)
                 let v: Vec<f64> = args.next().unwrap_or_default().split(',').filter_map(|x| x.trim().parse().ok()).collect();
@@ -32,11 +34,31 @@ fn main() -> eframe::Result {
                 }
             }
             "--help" | "-h" => {
-                println!("usage: ductile [FILE.ductile] [--demo] [--screenshot OUT.png] [--camera X,Y,Z,DIST,YAW,PITCH]");
+                println!("usage: ductile [FILE.ductile] [--demo] [--screenshot OUT.png] [--camera X,Y,Z,DIST,YAW,PITCH] [--export-step OUT.step]");
                 return Ok(());
             }
             other => opts.open = Some(other.into()),
         }
+    }
+    if let Some(out) = export_step {
+        // Headless conversion: build the document and write it out.
+        let mut doc = document::Document::default();
+        if opts.demo {
+            commands::demo_scene(&mut doc);
+        } else if let Some(p) = &opts.open {
+            if let Err(e) = commands::load_into(&mut doc, p) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        match commands::export_step(&doc, &out) {
+            Ok(n) => println!("wrote {n} solid(s) to {}", out.display()),
+            Err(e) => {
+                eprintln!("STEP export failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
     }
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1440.0, 900.0]).with_min_inner_size([800.0, 500.0]).with_title("Ductile"),

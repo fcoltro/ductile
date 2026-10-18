@@ -15,6 +15,7 @@ pub enum Command {
     Open,
     Save,
     SaveAs,
+    ExportStep,
     ExportStl,
     ExportObj,
     Undo,
@@ -70,6 +71,7 @@ impl Command {
         Command::Open,
         Command::Save,
         Command::SaveAs,
+        Command::ExportStep,
         Command::ExportStl,
         Command::ExportObj,
         Command::Undo,
@@ -126,6 +128,7 @@ impl Command {
             Open => "Open…",
             Save => "Save",
             SaveAs => "Save as…",
+            ExportStep => "Export STEP…",
             ExportStl => "Export STL…",
             ExportObj => "Export OBJ…",
             Undo => "Undo",
@@ -299,6 +302,17 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                     path.set_extension("ductile");
                 }
                 save_file(app, &path);
+            }
+        }
+        ExportStep => {
+            if let Some(mut path) = rfd::FileDialog::new().add_filter("STEP", &["step", "stp"]).save_file() {
+                if path.extension().is_none() {
+                    path.set_extension("step");
+                }
+                app.status = match export_step(&app.doc, &path) {
+                    Ok(n) => format!("Exported {n} solid(s) to {}", path.display()),
+                    Err(e) => format!("STEP export failed: {e}"),
+                };
             }
         }
         ExportStl | ExportObj => {
@@ -506,23 +520,27 @@ fn boolean_selected(app: &mut DuctileApp, op: BoolOp) {
     app.status = format!("{name} done");
 }
 
-pub fn open_file(app: &mut DuctileApp, path: &std::path::Path) {
-    let res = std::fs::read_to_string(path)
-        .map_err(|e| e.to_string())
-        .and_then(|s| ductile_io::native::NativeDocument::from_json(&s).map_err(|e| e.to_string()));
-    match res {
-        Ok(nd) => {
-            app.doc.clear();
-            for o in nd.objects {
-                let id = app.doc.add_body(&o.name, o.body);
-                if let Some(ob) = app.doc.objects.iter_mut().find(|x| x.id == id) {
-                    ob.name = o.name;
-                    ob.visible = o.visible;
-                    if let Some(c) = o.color {
-                        ob.color = c;
-                    }
-                }
+/// Replaces the document's objects with those of a native file.
+pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), String> {
+    let s = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let nd = ductile_io::native::NativeDocument::from_json(&s).map_err(|e| e.to_string())?;
+    doc.clear();
+    for o in nd.objects {
+        let id = doc.add_body(&o.name, o.body);
+        if let Some(ob) = doc.objects.iter_mut().find(|x| x.id == id) {
+            ob.name = o.name;
+            ob.visible = o.visible;
+            if let Some(c) = o.color {
+                ob.color = c;
             }
+        }
+    }
+    Ok(())
+}
+
+pub fn open_file(app: &mut DuctileApp, path: &std::path::Path) {
+    match load_into(&mut app.doc, path) {
+        Ok(()) => {
             app.doc.path = Some(path.to_path_buf());
             app.doc.dirty = false;
             app.frame_selection();
@@ -554,6 +572,14 @@ pub fn save_file(app: &mut DuctileApp, path: &std::path::Path) {
         }
         Err(e) => app.status = format!("Save failed: {e}"),
     }
+}
+
+/// Writes the visible solids to a STEP file; returns how many were written.
+pub fn export_step(doc: &Document, path: &std::path::Path) -> Result<usize, String> {
+    let objs: Vec<(&str, &ductile_brep::Body)> = doc.objects.iter().filter(|o| o.visible).map(|o| (o.name.as_str(), o.body.as_ref())).collect();
+    let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("Ductile part");
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path).map_err(|e| e.to_string())?);
+    ductile_io::step::write_step(&mut f, name, &objs).map_err(|e| e.to_string())
 }
 
 fn export_mesh(doc: &Document, path: &std::path::Path, stl: bool) -> Result<(), String> {
