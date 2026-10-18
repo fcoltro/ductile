@@ -44,6 +44,12 @@ pub enum FilletError {
     Boolean(#[from] BoolError),
 }
 
+thread_local! {
+    /// Set while retrying a blend with edges between planes and cylinders
+    /// rolled rather than given exact tools.
+    static ROLL_EXTRUSIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// `FilletError::Unsupported`, noting where with `DUCTILE_DEBUG_FILLET`.
 pub(crate) fn unsupported(line: u32, file: &str) -> FilletError {
     if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
@@ -136,6 +142,15 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     let first = blend_selected(body, edges, blend);
     if first.is_ok() || edges.is_empty() {
         return first;
+    }
+    // The exact tools along plane/cylinder edges can meet other tools
+    // badly at mixed (convex and concave) corners; rolling the ball along
+    // those edges instead may do.
+    ROLL_EXTRUSIONS.set(true);
+    let rolled = blend_selected(body, edges, blend);
+    ROLL_EXTRUSIONS.set(false);
+    if rolled.is_ok() {
+        return rolled;
     }
     // An edge running on tangentially into others (into an earlier
     // fillet's arc, say) may have no sensible end on its own: blend the
@@ -439,6 +454,7 @@ fn edge_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> R
     let (s1, s2) = (&b.face(info.f1).surface, &b.face(info.f2).surface);
     match (&ed.curve, s1, s2) {
         (Curve3::Line { .. }, Surface::Plane { .. }, Surface::Plane { .. }) => line_tool(b, e, info, blend, size),
+        (Curve3::Line { .. }, Surface::Plane { .. } | Surface::Cylinder { .. }, Surface::Plane { .. } | Surface::Cylinder { .. }) if !ROLL_EXTRUSIONS.get() => extrusion_tool(b, e, info, blend, size),
         (Curve3::Circle { frame, .. }, _, _) => {
             let arc = (!ed.is_closed()).then(|| ed.mid());
             match (s1, s2) {
@@ -486,8 +502,14 @@ fn line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> R
     };
     let lp = Loop3 { segments: vec![Segment::line(pp, a), mid, Segment::line(c, pp)] };
     let region = Region { plane: Frame::new(pp, t, a - pp), outer: lp, holes: vec![] };
-    let mut tool = extrude_region(&region, t * (len + 2.0 * margin)).ok_or_else(|| unsupported(line!(), file!()))?;
-    // Stop the tool at the faces capping the edge's ends.
+    let tool = extrude_region(&region, t * (len + 2.0 * margin)).ok_or_else(|| unsupported(line!(), file!()))?;
+    cap_line_tool(b, e, info, tool, size)
+}
+
+/// Stops a tool along the straight edge `e` at the planar faces capping
+/// the edge's ends (where they face away along it).
+fn cap_line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, mut tool: Body, size: f64) -> Result<Body, FilletError> {
+    let EdgeInfo { p0, p1, t, .. } = *info;
     let ed = b.edge(e);
     for (v, p) in [(ed.v0, b.vertex(ed.v0)), (ed.v1, b.vertex(ed.v1))] {
         let others: Vec<FaceId> = vertex_faces(b, v).into_iter().filter(|f| *f != info.f1 && *f != info.f2).collect();
@@ -501,6 +523,143 @@ fn line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> R
         }
     }
     Ok(tool)
+}
+
+/// A face's cross-section square to a straight edge, in the section's
+/// coordinates with the edge at the origin.
+#[derive(Clone, Copy)]
+enum Profile {
+    /// A plane: the line through the origin with outward normal `n`.
+    Line { n: DVec2 },
+    /// A cylinder along the edge: the circle about `c` of radius `rad`;
+    /// `convex` when the material is inside it.
+    Circle { c: DVec2, rad: f64, convex: bool },
+}
+
+impl Profile {
+    /// Radius of the circle of centres at signed offset `s` (outward
+    /// positive) from a circular profile.
+    fn offset_radius(rad: f64, convex: bool, s: f64) -> f64 {
+        if convex { rad + s } else { rad - s }
+    }
+
+    /// Foot of `x` on the profile.
+    fn foot(&self, x: DVec2) -> DVec2 {
+        match *self {
+            Profile::Line { n } => x - n * n.dot(x),
+            Profile::Circle { c, rad, .. } => c + (x - c).normalize() * rad,
+        }
+    }
+
+    /// The point `d` along the profile from the origin, setting off in
+    /// direction `dir`.
+    fn walk(&self, dir: DVec2, d: f64) -> DVec2 {
+        match *self {
+            Profile::Line { .. } => dir * d,
+            Profile::Circle { c, rad, .. } => {
+                let r0 = -c;
+                // Turning the radius by +angle moves along perp(r0).
+                let sgn = if DVec2::new(-r0.y, r0.x).dot(dir) > 0.0 { 1.0 } else { -1.0 };
+                let a = sgn * d / rad;
+                c + DVec2::new(r0.x * a.cos() - r0.y * a.sin(), r0.x * a.sin() + r0.y * a.cos())
+            }
+        }
+    }
+}
+
+/// Exact tool for a blend along a straight edge between planes and
+/// cylinders running along it: the cross-section is the same all along,
+/// lines and circles, so the round blend is the circle tangent to both
+/// (a cylinder once extruded) and the chamfer a chord.
+fn extrusion_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> Result<Body, FilletError> {
+    let EdgeInfo { p0, p1, t, convex, .. } = *info;
+    let len = p0.distance(p1);
+    let x = info.n1.reject_from(t).normalize();
+    let y = t.cross(x);
+    let to2 = |v: DVec3| DVec2::new(v.dot(x), v.dot(y));
+    let profile = |f: FaceId| -> Option<Profile> {
+        let n = to2(outward(b, f, p0)).normalize();
+        match &b.face(f).surface {
+            Surface::Plane { .. } => Some(Profile::Line { n }),
+            Surface::Cylinder { frame, radius } if frame.z.cross(t).length() < 1e-9 => {
+                let c = to2(frame.origin - p0);
+                Some(Profile::Circle { c, rad: *radius, convex: n.dot(-c) > 0.0 })
+            }
+            _ => None,
+        }
+    };
+    let (Some(pr1), Some(pr2)) = (profile(info.f1), profile(info.f2)) else { return Err(unsupported(line!(), file!())) };
+    let (n1, n2) = (to2(info.n1).normalize(), to2(info.n2).normalize());
+    let det = n1.x * n2.y - n1.y * n2.x;
+    if det.abs() < 1e-9 {
+        return Err(FilletError::Smooth);
+    }
+    let into = |n: DVec2, other: DVec2| {
+        let d = DVec2::new(-n.y, n.x);
+        if (d.dot(other) < 0.0) == convex { d } else { -d }
+    };
+    let (d1, d2) = (into(n1, n2), into(n2, n1));
+    let (q1, q2, centre, reach) = match blend {
+        Blend::Fillet(r) | Blend::Smooth(r) => {
+            let s = if convex { -r } else { r };
+            // Near the centre found from the tangent lines at the edge.
+            let guess = DVec2::new(s * n2.y - n1.y * s, n1.x * s - s * n2.x) / det;
+            let mut cands: Vec<DVec2> = Vec::new();
+            match (pr1, pr2) {
+                (Profile::Line { n }, Profile::Circle { c, rad, convex: cv }) | (Profile::Circle { c, rad, convex: cv }, Profile::Line { n }) => {
+                    let rho = Profile::offset_radius(rad, cv, s);
+                    let d = DVec2::new(-n.y, n.x);
+                    let o = n * s - c;
+                    let (bb, cc) = (d.dot(o), o.length_squared() - rho * rho);
+                    let disc = bb * bb - cc;
+                    if rho > 0.0 && disc >= 0.0 {
+                        for k in [-1.0, 1.0] {
+                            cands.push(n * s + d * (-bb + k * disc.sqrt()));
+                        }
+                    }
+                }
+                (Profile::Circle { c: ca, rad: ra, convex: cva }, Profile::Circle { c: cb, rad: rb, convex: cvb }) => {
+                    let (r0, r1) = (Profile::offset_radius(ra, cva, s), Profile::offset_radius(rb, cvb, s));
+                    let dd = cb - ca;
+                    let l = dd.length();
+                    if r0 > 0.0 && r1 > 0.0 && l > 1e-12 && l <= r0 + r1 && l >= (r0 - r1).abs() {
+                        let a = (r0 * r0 - r1 * r1 + l * l) / (2.0 * l);
+                        let h = (r0 * r0 - a * a).max(0.0).sqrt();
+                        let m = ca + dd * (a / l);
+                        let pdir = DVec2::new(-dd.y, dd.x) / l;
+                        cands.push(m + pdir * h);
+                        cands.push(m - pdir * h);
+                    }
+                }
+                _ => return Err(unsupported(line!(), file!())),
+            }
+            let c = cands.into_iter().min_by(|a, b| a.distance(guess).total_cmp(&b.distance(guess))).ok_or(FilletError::TooLarge)?;
+            if c.distance(guess) > r {
+                return Err(FilletError::TooLarge);
+            }
+            let (q1, q2) = (pr1.foot(c), pr2.foot(c));
+            (q1, q2, Some(c), r)
+        }
+        Blend::Chamfer(d) => (pr1.walk(d1, d), pr2.walk(d2, d), None, d),
+    };
+    if q1.dot(d1) <= 0.0 || q2.dot(d2) <= 0.0 {
+        return Err(FilletError::TooLarge);
+    }
+    let margin = reach * 4.0 + len * 0.05;
+    let base = p0 - t * margin;
+    let at = |v: DVec2| base + x * v.x + y * v.y;
+    let side = |pr: Profile, from: DVec2, to: DVec2| match pr {
+        Profile::Line { .. } => Segment::line(at(from), at(to)),
+        Profile::Circle { c, .. } => arc(at(c), at(from), at(to), t),
+    };
+    let mid = match centre {
+        Some(c) => arc(at(c), at(q1), at(q2), t),
+        None => Segment::line(at(q1), at(q2)),
+    };
+    let lp = Loop3 { segments: vec![side(pr1, DVec2::ZERO, q1), mid, side(pr2, q2, DVec2::ZERO)] };
+    let region = Region { plane: Frame::new(base, t, at(q1) - base), outer: lp, holes: vec![] };
+    let tool = extrude_region(&region, t * (len + 2.0 * margin)).ok_or_else(|| unsupported(line!(), file!()))?;
+    cap_line_tool(b, e, info, tool, size)
 }
 
 /// The tool along a circular edge between a plane and a cylinder square to
@@ -703,6 +862,29 @@ mod tests {
 
     fn vol(b: &Body) -> f64 {
         tessellate(b, &TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume()
+    }
+
+    #[test]
+    fn blends_the_edges_where_a_side_hole_breaks_the_top() {
+        // A hole along x centred in the top face leaves straight edges
+        // between the top plane and the hole's cylinder.
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let hole = make_cylinder(&Frame::new(DVec3::new(-1.0, 1.5, 1.8), DVec3::X, DVec3::Y), 0.5, 6.0);
+        let h = crate::ops::boolean::boolean(&b, &hole, crate::ops::boolean::BoolOp::Difference).unwrap();
+        let rims: Vec<EdgeId> = h
+            .edge_ids()
+            .filter(|e| {
+                let ed = h.edge(*e);
+                matches!(ed.curve, Curve3::Line { .. }) && ed.start().z > 1.99 && ed.end().z > 1.99 && (ed.start().y - 1.5).abs() < 0.6 && (ed.start().y - 1.5).abs() > 0.1
+            })
+            .collect();
+        assert!(rims.len() >= 2);
+        for blend in [Blend::Fillet(0.1), Blend::Chamfer(0.1)] {
+            let r = blend_edges(&h, &rims, blend).unwrap();
+            assert_eq!(open_edges(&r), 0, "{blend:?}");
+            let removed = vol(&h) - vol(&r);
+            assert!(removed > 0.0 && removed < 2.0 * 0.01 * 4.0, "{blend:?} removed {removed}");
+        }
     }
 
     #[test]
