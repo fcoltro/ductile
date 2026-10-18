@@ -133,6 +133,7 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     let mut base = body.clone();
     let mut rolled = false;
     let mut tooled: BTreeSet<EdgeId> = BTreeSet::new();
+    let mut smooth_lines: Vec<EdgeId> = Vec::new();
     for (chain, closed) in super::chain::tangent_chains(body, &set.iter().copied().collect::<Vec<_>>()) {
         if chain.len() > 1 {
             base = super::chain::roll_chain(&base, &chain, closed, blend)?;
@@ -141,6 +142,13 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
         }
         let e = chain[0].edge;
         let info = edge_info(body, e)?;
+        if matches!(blend, Blend::Smooth(_)) && is_line_between_planes(body, e, &info) {
+            // Built below, once the corners they run into are known.
+            smooth_lines.push(e);
+            tooled.insert(e);
+            infos.insert(e, info);
+            continue;
+        }
         match edge_tool(body, e, &info, blend, size) {
             Ok(t) => {
                 tools.push((e, t));
@@ -163,8 +171,8 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     }
     let set = tooled;
     let corners = match blend {
-        Blend::Fillet(r) => corner_tools(body, &set, &infos, r),
-        Blend::Smooth(_) | Blend::Chamfer(_) => Vec::new(),
+        Blend::Fillet(r) | Blend::Smooth(r) => corner_tools(body, &set, &infos, blend, r),
+        Blend::Chamfer(_) => Vec::new(),
     };
     // Edge tools stop where the corner patches begin, so that tools of
     // neighbouring edges never overlap.
@@ -173,6 +181,12 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
             if let Some((_, t)) = tools.iter_mut().find(|(x, _)| x == e) {
                 *t = boolean(t, &half_space(*o, *n, size), BoolOp::Intersection)?;
             }
+        }
+    }
+    if let Blend::Smooth(r) = blend {
+        for &e in &smooth_lines {
+            let caps: Vec<(DVec3, DVec3)> = corners.iter().flat_map(|(_, c)| c.iter()).filter(|c| c.0 == e).map(|c| (c.1, c.2)).collect();
+            tools.push((e, smooth_line_tool(body, e, &infos[&e], blend, r, &caps, size)?));
         }
     }
     let mut cut: Vec<Body> = Vec::new();
@@ -187,7 +201,11 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     cut.extend(corners.into_iter().map(|(t, _)| t));
     let mut out = base;
     for t in &cut {
+        let clock = std::time::Instant::now();
         out = boolean(&out, t, BoolOp::Difference)?;
+        if std::env::var_os("DUCTILE_TIME").is_some() {
+            eprintln!("cut {} faces -> {:?}", t.faces.len(), clock.elapsed());
+        }
     }
     for t in &add {
         out = boolean(&out, t, BoolOp::Union)?;
@@ -195,12 +213,56 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     Ok(out)
 }
 
+fn is_line_between_planes(b: &Body, e: EdgeId, info: &EdgeInfo) -> bool {
+    matches!((&b.edge(e).curve, &b.face(info.f1).surface, &b.face(info.f2).surface), (Curve3::Line { .. }, Surface::Plane { .. }, Surface::Plane { .. }))
+}
+
+/// Exact tool for a smooth blend along a straight edge between planes,
+/// ending at the corner planes `caps` (point, normal) where it meets a
+/// corner patch, else at the face capping each end, else past the end.
+fn smooth_line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, r: f64, caps: &[(DVec3, DVec3)], size: f64) -> Result<Body, FilletError> {
+    let EdgeInfo { p0, p1, t, n1, n2, convex, .. } = *info;
+    let sgn = if convex { -1.0 } else { 1.0 };
+    let m = DMat3::from_cols(n1, n2, t).transpose();
+    let o = m.inverse() * DVec3::new(sgn * r, sgn * r, 0.0);
+    let (q1, q2) = (p0 + o - n1 * o.dot(n1), p0 + o - n2 * o.dot(n2));
+    if (q1 - p0).length().max((q2 - p0).length()) > size {
+        return Err(FilletError::TooLarge);
+    }
+    let ctrl = super::roll::section_ctrl(blend, p0 + o, q1, q2);
+    let margin = r * 4.0 + p0.distance(p1) * 0.05;
+    let ed = b.edge(e);
+    let mut ends = Vec::new();
+    for (v, p) in [(ed.v0, b.vertex(ed.v0)), (ed.v1, b.vertex(ed.v1))] {
+        let along = if p.distance(p1) < p.distance(p0) { t } else { -t };
+        if let Some(c) = caps.iter().filter(|c| (c.0 - p).dot(along) < 0.0 && c.0.distance(p) < 4.0 * r).min_by(|x, y| x.0.distance(p).total_cmp(&y.0.distance(p))) {
+            ends.push((c.0, c.1));
+            continue;
+        }
+        let others: Vec<FaceId> = vertex_faces(b, v).into_iter().filter(|f| *f != info.f1 && *f != info.f2).collect();
+        if let [f] = others[..] {
+            let n = outward(b, f, p);
+            if b.face(f).surface.is_planar() && n.dot(along) > 1e-6 {
+                ends.push((p, n));
+                continue;
+            }
+        }
+        ends.push((p + along * margin, along));
+    }
+    // Order the ends as start then end of the section's sweep.
+    if (ends[0].0 - p0).dot(t) > (ends[1].0 - p0).dot(t) {
+        ends.swap(0, 1);
+    }
+    super::corner::smooth_edge_tool(p0, q1, q2, &ctrl, t, [ends[0], ends[1]]).ok_or(FilletError::Unsupported)
+}
+
 fn edge_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> Result<Body, FilletError> {
-    // Smooth blends have no exact tool; the ball is rolled for them.
+    let ed = b.edge(e);
+    // Smooth blends have tools along straight edges between planes only
+    // (built by `smooth_line_tool`); elsewhere the ball is rolled for them.
     if matches!(blend, Blend::Smooth(_)) {
         return Err(FilletError::Unsupported);
     }
-    let ed = b.edge(e);
     let (s1, s2) = (&b.face(info.f1).surface, &b.face(info.f2).surface);
     match (&ed.curve, s1, s2) {
         (Curve3::Line { .. }, Surface::Plane { .. }, Surface::Plane { .. }) => line_tool(b, e, info, blend, size),
@@ -241,9 +303,13 @@ fn line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> R
     let margin = radius * 4.0 + len * 0.05;
     let sh = -t * margin;
     let (pp, a, c) = (p0 + sh, q1 + sh, q2 + sh);
-    let mid = match center {
-        Some(cc) => arc(cc + sh, a, c, t),
-        None => Segment::line(a, c),
+    let mid = match (center, blend) {
+        (Some(cc), Blend::Smooth(_)) => {
+            let ctrl = super::roll::section_ctrl(blend, cc + sh, a, c);
+            Segment::new(Curve3::Nurbs(ductile_geom::NurbsCurve::new(5, [vec![0.0; 6], vec![1.0; 6]].concat(), ctrl)), 0.0, 1.0)
+        }
+        (Some(cc), _) => arc(cc + sh, a, c, t),
+        (None, _) => Segment::line(a, c),
     };
     let lp = Loop3 { segments: vec![Segment::line(pp, a), mid, Segment::line(c, pp)] };
     let region = Region { plane: Frame::new(pp, t, a - pp), outer: lp, holes: vec![] };
@@ -302,7 +368,7 @@ fn circle_tool(b: &Body, center: DVec3, pf: FaceId, cf: FaceId, info: &EdgeInfo,
 /// meet at a vertex of three planar faces.
 /// Each comes with the planes (edge, point, outward normal) that cut the
 /// incident edge tools back to the patch.
-fn corner_tools(b: &Body, set: &BTreeSet<EdgeId>, infos: &HashMap<EdgeId, EdgeInfo>, r: f64) -> Vec<(Body, Vec<(EdgeId, DVec3, DVec3)>)> {
+fn corner_tools(b: &Body, set: &BTreeSet<EdgeId>, infos: &HashMap<EdgeId, EdgeInfo>, blend: Blend, r: f64) -> Vec<(Body, Vec<(EdgeId, DVec3, DVec3)>)> {
     let mut out = Vec::new();
     for vi in 0..b.vertices.len() {
         let v = VertexId(vi as u32);
@@ -334,6 +400,14 @@ fn corner_tools(b: &Body, set: &BTreeSet<EdgeId>, infos: &HashMap<EdgeId, EdgeIn
             caps.push((e, c, -d));
         }
         if rows.len() != 3 {
+            continue;
+        }
+        if let Blend::Smooth(_) = blend {
+            // Smooth corners exist for perpendicular faces only; elsewhere
+            // the edge blends simply run into each other.
+            if let Some(t) = super::corner::smooth_corner_tool(pv, [ns[0], ns[1], ns[2]], r) {
+                out.push((t, caps));
+            }
             continue;
         }
         let mut pts = Vec::new();
@@ -545,6 +619,23 @@ mod smooth_tests {
             a += p.x * q.y - q.x * p.y;
         }
         a.abs() / 2.0
+    }
+
+    #[test]
+    fn smooth_box_all_edges() {
+        let (w, d, h, r) = (4.0, 3.0, 2.0, 0.5);
+        let b = make_box(&Frame::WORLD, DVec3::new(w, d, h));
+        let all: Vec<EdgeId> = b.edge_ids().collect();
+        let t = std::time::Instant::now();
+        let f = blend_edges(&b, &all, Blend::Smooth(r)).unwrap();
+        eprintln!("smooth box: {:?}", t.elapsed());
+        assert_eq!(open_edges(&f), 0);
+        // Six faces, twelve edge blends, eight corners of three patches.
+        assert_eq!(f.faces.len(), 6 + 12 + 24);
+        let edges = 4.0 * ((w - 2.0 * r) + (d - 2.0 * r) + (h - 2.0 * r));
+        let removed = smooth_corner_area(r) * edges + 8.0 * r * r * r * crate::ops::corner::removed_fraction(80);
+        let expect = w * d * h - removed;
+        assert!((vol(&f) - expect).abs() < 2e-3 * removed, "{} vs {expect}", vol(&f));
     }
 
     #[test]

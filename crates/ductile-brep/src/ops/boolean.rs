@@ -170,7 +170,25 @@ pub fn boolean(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
                 continue;
             }
             for t in ssi::curve_surface_crossings(&edge.curve, edge.t0, edge.t1, s, tol) {
-                let p = edge.curve.point(t);
+                let mut p = edge.curve.point(t);
+                // Where the edge only touches the surface (as along a
+                // blend's flat contact) the crossing is ill-conditioned;
+                // a vertex of the face lying on the edge nearby is the
+                // intended point.
+                // The edge's own ends count when they lie on the surface.
+                let ends = [edge.v0, edge.v1].into_iter().map(|v| w.vertex(v)).filter(|q| ssi::distance(s, *q) < tol * 10.0);
+                let near = w
+                    .face_edges(f)
+                    .into_iter()
+                    .flat_map(|fe| [w.edge(fe).v0, w.edge(fe).v1])
+                    .map(|v| w.vertex(v))
+                    .filter(|q| edge.curve.point(edge.curve.closest_param_in(*q, edge.t0, edge.t1)).distance(*q) < tol * 10.0)
+                    .chain(ends)
+                    .filter(|q| q.distance(p) < diag * 1e-3)
+                    .min_by(|a, b| a.distance(p).total_cmp(&b.distance(p)));
+                if let Some(q) = near {
+                    p = q;
+                }
                 if zones[f.idx()].classify(p, tol) != Pos::Out {
                     crossings.push((e, p));
                 }

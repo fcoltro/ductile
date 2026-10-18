@@ -408,19 +408,27 @@ pub fn project_nurbs(n: &NurbsSurface, p: DVec3, hint: Option<DVec2>) -> DVec2 {
         }
         None => (f64::INFINITY, DVec2::new(u0, v0)),
     };
-    let gu = (n.nu * 4).clamp(8, 64);
-    let gv = (n.nv * 4).clamp(8, 64);
+    // A coarse grid, then Newton from its few nearest points: cheaper than
+    // a fine grid and safer than a single start.
+    let gu = (n.nu * 2).clamp(6, 32);
+    let gv = (n.nv * 2).clamp(6, 32);
+    let mut cands: Vec<(f64, DVec2)> = Vec::with_capacity((gu + 1) * (gv + 1));
     for i in 0..=gu {
         for j in 0..=gv {
             let u = u0 + (u1 - u0) * i as f64 / gu as f64;
             let v = v0 + (v1 - v0) * j as f64 / gv as f64;
-            let d = n.point(u, v).distance_squared(p);
-            if d < best.0 {
-                best = (d, DVec2::new(u, v));
-            }
+            cands.push((n.point(u, v).distance_squared(p), DVec2::new(u, v)));
         }
     }
-    newton_project(n, p, best.1).0
+    cands.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for &(_, start) in cands.iter().take(3) {
+        let uv = newton_project(n, p, start).0;
+        let d = n.point(uv.x, uv.y).distance_squared(p);
+        if d < best.0 {
+            best = (d, uv);
+        }
+    }
+    best.1
 }
 
 /// Newton iteration for the closest point from `uv`; also says whether it

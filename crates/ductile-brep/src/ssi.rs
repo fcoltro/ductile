@@ -64,8 +64,14 @@ fn foot(s: &Surface, p: DVec3, hint: Option<DVec2>) -> (DVec3, DVec3, DVec2) {
 
 /// Moves `p` onto the intersection of two surfaces (tangent plane corrector).
 pub fn refine_point(a: &Surface, b: &Surface, p: DVec3, tol: f64) -> Option<DVec3> {
+    refine_point_hinted(a, b, p, tol, &mut (None, None))
+}
+
+/// `refine_point` starting the projections from (and leaving in) `hints`,
+/// the surface parameters of a nearby point.
+fn refine_point_hinted(a: &Surface, b: &Surface, p: DVec3, tol: f64, hints: &mut (Option<DVec2>, Option<DVec2>)) -> Option<DVec3> {
     let mut p = p;
-    let (mut ha, mut hb) = (None, None);
+    let (mut ha, mut hb) = *hints;
     for _ in 0..40 {
         let (qa, na, uva) = foot(a, p, ha);
         let (qb, nb, uvb) = foot(b, p, hb);
@@ -94,17 +100,23 @@ pub fn refine_point(a: &Surface, b: &Surface, p: DVec3, tol: f64) -> Option<DVec
             break;
         }
     }
-    let da = distance(a, p);
-    let db = distance(b, p);
-    (da < tol * 10.0 && db < tol * 10.0).then_some(p)
+    let (qa, _, uva) = foot(a, p, ha);
+    let (qb, _, uvb) = foot(b, p, hb);
+    let (da, db) = (qa.distance(p), qb.distance(p));
+    let ok = da < tol * 10.0 && db < tol * 10.0;
+    if ok {
+        *hints = (Some(uva), Some(uvb));
+    }
+    ok.then_some(p)
 }
 
-fn tangent_at(a: &Surface, b: &Surface, p: DVec3) -> Option<DVec3> {
-    let (_, na, _) = foot(a, p, None);
-    let (_, nb, _) = foot(b, p, None);
+fn tangent_at_hinted(a: &Surface, b: &Surface, p: DVec3, hints: (Option<DVec2>, Option<DVec2>)) -> Option<DVec3> {
+    let (_, na, _) = foot(a, p, hints.0);
+    let (_, nb, _) = foot(b, p, hints.1);
     let t = na.cross(nb);
     (t.length_squared() > 1e-16).then(|| t.normalize())
 }
+
 
 /// Parameter range of a line clipped to a box.
 fn clip_line(origin: DVec3, dir: DVec3, roi: &BBox3) -> Option<(f64, f64)> {
@@ -285,6 +297,17 @@ pub fn intersect_analytic(a: &Surface, b: &Surface, roi: &BBox3, tol: f64) -> Op
 
 /// Marching intersection from approximate seed points.
 pub fn intersect_marching(a: &Surface, b: &Surface, roi: &BBox3, seeds: &[DVec3], tol: f64) -> Ssi {
+    // A spline surface whose control points all lie on one side of a plane
+    // can only touch it: there is nothing to cross (the touching itself,
+    // as along a blend's contact line, is an edge already).
+    for (p, q) in [(a, b), (b, a)] {
+        if let (Surface::Plane { frame }, Surface::Nurbs(n)) = (p, q) {
+            let d: Vec<f64> = n.ctrl.iter().map(|c| (c.truncate() / c.w - frame.origin).dot(frame.z)).collect();
+            if d.iter().all(|x| *x > -tol) || d.iter().all(|x| *x < tol) {
+                return Ssi::None;
+            }
+        }
+    }
     march(a, b, roi, seeds, tol)
 }
 
@@ -393,7 +416,15 @@ fn march(a: &Surface, b: &Surface, roi: &BBox3, seeds: &[DVec3], tol: f64) -> Ss
     let mut traces: Vec<Vec<DVec3>> = Vec::new();
     let max_step = diag / 24.0;
     for &seed in seeds {
-        let Some(p0) = refine_point(a, b, seed, tol) else { continue };
+        // Seeds where the surfaces are (nearly) tangent lie on touching
+        // contacts, which cross nothing; marching them is slow and futile.
+        let (_, na, ua) = foot(a, seed, None);
+        let (_, nb, ub) = foot(b, seed, None);
+        if na.cross(nb).length() < 0.02 {
+            continue;
+        }
+        let mut hints = (Some(ua), Some(ub));
+        let Some(p0) = refine_point_hinted(a, b, seed, tol, &mut hints) else { continue };
         if !roi_x.contains(p0) {
             continue;
         }
@@ -402,12 +433,12 @@ fn march(a: &Surface, b: &Surface, roi: &BBox3, seeds: &[DVec3], tol: f64) -> Ss
         if covered {
             continue;
         }
-        let Some(t0) = tangent_at(a, b, p0) else { continue };
-        let (fwd, closed) = trace(a, b, p0, t0, &roi_x, tol, max_step);
+        let Some(t0) = tangent_at_hinted(a, b, p0, hints) else { continue };
+        let (fwd, closed) = trace(a, b, p0, t0, &roi_x, tol, max_step, hints);
         let mut pts = if closed {
             fwd
         } else {
-            let (bwd, _) = trace(a, b, p0, -t0, &roi_x, tol, max_step);
+            let (bwd, _) = trace(a, b, p0, -t0, &roi_x, tol, max_step, hints);
             let mut v: Vec<DVec3> = bwd.into_iter().rev().collect();
             v.pop();
             v.extend(fwd);
@@ -448,7 +479,8 @@ fn dedupe(pts: Vec<DVec3>, tol: f64) -> Vec<DVec3> {
 }
 
 /// Traces from `p0` in direction `t0` until leaving the box or closing up.
-fn trace(a: &Surface, b: &Surface, p0: DVec3, t0: DVec3, roi: &BBox3, tol: f64, max_step: f64) -> (Vec<DVec3>, bool) {
+#[allow(clippy::too_many_arguments)]
+fn trace(a: &Surface, b: &Surface, p0: DVec3, t0: DVec3, roi: &BBox3, tol: f64, max_step: f64, mut hints: (Option<DVec2>, Option<DVec2>)) -> (Vec<DVec3>, bool) {
     let mut pts = vec![p0];
     let mut p = p0;
     let mut t = t0;
@@ -456,14 +488,15 @@ fn trace(a: &Surface, b: &Surface, p0: DVec3, t0: DVec3, roi: &BBox3, tol: f64, 
     let chord_tol = (tol * 50.0).max(roi.diagonal() * 2e-5);
     let mut travelled = 0.0;
     for _ in 0..20000 {
-        let Some(q) = refine_point(a, b, p + t * h, tol) else {
+        let mut hq = hints;
+        let Some(q) = refine_point_hinted(a, b, p + t * h, tol, &mut hq) else {
             h *= 0.5;
             if h < tol {
                 break;
             }
             continue;
         };
-        let Some(tq) = tangent_at(a, b, q) else { break };
+        let Some(tq) = tangent_at_hinted(a, b, q, hq) else { break };
         let tq = if tq.dot(t) < 0.0 { -tq } else { tq };
         let ang = t.dot(tq).clamp(-1.0, 1.0).acos();
         let seg = q.distance(p);
@@ -488,6 +521,7 @@ fn trace(a: &Surface, b: &Surface, p0: DVec3, t0: DVec3, roi: &BBox3, tol: f64, 
         pts.push(q);
         p = q;
         t = tq;
+        hints = hq;
         if seg * ang / 8.0 < chord_tol * 0.25 && ang < 0.05 {
             h = (h * 1.5).min(max_step);
         }
@@ -510,7 +544,20 @@ pub fn curve_surface_crossings(c: &Curve3, t0: f64, t1: f64, s: &Surface, tol: f
         v.clear();
         w
     };
-    let g = |t: f64| signed_distance(s, c.point(t));
+    // Consecutive samples are close, so each projection starts from the
+    // last one's parameters.
+    let hint = std::cell::Cell::new(None);
+    let g = |t: f64| {
+        let p = c.point(t);
+        match s {
+            Surface::Nurbs(_) => {
+                let uv = s.project(p, hint.get());
+                hint.set(Some(uv));
+                (p - s.point(uv.x, uv.y)).dot(s.normal(uv.x, uv.y))
+            }
+            _ => signed_distance(s, p),
+        }
+    };
     let mut roots: Vec<f64> = Vec::new();
     let vals: Vec<f64> = samples.iter().map(|t| g(*t)).collect();
     for i in 0..samples.len() {
