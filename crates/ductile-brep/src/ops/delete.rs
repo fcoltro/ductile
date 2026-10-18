@@ -4,21 +4,37 @@
 
 use super::heal::{compact, simplify};
 use crate::profile::{wire_from_segments, Segment};
-use crate::topo::{Body, BodyKind, EdgeId, FaceId};
+use crate::topo::{Body, BodyKind, Coedge, EdgeId, FaceId, VertexId};
+use ductile_geom::{Curve3, DVec3, Surface};
 use std::collections::{HashMap, HashSet};
 
 /// Removes `faces` from `b`. On a solid, a hole loop of a remaining face
 /// whose edges all border deleted faces is dropped as well, so deleting a
 /// hole or a boss closes the face it sat in and the solid stays solid.
-/// When the gap cannot be closed that way the result is an open sheet.
+/// A fillet or chamfer between two planes is removed by growing the
+/// planes back to their sharp edge. When the gap cannot be closed the
+/// result is an open sheet.
 pub fn delete_faces(b: &Body, faces: &[FaceId]) -> Body {
     let gone: HashSet<FaceId> = faces.iter().copied().collect();
     if gone.is_empty() {
         return b.clone();
     }
+    let heal = b.kind == BodyKind::Solid;
+    let mut work = b.clone();
+    if heal {
+        for f in faces {
+            let nbrs = neighbours(&work, *f);
+            if nbrs.iter().all(|n| !gone.contains(n)) {
+                let mut trial = work.clone();
+                if remove_blend(&mut trial, *f) {
+                    work = trial;
+                }
+            }
+        }
+    }
+    let b = &work;
     let mut out = b.clone();
     let users = edge_users(b);
-    let heal = b.kind == BodyKind::Solid;
     let mut kept = Vec::new();
     for f in b.face_ids() {
         if gone.contains(&f) {
@@ -30,7 +46,7 @@ pub fn delete_faces(b: &Body, faces: &[FaceId]) -> Body {
                 b.loops[l.idx()].coedges.iter().all(|c| users[&c.edge].iter().any(|g| *g != f && gone.contains(g)))
             };
             let outer = face.loops.first().copied();
-            face.loops.retain(|l| Some(*l) == outer || !borders_gap(l));
+            face.loops.retain(|l| Some(*l) == outer || b.loops[l.idx()].coedges.is_empty() || !borders_gap(l));
         }
         kept.push(face);
     }
@@ -65,6 +81,135 @@ pub fn extract_edges(b: &Body, edges: &[EdgeId]) -> Body {
         })
         .collect();
     wire_from_segments(&segs)
+}
+
+/// The faces across the edges of `f`.
+fn neighbours(b: &Body, f: FaceId) -> Vec<FaceId> {
+    let users = edge_users(b);
+    let mut out: Vec<FaceId> = b.face_loops(f).flat_map(|l| l.coedges.iter()).flat_map(|c| users[&c.edge].iter().copied()).filter(|g| *g != f).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Grows the two planes either side of the four-sided blend face `f` back
+/// to the line where they meet, and closes the end faces over the gap.
+/// The ends must meet the planes along straight edges. `f` is left with
+/// no loops; returns false (with `b` partly changed) when it does not fit.
+fn remove_blend(b: &mut Body, f: FaceId) -> bool {
+    let face = b.face(f).clone();
+    if face.loops.len() != 1 {
+        return false;
+    }
+    let co = b.loops[face.loops[0].idx()].coedges.clone();
+    if co.len() != 4 {
+        return false;
+    }
+    let tol = 1e-6 * b.bbox().diagonal().max(1.0);
+    let across = |b: &Body, e: EdgeId| -> Option<FaceId> {
+        let fs = b.edge_faces(e);
+        if fs.len() != 2 {
+            return None;
+        }
+        fs.iter().map(|x| x.0).find(|x| *x != f)
+    };
+    let plane = |b: &Body, g: FaceId| match &b.face(g).surface {
+        Surface::Plane { frame } => Some((frame.z, frame.z.dot(frame.origin))),
+        _ => None,
+    };
+    for k in 0..2 {
+        let (ea, ec, eb, ed) = (co[k].edge, co[k + 1].edge, co[(k + 2) % 4].edge, co[(k + 3) % 4].edge);
+        let ring = [ea, ec, eb, ed];
+        let (Some(fa), Some(fb), Some(_), Some(_)) = (across(b, ea), across(b, eb), across(b, ec), across(b, ed)) else { continue };
+        let (Some((n1, d1)), Some((n2, d2))) = (plane(b, fa), plane(b, fb)) else { continue };
+        let dir = n1.cross(n2);
+        if dir.length() < 1e-6 {
+            continue;
+        }
+        let dir = dir.normalize();
+        let c = n1.dot(n2);
+        let p0 = (n1 * (d1 - d2 * c) + n2 * (d2 - d1 * c)) / (1.0 - c * c);
+        // Where the sharp edge meets each end: the straight edges leaving
+        // the blend's corners run into it.
+        let mut merges: Vec<(VertexId, VertexId, DVec3)> = Vec::new();
+        for e in [ec, ed] {
+            let (v0, v1) = (b.edge(e).v0, b.edge(e).v1);
+            let mut pts = Vec::new();
+            for v in [v0, v1] {
+                let others: Vec<EdgeId> = b.edge_ids().filter(|x| !ring.contains(x) && (b.edge(*x).v0 == v || b.edge(*x).v1 == v)).collect();
+                let [o] = others[..] else { break };
+                let Curve3::Line { origin, dir: d } = b.edge(o).curve else { break };
+                let Some(p) = line_meet(p0, dir, origin, d, tol) else { break };
+                pts.push(p);
+            }
+            if pts.len() != 2 || pts[0].distance(pts[1]) > tol {
+                break;
+            }
+            merges.push((v0, v1, 0.5 * (pts[0] + pts[1])));
+        }
+        if merges.len() != 2 {
+            continue;
+        }
+        let mut remap: HashMap<VertexId, VertexId> = HashMap::new();
+        for (keep, drop, p) in &merges {
+            b.vertices[keep.idx()].point = *p;
+            remap.insert(*drop, *keep);
+        }
+        let m = |v: VertexId| *remap.get(&v).unwrap_or(&v);
+        for i in 0..b.edges.len() {
+            let e = &mut b.edges[i];
+            (e.v0, e.v1) = (m(e.v0), m(e.v1));
+        }
+        // Straight edges into the moved corners stretch to reach them.
+        let moved: Vec<VertexId> = merges.iter().map(|x| x.0).collect();
+        for i in 0..b.edges.len() {
+            let id = EdgeId(i as u32);
+            let e = &b.edges[i];
+            if ring.contains(&id) || !(moved.contains(&e.v0) || moved.contains(&e.v1)) || !matches!(e.curve, Curve3::Line { .. }) {
+                continue;
+            }
+            let (p, q) = (b.vertex(e.v0), b.vertex(e.v1));
+            if p.distance(q) < tol {
+                return false;
+            }
+            let e = &mut b.edges[i];
+            e.curve = Curve3::line_through(p, q);
+            (e.t0, e.t1) = (0.0, p.distance(q));
+        }
+        let (a0, a1) = (b.edge(ea).v0, b.edge(ea).v1);
+        let sharp = b.add_line_edge(a0, a1);
+        for l in 0..b.loops.len() {
+            let cs = &mut b.loops[l].coedges;
+            for c in cs.iter_mut() {
+                if c.edge == ea {
+                    c.edge = sharp;
+                } else if c.edge == eb {
+                    let start = if c.reversed { b.edges[eb.idx()].v1 } else { b.edges[eb.idx()].v0 };
+                    *c = Coedge::new(sharp, start != a0);
+                }
+            }
+            cs.retain(|c| c.edge != ec && c.edge != ed);
+        }
+        let fl = b.faces[f.idx()].loops[0];
+        b.loops[fl.idx()].coedges.clear();
+        return true;
+    }
+    false
+}
+
+/// The point on the line (p, d) where the line (q, e) crosses it.
+fn line_meet(p: DVec3, d: DVec3, q: DVec3, e: DVec3, tol: f64) -> Option<DVec3> {
+    let e = e.normalize();
+    let (a, b, c) = (d.dot(d), d.dot(e), e.dot(e));
+    let den = a * c - b * b;
+    if den.abs() < 1e-12 {
+        return None;
+    }
+    let w = p - q;
+    let s = (b * e.dot(w) - c * d.dot(w)) / den;
+    let t = (a * e.dot(w) - b * d.dot(w)) / den;
+    let (x, y) = (p + d * s, q + e * t);
+    (x.distance(y) < tol * 10.0).then_some(x)
 }
 
 fn edge_users(b: &Body) -> HashMap<EdgeId, Vec<FaceId>> {
@@ -102,6 +247,35 @@ mod tests {
         assert_eq!(healed.kind, BodyKind::Solid);
         assert_eq!(healed.faces.len(), 6);
         assert!((vol(&healed) - 32.0).abs() < 1e-6, "{}", vol(&healed));
+    }
+
+    #[test]
+    fn deleting_fillets_and_chamfers_grows_the_corner_back() {
+        use crate::ops::fillet::{blend_edges, Blend};
+        let bx = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let e = bx.edge_ids().find(|e| {
+            let m = bx.edge(*e).mid();
+            m.x > 3.9 && m.z > 1.9
+        });
+        for blend in [Blend::Fillet(0.5), Blend::Chamfer(0.5)] {
+            let rounded = blend_edges(&bx, &[e.unwrap()], blend).unwrap();
+            assert_eq!(rounded.faces.len(), 7);
+            let f = rounded.face_ids().find(|f| !matches!(rounded.face(*f).surface, Surface::Plane { frame } if frame.z.abs().max_element() > 0.999)).unwrap();
+            let sharp = delete_faces(&rounded, &[f]);
+            assert_eq!((sharp.kind, sharp.faces.len()), (BodyKind::Solid, 6));
+            assert!((vol(&sharp) - 24.0).abs() < 1e-6, "{}", vol(&sharp));
+        }
+        // Inside corner: a fillet where a step meets the floor.
+        let step = boolean(&bx, &make_box(&Frame { origin: DVec3::new(2.0, 0.0, 1.0), ..Frame::WORLD }, DVec3::new(2.0, 3.0, 1.0)), BoolOp::Difference).unwrap();
+        let inner = step.edge_ids().find(|e| {
+            let m = step.edge(*e).mid();
+            (m.x - 2.0).abs() < 1e-9 && (m.z - 1.0).abs() < 1e-9
+        });
+        let rounded = blend_edges(&step, &[inner.unwrap()], Blend::Fillet(0.4)).unwrap();
+        let f = rounded.face_ids().find(|f| matches!(rounded.face(*f).surface, Surface::Cylinder { .. })).unwrap();
+        let sharp = delete_faces(&rounded, &[f]);
+        assert_eq!(sharp.kind, BodyKind::Solid);
+        assert!((vol(&sharp) - 18.0).abs() < 1e-6, "{}", vol(&sharp));
     }
 
     #[test]

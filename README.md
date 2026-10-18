@@ -19,6 +19,11 @@ code from them.
   including coplanar, tangent and pole cases. Cut (Alt+D) splits solids
   along curves swept straight through them: a closed curve cuts out a
   plug, an open one splits the solid in two.
+- Delete faces (Delete in face mode) heals the solid where it can: holes
+  and bosses close up, and fillets or chamfers between planes grow back to
+  a sharp edge. Otherwise the solid becomes an open sheet. Duplicate
+  (Ctrl+D) in face or edge mode copies the selected faces out as a sheet
+  or the selected edges out as curves.
 - Curves on the construction plane: polyline (L), spline through points
   (Shift+L, open or closed C2), three-point arc (Shift+A), rectangle
   (Shift+R), circle (Shift+O), ellipse (Shift+E), regular polygon (Shift+P).
