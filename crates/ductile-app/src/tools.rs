@@ -1478,6 +1478,161 @@ impl Tool for ShellTool {
     }
 }
 
+// ---------------------------------------------------------------- Array ----
+
+/// Copies of the selected objects in a row (along a construction plane axis,
+/// X/Y/Z to switch) or around the construction plane's normal.
+pub struct ArrayTool {
+    targets: Vec<(ObjectId, std::sync::Arc<Body>)>,
+    pub radial: bool,
+    pub count: usize,
+    /// Linear: spacing between copies. Radial: total angle in degrees.
+    pub amount: f64,
+    pub axis: usize,
+    pub center: DVec3,
+    base: DVec3,
+    start_t: Option<f64>,
+    typed: Option<f64>,
+    frame: Frame,
+}
+
+impl ArrayTool {
+    pub fn new(doc: &Document, radial: bool) -> Option<Self> {
+        let targets: Vec<_> = doc.selected_objects().into_iter().filter_map(|id| doc.object(id).map(|o| (id, o.body.clone()))).collect();
+        if targets.is_empty() {
+            return None;
+        }
+        let mut bb = ductile_geom::BBox3::EMPTY;
+        for (_, b) in &targets {
+            bb = bb.union(&b.bbox());
+        }
+        let frame = current_cplane().frame;
+        let size = bb.diagonal().max(1e-3);
+        Some(Self {
+            targets,
+            radial,
+            count: if radial { 6 } else { 4 },
+            amount: if radial { 360.0 } else { (size * 1.2 * 100.0).round() / 100.0 },
+            axis: 0,
+            center: frame.origin,
+            base: bb.center(),
+            start_t: None,
+            typed: None,
+            frame,
+        })
+    }
+
+    fn axis_dir(&self) -> DVec3 {
+        [self.frame.x, self.frame.y, self.frame.z][self.axis]
+    }
+
+    /// Transform of copy `k` (k = 1 .. count - 1).
+    fn transform(&self, k: usize) -> ductile_geom::DMat4 {
+        use ductile_geom::DMat4;
+        let a = self.typed.unwrap_or(self.amount);
+        if self.radial {
+            // A full turn spreads the copies evenly; otherwise the angle is
+            // the span from the first copy to the last.
+            let full = (a.abs() - 360.0).abs() < 1e-9;
+            let step = if full { a / self.count as f64 } else { a / (self.count.max(2) - 1) as f64 };
+            let rot = DMat4::from_axis_angle(self.frame.z, (step * k as f64).to_radians());
+            DMat4::from_translation(self.center) * rot * DMat4::from_translation(-self.center)
+        } else {
+            DMat4::from_translation(self.axis_dir() * a * k as f64)
+        }
+    }
+
+    fn copies(&self) -> Vec<(ObjectId, Body)> {
+        (1..self.count).flat_map(|k| {
+            let m = self.transform(k);
+            self.targets.iter().map(move |(id, b)| (*id, b.transformed(&m)))
+        }).collect()
+    }
+}
+
+impl Tool for ArrayTool {
+    fn name(&self) -> &'static str {
+        if self.radial {
+            "Radial array"
+        } else {
+            "Linear array"
+        }
+    }
+    fn hint(&self) -> String {
+        if self.radial {
+            format!("Radial array: {} copies over {:.1}°, set them in the panel, Enter to finish", self.count, self.typed.unwrap_or(self.amount))
+        } else {
+            format!("Linear array: drag or type the spacing ({:.4}), X/Y/Z for the direction, Enter to finish", self.typed.unwrap_or(self.amount))
+        }
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if !self.radial && self.typed.is_none() {
+            let t = height_from_ray(self.base, self.axis_dir(), &p.ray);
+            let t0 = *self.start_t.get_or_insert(t - self.amount);
+            let d = t - t0;
+            self.amount = snap_len(d.abs(), p.world_per_px).copysign(d);
+        }
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let mut out: Option<Body> = None;
+        for (_, b) in self.copies() {
+            match &mut out {
+                None => out = Some(b),
+                Some(o) => o.append(&b),
+            }
+        }
+        out
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut ch = ui.horizontal(|ui| ui.radio_value(&mut self.radial, false, "Linear").changed() | ui.radio_value(&mut self.radial, true, "Radial").changed()).inner;
+        let mut n = self.count as f64;
+        if drag_value(ui, "Count", &mut n, 0.1) {
+            self.count = (n.round() as usize).clamp(2, 1000);
+            ch = true;
+        }
+        let mut a = self.typed.unwrap_or(self.amount);
+        if drag_value(ui, if self.radial { "Angle" } else { "Spacing" }, &mut a, if self.radial { 1.0 } else { 0.01 }) {
+            self.typed = Some(a);
+            ch = true;
+        }
+        if self.radial {
+            let mut c = [self.center.x, self.center.y, self.center.z];
+            ui.horizontal(|ui| {
+                ui.label("Center");
+                for v in c.iter_mut() {
+                    ch |= ui.add(egui::DragValue::new(v).speed(0.05).max_decimals(4)).changed();
+                }
+            });
+            self.center = DVec3::from_array(c);
+        }
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v;
+    }
+    fn constrain_axis(&mut self, axis: usize) {
+        self.axis = axis;
+        self.start_t = None;
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let copies = self.copies();
+        if copies.is_empty() {
+            return false;
+        }
+        doc.selection.clear();
+        for (id, b) in copies {
+            let name = doc.object(id).map(|o| o.name.clone()).unwrap_or_else(|| "Copy".into());
+            let new = doc.add_body(&name, b);
+            doc.selection.insert(Pick::Object(new));
+        }
+        true
+    }
+}
+
 // -------------------------------------------------------------- Revolve ----
 
 /// Revolves the regions of the selected closed curves about an axis in
@@ -1635,6 +1790,29 @@ mod tests {
         let mut o = ShellTool::new(&doc, OffsetMode::Solid).unwrap();
         o.typed_value(Some(0.1));
         assert!(o.commit(&mut doc));
+    }
+
+    #[test]
+    fn radial_and_linear_arrays() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame { origin: DVec3::new(3.0, 0.0, 0.0), ..ductile_geom::Frame::WORLD }, DVec3::ONE));
+        doc.selection.insert(Pick::Object(id));
+        let mut r = ArrayTool::new(&doc, true).unwrap();
+        r.count = 4;
+        assert!(r.commit(&mut doc));
+        assert_eq!(doc.objects.len(), 4);
+        // The copy a quarter turn round sits on +Y.
+        let c = doc.objects[1].body.bbox().center();
+        assert!((c - DVec3::new(-0.5, 3.5, 0.5)).length() < 1e-9, "{c}");
+        doc.selection.clear();
+        doc.selection.insert(Pick::Object(id));
+        let mut l = ArrayTool::new(&doc, false).unwrap();
+        l.count = 3;
+        l.typed_value(Some(2.0));
+        assert!(l.commit(&mut doc));
+        assert_eq!(doc.objects.len(), 6);
+        let c = doc.objects[5].body.bbox().center();
+        assert!((c - DVec3::new(7.5, 0.5, 0.5)).length() < 1e-9, "{c}");
     }
 
     #[test]

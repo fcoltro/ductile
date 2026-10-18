@@ -3,7 +3,7 @@
 
 use crate::app::DuctileApp;
 use crate::document::{Document, Pick, SelectMode};
-use crate::tools::{BoxTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
+use crate::tools::{ArrayTool, BoxTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
 use ductile_geom::{DMat4, DVec3, Frame};
@@ -58,6 +58,8 @@ pub enum Command {
     Move,
     Rotate,
     Scale,
+    LinearArray,
+    RadialArray,
     MirrorX,
     MirrorY,
     MirrorZ,
@@ -125,6 +127,8 @@ impl Command {
         Command::Move,
         Command::Rotate,
         Command::Scale,
+        Command::LinearArray,
+        Command::RadialArray,
         Command::MirrorX,
         Command::MirrorY,
         Command::MirrorZ,
@@ -193,6 +197,8 @@ impl Command {
             Move => "Move",
             Rotate => "Rotate",
             Scale => "Scale",
+            LinearArray => "Linear array",
+            RadialArray => "Radial array",
             MirrorX => "Mirror X",
             MirrorY => "Mirror Y",
             MirrorZ => "Mirror Z",
@@ -258,6 +264,8 @@ impl Command {
             Move => "G",
             Rotate => "R",
             Scale => "S",
+            LinearArray => "Alt+A",
+            RadialArray => "Alt+Shift+A",
             ViewTop => "Numpad 7 / T",
             ViewFront => "Numpad 1",
             ViewRight => "Numpad 3",
@@ -321,6 +329,8 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::G, false, false, false) => Move,
         (Key::R, false, false, false) => Rotate,
         (Key::S, false, false, false) => Scale,
+        (Key::A, false, false, true) => LinearArray,
+        (Key::A, false, true, true) => RadialArray,
         (Key::T, false, false, false) => ViewTop,
         (Key::O, false, false, false) => ToggleOrtho,
         (Key::F, false, false, false) => FrameSelection,
@@ -510,6 +520,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 None => app.status = "Select a solid, or the faces to open (face mode: 3)".into(),
             }
         }
+        LinearArray | RadialArray => match ArrayTool::new(&app.doc, cmd == RadialArray) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select objects to copy in an array".into(),
+        },
         Union => boolean_selected(app, BoolOp::Union),
         Loft | Sweep => {
             let (name, res) = if cmd == Loft { ("Loft", crate::tools::loft_selected(&app.doc)) } else { ("Sweep", crate::tools::sweep_selected(&app.doc)) };
