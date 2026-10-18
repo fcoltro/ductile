@@ -3,7 +3,7 @@
 
 use crate::app::DuctileApp;
 use crate::document::{Document, Pick, SelectMode};
-use crate::tools::{ArrayTool, BoxTool, CurveEditTool, TrimTool, BridgeTool, ExtendTool, ThickenTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
+use crate::tools::{ArrayTool, BoxTool, CurveEditTool, TrimTool, delete_selected, duplicate_selected, BridgeTool, ExtendTool, ThickenTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
 use ductile_geom::{DMat4, DVec3, Frame};
@@ -451,25 +451,16 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             }
         }
         Delete => {
-            let ids = app.doc.selected_objects();
-            if !ids.is_empty() && app.doc.mode == SelectMode::Object {
-                app.doc.checkpoint("Delete");
-                for id in ids {
-                    app.doc.remove(id);
-                }
+            if let Some(msg) = delete_selected(&mut app.doc) {
+                app.status = msg;
             }
         }
         Duplicate => {
-            let ids = app.doc.selected_objects();
-            if !ids.is_empty() {
-                app.doc.checkpoint("Duplicate");
+            let made = duplicate_selected(&mut app.doc);
+            if !made.is_empty() {
+                app.set_mode(SelectMode::Object);
                 app.doc.selection.clear();
-                for id in ids {
-                    if let Some(o) = app.doc.object(id).cloned() {
-                        let nid = app.doc.add_body(&o.name, (*o.body).clone());
-                        app.doc.selection.insert(Pick::Object(nid));
-                    }
-                }
+                app.doc.selection.extend(made.into_iter().map(Pick::Object));
                 app.start_tool(std::boxed::Box::new(TransformTool::new(TransformKind::Move, &app.doc)));
             }
         }

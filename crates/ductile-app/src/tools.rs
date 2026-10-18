@@ -9,7 +9,7 @@ use crate::camera::Ray;
 use crate::document::{Document, ObjectId, Pick, SelectMode};
 use crate::render::LineInstance;
 use ductile_brep::primitives::{make_box, make_frustum, make_sphere_in, make_torus};
-use ductile_brep::Body;
+use ductile_brep::{Body, EdgeId, FaceId};
 use ductile_geom::{DMat4, DQuat, DVec3, Frame};
 
 /// Construction plane on which new geometry is placed.
@@ -819,6 +819,105 @@ pub fn cut_selected(doc: &Document) -> Result<(Vec<ObjectId>, Vec<Vec<Body>>), S
         pieces.push(parts);
     }
     Ok((solids, pieces))
+}
+
+/// Deletes the selection: whole objects in object mode, faces (healing
+/// holes where it can) in face mode, and curve edges in edge mode. Returns
+/// a status line, or `None` when nothing was deleted.
+pub fn delete_selected(doc: &mut Document) -> Option<String> {
+    use ductile_brep::ops::delete::{delete_faces, extract_edges};
+    use std::collections::BTreeMap;
+    match doc.mode {
+        SelectMode::Object => {
+            let ids = doc.selected_objects();
+            if ids.is_empty() {
+                return None;
+            }
+            doc.checkpoint("Delete");
+            for id in &ids {
+                doc.remove(*id);
+            }
+            Some(format!("Deleted {} object(s)", ids.len()))
+        }
+        SelectMode::Face => {
+            let mut by: BTreeMap<ObjectId, Vec<FaceId>> = BTreeMap::new();
+            for (o, f) in doc.selected_faces() {
+                by.entry(o).or_default().push(f);
+            }
+            if by.is_empty() {
+                return None;
+            }
+            doc.checkpoint("Delete faces");
+            let mut opened = 0;
+            for (id, faces) in by {
+                let Some(o) = doc.object(id) else { continue };
+                let was = o.body.kind;
+                let b = delete_faces(&o.body, &faces);
+                if b.faces.is_empty() {
+                    doc.remove(id);
+                } else {
+                    opened += usize::from(was == ductile_brep::BodyKind::Solid && b.kind != was);
+                    doc.replace_body(id, b);
+                }
+            }
+            doc.selection.clear();
+            Some(if opened > 0 { "Deleted faces; the gap could not be healed, so the solid is now an open sheet".into() } else { "Deleted faces".into() })
+        }
+        SelectMode::Edge => {
+            let mut by: BTreeMap<ObjectId, Vec<EdgeId>> = BTreeMap::new();
+            for (o, e) in doc.selected_edges() {
+                if doc.object(o).is_some_and(|ob| ob.body.kind == ductile_brep::BodyKind::Wire) {
+                    by.entry(o).or_default().push(e);
+                }
+            }
+            if by.is_empty() {
+                return Some("Delete: only curve edges can be deleted; delete faces in face mode".into());
+            }
+            doc.checkpoint("Delete edges");
+            for (id, gone) in by {
+                let Some(o) = doc.object(id) else { continue };
+                let keep: Vec<EdgeId> = o.body.edge_ids().filter(|e| !gone.contains(e)).collect();
+                if keep.is_empty() {
+                    doc.remove(id);
+                } else {
+                    let b = extract_edges(&o.body, &keep);
+                    doc.replace_body(id, b);
+                }
+            }
+            doc.selection.clear();
+            Some("Deleted curves".into())
+        }
+        SelectMode::Vertex => None,
+    }
+}
+
+/// Copies the selection into new objects: whole objects, selected faces as
+/// a sheet, or selected edges as curves. Returns the new objects.
+pub fn duplicate_selected(doc: &mut Document) -> Vec<ObjectId> {
+    use ductile_brep::ops::delete::{extract_edges, extract_faces};
+    let mut made = Vec::new();
+    let faces = doc.selected_faces();
+    let edges = doc.selected_edges();
+    let objects: Vec<ObjectId> = doc.selection.iter().filter_map(|p| if let Pick::Object(o) = p { Some(*o) } else { None }).collect();
+    if faces.is_empty() && edges.is_empty() && objects.is_empty() {
+        return made;
+    }
+    doc.checkpoint("Duplicate");
+    for id in doc.selected_objects() {
+        let Some(o) = doc.object(id).cloned() else { continue };
+        let fs: Vec<FaceId> = faces.iter().filter(|(x, _)| *x == id).map(|(_, f)| *f).collect();
+        let es: Vec<EdgeId> = edges.iter().filter(|(x, _)| *x == id).map(|(_, e)| *e).collect();
+        if objects.contains(&id) {
+            made.push(doc.add_body(&o.name, (*o.body).clone()));
+        }
+        if !fs.is_empty() {
+            made.push(doc.add_body("Surface", extract_faces(&o.body, &fs)));
+        }
+        if !es.is_empty() {
+            made.push(doc.add_body("Curve", extract_edges(&o.body, &es)));
+        }
+    }
+    made
 }
 
 /// Sweeps the selected closed curve along the selected open one.
@@ -2632,6 +2731,24 @@ mod tests {
         let b = &doc.object(id).unwrap().body;
         assert!(b.vertices.iter().any(|v| v.point.distance(q[2] + DVec3::Z * 1.5) < 1e-9));
         assert!(b.vertices.iter().any(|v| v.point.distance(q[0]) < 1e-12));
+    }
+
+    #[test]
+    fn deletes_and_duplicates_faces_and_edges() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::ONE));
+        doc.mode = SelectMode::Edge;
+        doc.selection.insert(Pick::Edge(id, ductile_brep::EdgeId(0)));
+        let made = duplicate_selected(&mut doc);
+        assert_eq!(made.len(), 1);
+        assert_eq!(doc.object(made[0]).unwrap().body.kind, ductile_brep::BodyKind::Wire);
+        doc.selection.clear();
+        doc.mode = SelectMode::Face;
+        doc.selection.insert(Pick::Face(id, ductile_brep::FaceId(0)));
+        assert!(delete_selected(&mut doc).unwrap().contains("open sheet"));
+        assert_eq!(doc.object(id).unwrap().body.faces.len(), 5);
+        doc.undo();
+        assert_eq!(doc.object(id).unwrap().body.faces.len(), 6);
     }
 
     #[test]

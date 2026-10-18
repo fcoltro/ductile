@@ -174,8 +174,8 @@ impl Document {
 
     pub fn selected_objects(&self) -> Vec<ObjectId> {
         let mut v: Vec<ObjectId> = self.selection.iter().map(|p| p.object()).collect();
-        v.dedup();
         v.sort();
+        v.dedup();
         v.dedup();
         v
     }
