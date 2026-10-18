@@ -73,6 +73,9 @@ pub enum Command {
     Trim,
     BridgeCurve,
     ExtendCurve,
+    ReverseCurve,
+    RaiseDegree,
+    RebuildCurve,
     IntersectionCurve,
     ProjectCurve,
     Union,
@@ -175,6 +178,9 @@ impl Command {
         Command::Trim,
         Command::BridgeCurve,
         Command::ExtendCurve,
+        Command::ReverseCurve,
+        Command::RaiseDegree,
+        Command::RebuildCurve,
         Command::IntersectionCurve,
         Command::ProjectCurve,
         Command::Union,
@@ -278,6 +284,9 @@ impl Command {
             Trim => "Trim curves",
             BridgeCurve => "Bridge curves",
             ExtendCurve => "Extend curve or surface",
+            ReverseCurve => "Reverse curve",
+            RaiseDegree => "Raise curve degree",
+            RebuildCurve => "Rebuild curve",
             IntersectionCurve => "Intersection curves",
             ProjectCurve => "Project curves onto solids",
             Union => "Boolean union",
@@ -644,6 +653,22 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         BridgeCurve => match BridgeTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Select two curves (or two curve ends in vertex mode) to bridge".into(),
+        },
+        ReverseCurve => {
+            app.status = match crate::tools::edit_selected_curves(&mut app.doc, "Reverse curve", &ductile_brep::curves::reverse_chain) {
+                Ok(n) => format!("Reversed {n} curve(s)"),
+                Err(e) => e,
+            }
+        }
+        RaiseDegree => {
+            app.status = match crate::tools::edit_selected_curves(&mut app.doc, "Raise degree", &|s| s.iter().map(ductile_brep::curves::raise_degree).collect()) {
+                Ok(n) => format!("Raised the degree of {n} curve(s)"),
+                Err(e) => e,
+            }
+        }
+        RebuildCurve => match crate::tools::RebuildCurveTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select curves to rebuild".into(),
         },
         ExtendCurve if crate::tools::ExtendSheetTool::new(&app.doc).is_some() => app.start_tool(std::boxed::Box::new(crate::tools::ExtendSheetTool::new(&app.doc).unwrap())),
         ExtendCurve => match ExtendTool::new(&app.doc) {

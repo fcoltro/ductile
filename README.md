@@ -52,6 +52,9 @@ code from them.
   variants, as in Plasticity.
   Curves drawn separately that meet end to end form one profile. In vertex
   mode (1) spline control points show and can be selected and moved (G).
+  Reverse curve flips a curve's direction, Raise degree lifts it exactly
+  one degree, and Rebuild curve refits it with a chosen number of control
+  points and degree, showing how far it moved.
   Fillet (B) with curves selected rounds their corners (or just the
   selected vertices'); Offset (O) offsets them in their plane,
   rounding outside corners; Trim (T) deletes the pieces you click

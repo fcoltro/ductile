@@ -1219,6 +1219,110 @@ pub fn join_sheets_selected(doc: &mut Document) -> Result<(ObjectId, bool), Stri
     Ok((doc.add_body(if solid { "Solid" } else { "Surface" }, joined), solid))
 }
 
+/// The selected curve objects with their chains.
+fn selected_wires(doc: &Document) -> Vec<(ObjectId, Vec<ductile_brep::profile::Loop3>)> {
+    doc.selected_objects()
+        .into_iter()
+        .filter_map(|id| doc.object(id).filter(|o| o.body.kind == ductile_brep::BodyKind::Wire).map(|o| (id, ductile_brep::profile::wire_chains(&o.body))))
+        .collect()
+}
+
+/// Applies `f` to every segment chain of the selected curves.
+pub fn edit_selected_curves(doc: &mut Document, name: &str, f: &dyn Fn(&[ductile_brep::profile::Segment]) -> Vec<ductile_brep::profile::Segment>) -> Result<usize, String> {
+    let wires = selected_wires(doc);
+    if wires.is_empty() {
+        return Err(format!("{name}: select curves"));
+    }
+    doc.checkpoint(name);
+    for (id, chains) in &wires {
+        let segs: Vec<_> = chains.iter().flat_map(|c| f(&c.segments)).collect();
+        doc.replace_body(*id, ductile_brep::profile::wire_from_segments(&segs));
+    }
+    Ok(wires.len())
+}
+
+/// Rebuild curve: refits the selected curves as single splines with a
+/// chosen number of control points and degree.
+pub struct RebuildCurveTool {
+    targets: Vec<(ObjectId, Vec<ductile_brep::profile::Loop3>)>,
+    pub points: usize,
+    pub degree: usize,
+}
+
+impl RebuildCurveTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let targets = selected_wires(doc);
+        if targets.is_empty() {
+            return None;
+        }
+        Some(Self { targets, points: 8, degree: 3 })
+    }
+
+    fn rebuilt(&self) -> Vec<(ObjectId, Body, f64)> {
+        use ductile_brep::profile::Segment;
+        self.targets
+            .iter()
+            .filter_map(|(id, chains)| {
+                let mut segs = Vec::new();
+                let mut dev: f64 = 0.0;
+                for c in chains {
+                    let (n, d) = ductile_brep::curves::rebuild_chain(&c.segments, self.points, self.degree)?;
+                    let (a, b) = n.domain();
+                    segs.push(Segment::new(ductile_geom::Curve3::Nurbs(n), a, b));
+                    dev = dev.max(d);
+                }
+                Some((*id, ductile_brep::profile::wire_from_segments(&segs), dev))
+            })
+            .collect()
+    }
+}
+
+impl Tool for RebuildCurveTool {
+    fn name(&self) -> &'static str {
+        "Rebuild curve"
+    }
+    fn hint(&self) -> String {
+        let dev = self.rebuilt().iter().map(|r| r.2).fold(0.0, f64::max);
+        format!("Rebuild curve: {} control points, degree {}; deviation {:.5}; Enter to finish", self.points, self.degree, dev)
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if p.clicked { ToolOutcome::Finished } else { ToolOutcome::Continue }
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let mut out: Option<Body> = None;
+        for (_, b, _) in self.rebuilt() {
+            match &mut out {
+                None => out = Some(b),
+                Some(o) => o.append(&b),
+            }
+        }
+        out
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let (mut n, mut d) = (self.points as f64, self.degree as f64);
+        let mut ch = drag_value(ui, "Control points", &mut n, 0.1);
+        ch |= drag_value(ui, "Degree", &mut d, 0.05);
+        self.degree = (d.round() as usize).clamp(1, 7);
+        self.points = (n.round() as usize).clamp(self.degree + 1, 200);
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        if let Some(v) = v {
+            self.points = (v.round().max(0.0) as usize).clamp(self.degree + 1, 200);
+        }
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        self.targets.iter().map(|t| t.0).collect()
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let r = self.rebuilt();
+        for (id, b, _) in &r {
+            doc.replace_body(*id, b.clone());
+        }
+        !r.is_empty()
+    }
+}
+
 /// Sweeps the selected closed curve along the selected open one.
 pub fn sweep_selected(doc: &Document) -> Result<Body, String> {
     let chains = selected_chains(doc);

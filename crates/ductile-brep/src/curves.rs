@@ -560,6 +560,144 @@ fn natural_tail(c: &NurbsCurve, len: f64) -> NurbsCurve {
     piece(tau)
 }
 
+/// The same curve run the other way: its parameter now goes from the old
+/// end to the old start, with lines and arcs kept exact.
+pub fn reverse_segment(s: &Segment) -> Segment {
+    let (t0, t1) = (s.t0, s.t1);
+    let (curve, a, b) = match &s.curve {
+        Curve3::Line { origin, dir } => (Curve3::Line { origin: *origin + *dir * (t0 + t1), dir: -*dir }, t0, t1),
+        Curve3::Circle { frame, radius } => (Curve3::Circle { frame: Frame::new(frame.origin, -frame.z, frame.x), radius: *radius }, std::f64::consts::TAU - t1, std::f64::consts::TAU - t0),
+        Curve3::Ellipse { frame, rx, ry } => (Curve3::Ellipse { frame: Frame::new(frame.origin, -frame.z, frame.x), rx: *rx, ry: *ry }, std::f64::consts::TAU - t1, std::f64::consts::TAU - t0),
+        Curve3::Nurbs(n) => {
+            let (lo, hi) = n.domain();
+            (Curve3::Nurbs(n.reversed()), lo + hi - t1, lo + hi - t0)
+        }
+    };
+    Segment { curve, t0: a, t1: b, reversed: s.reversed }
+}
+
+/// A chain of segments run the other way.
+pub fn reverse_chain(segs: &[Segment]) -> Vec<Segment> {
+    segs.iter().rev().map(reverse_segment).collect()
+}
+
+/// The segment's curve as a spline one degree higher (exact).
+pub fn raise_degree(s: &Segment) -> Segment {
+    let n = s.curve.to_nurbs(s.t0, s.t1);
+    let up = n.elevated_to(n.degree + 1);
+    let (a, b) = up.domain();
+    Segment { curve: Curve3::Nurbs(up), t0: a, t1: b, reversed: s.reversed }
+}
+
+/// Least-squares spline of `degree` with `n` control points through the
+/// ends of `pts` and close to the rest (The NURBS Book, 9.4.1): chord
+/// length parameters, knots spread so every span holds samples.
+pub fn fit_curve(pts: &[DVec3], n: usize, degree: usize) -> Option<NurbsCurve> {
+    use ductile_geom::nurbs::basis::{basis_funs, find_span};
+    let m = pts.len();
+    let p = degree.max(1);
+    let n = n.max(p + 1);
+    if m < n || n < 2 {
+        return (m >= 2).then(|| NurbsCurve::interpolate(pts, p.min(m - 1)));
+    }
+    let mut ub = vec![0.0];
+    for w in pts.windows(2) {
+        ub.push(ub.last().unwrap() + w[0].distance(w[1]));
+    }
+    let total = *ub.last().unwrap();
+    if total <= 0.0 {
+        return None;
+    }
+    ub.iter_mut().for_each(|u| *u /= total);
+    // Knots: averaged over the parameters.
+    let mut knots = vec![0.0; p + 1];
+    let d = m as f64 / (n - p) as f64;
+    for j in 1..n - p {
+        let i = (j as f64 * d).floor() as usize;
+        let a = j as f64 * d - i as f64;
+        knots.push((1.0 - a) * ub[i - 1] + a * ub[i.min(m - 1)]);
+    }
+    knots.extend(std::iter::repeat_n(1.0, p + 1));
+    // Normal equations for the inner control points, ends fixed.
+    let basis = |u: f64| {
+        let span = find_span(n - 1, p, u, &knots);
+        let b = basis_funs(span, u, p, &knots);
+        let mut row = vec![0.0; n];
+        for (k, v) in b.into_iter().enumerate() {
+            row[span - p + k] = v;
+        }
+        row
+    };
+    let (q0, qm) = (pts[0], pts[m - 1]);
+    let inner = n - 2;
+    let mut a = vec![vec![0.0; inner]; inner];
+    let mut r = vec![DVec3::ZERO; inner];
+    for k in 1..m - 1 {
+        let row = basis(ub[k]);
+        let rk = pts[k] - q0 * row[0] - qm * row[n - 1];
+        for i in 0..inner {
+            if row[i + 1] == 0.0 {
+                continue;
+            }
+            r[i] += rk * row[i + 1];
+            for j in 0..inner {
+                a[i][j] += row[i + 1] * row[j + 1];
+            }
+        }
+    }
+    // Gaussian elimination with partial pivoting.
+    for c in 0..inner {
+        let piv = (c..inner).max_by(|x, y| a[*x][c].abs().total_cmp(&a[*y][c].abs()))?;
+        if a[piv][c].abs() < 1e-14 {
+            return None;
+        }
+        a.swap(c, piv);
+        r.swap(c, piv);
+        for rr in c + 1..inner {
+            let f = a[rr][c] / a[c][c];
+            if f != 0.0 {
+                for k in c..inner {
+                    a[rr][k] -= f * a[c][k];
+                }
+                r[rr] = r[rr] - r[c] * f;
+            }
+        }
+    }
+    for c in (0..inner).rev() {
+        let mut v = r[c];
+        for k in c + 1..inner {
+            v -= r[k] * a[c][k];
+        }
+        r[c] = v / a[c][c];
+    }
+    let mut ctrl = vec![q0];
+    ctrl.extend(r);
+    ctrl.push(qm);
+    Some(NurbsCurve::from_points(p, knots, &ctrl))
+}
+
+/// A chain of curves rebuilt as one spline with `n` control points of
+/// `degree`, and the largest distance from the original.
+pub fn rebuild_chain(segs: &[Segment], n: usize, degree: usize) -> Option<(NurbsCurve, f64)> {
+    const PER: usize = 64;
+    let mut pts: Vec<DVec3> = Vec::new();
+    for s in segs {
+        for i in 0..=PER {
+            let f = i as f64 / PER as f64;
+            let t = if s.reversed { s.t1 - (s.t1 - s.t0) * f } else { s.t0 + (s.t1 - s.t0) * f };
+            let p = s.curve.point(t);
+            if pts.last().is_none_or(|q| q.distance(p) > 1e-12) {
+                pts.push(p);
+            }
+        }
+    }
+    let c = fit_curve(&pts, n, degree)?;
+    let cc = Curve3::Nurbs(c.clone());
+    let (a, b) = c.domain();
+    let dev = pts.iter().map(|p| cc.point(cc.closest_param_in(*p, a, b)).distance(*p)).fold(0.0, f64::max);
+    Some((c, dev))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -721,6 +859,44 @@ mod tests {
             let other = if at_end { o.start() } else { o.end() };
             let orig = if at_end { s.start() } else { s.end() };
             assert!(other.distance(orig) < 1e-12);
+        }
+    }
+
+    #[test]
+    fn rebuilds_a_wiggly_spline_with_fewer_points() {
+        let pts: Vec<DVec3> = (0..=40).map(|i| {
+            let x = i as f64 / 10.0;
+            DVec3::new(x, (x * 1.3).sin(), 0.0)
+        }).collect();
+        let c = NurbsCurve::interpolate(&pts, 3);
+        let (t0, t1) = c.domain();
+        let seg = Segment::new(Curve3::Nurbs(c), t0, t1);
+        let (r, dev) = rebuild_chain(&[seg.clone()], 8, 3).unwrap();
+        assert_eq!(r.ctrl.len(), 8);
+        assert!(dev < 5e-2, "{dev}");
+        assert!(r.point(r.domain().0).distance(pts[0]) < 1e-12 && r.point(r.domain().1).distance(pts[40]) < 1e-12);
+        let (r5, dev5) = rebuild_chain(&[seg], 12, 5).unwrap();
+        assert_eq!(r5.degree, 5);
+        assert!(dev5 < dev);
+    }
+
+    #[test]
+    fn reversed_segments_run_backwards() {
+        let segs = [
+            Segment::line(DVec3::ZERO, DVec3::X),
+            Segment::new(Curve3::Circle { frame: Frame::WORLD, radius: 2.0 }, 0.3, 1.2),
+            Segment::new(Curve3::Ellipse { frame: Frame::WORLD, rx: 2.0, ry: 1.0 }, 0.5, 2.0),
+            Segment::new(Curve3::Nurbs(NurbsCurve::interpolate(&[DVec3::ZERO, DVec3::new(1.0, 1.0, 0.0), DVec3::new(2.0, 0.0, 1.0)], 2)), 0.0, 1.0),
+        ];
+        for s in &segs {
+            let r = reverse_segment(s);
+            for f in [0.0, 0.3, 1.0] {
+                let p = s.curve.point(s.t0 + (s.t1 - s.t0) * f);
+                let q = r.curve.point(r.t1 - (r.t1 - r.t0) * f);
+                assert!(p.distance(q) < 1e-9, "{:?}", s.curve);
+            }
+            let up = raise_degree(s);
+            assert!(up.curve.point(up.t0).distance(s.curve.point(s.t0)) < 1e-9 && up.curve.point(0.5 * (up.t0 + up.t1)).distance(s.curve.point(s.curve.closest_param_in(up.curve.point(0.5 * (up.t0 + up.t1)), s.t0, s.t1))) < 1e-9);
         }
     }
 }
