@@ -3,7 +3,7 @@
 
 use crate::app::DuctileApp;
 use crate::document::{Document, Pick, SelectMode};
-use crate::tools::{ArrayTool, BoxTool, CurveEditTool, TrimTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
+use crate::tools::{ArrayTool, BoxTool, CurveEditTool, TrimTool, BridgeTool, ExtendTool, CurveKind, CurveTool, ExtrudeTool, FilletTool, RevolveTool, RoundKind, RoundTool, ShellTool, OffsetMode, TransformKind, TransformTool};
 use ductile_brep::ops::boolean::{boolean, BoolError, BoolOp};
 use ductile_brep::primitives::*;
 use ductile_geom::{DMat4, DVec3, Frame};
@@ -54,6 +54,8 @@ pub enum Command {
     OffsetFaces,
     OffsetCurve,
     Trim,
+    BridgeCurve,
+    ExtendCurve,
     Union,
     Subtract,
     Intersect,
@@ -125,6 +127,8 @@ impl Command {
         Command::OffsetFaces,
         Command::OffsetCurve,
         Command::Trim,
+        Command::BridgeCurve,
+        Command::ExtendCurve,
         Command::Union,
         Command::Subtract,
         Command::Intersect,
@@ -197,6 +201,8 @@ impl Command {
             OffsetFaces => "Offset faces",
             OffsetCurve => "Offset curve",
             Trim => "Trim curves",
+            BridgeCurve => "Bridge curves",
+            ExtendCurve => "Extend curve",
             Union => "Boolean union",
             Subtract => "Boolean subtract",
             Intersect => "Boolean intersect",
@@ -264,6 +270,8 @@ impl Command {
             OffsetFaces => "Alt+F",
             OffsetCurve => "Alt+C",
             Trim => "Alt+T",
+            BridgeCurve => "Alt+B",
+            ExtendCurve => "Alt+X",
             Union => "Shift+U",
             Loft => "Alt+L",
             Sweep => "Alt+W",
@@ -333,6 +341,8 @@ pub fn shortcut(key: Key, m: Modifiers) -> Option<Command> {
         (Key::F, false, false, true) => OffsetFaces,
         (Key::C, false, false, true) => OffsetCurve,
         (Key::T, false, false, true) => Trim,
+        (Key::B, false, false, true) => BridgeCurve,
+        (Key::X, false, false, true) => ExtendCurve,
         (Key::U, false, true, false) => Union,
         (Key::D, false, true, false) => Subtract,
         (Key::I, false, true, false) => Intersect,
@@ -525,6 +535,14 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Trim => match TrimTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "There are no curves to trim".into(),
+        },
+        BridgeCurve => match BridgeTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select two curves (or two curve ends in vertex mode) to bridge".into(),
+        },
+        ExtendCurve => match ExtendTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select open curves (or their ends in vertex mode) to extend".into(),
         },
         OffsetCurve => match CurveEditTool::new(&app.doc, true) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
@@ -796,6 +814,23 @@ pub fn demo_scene(doc: &mut Document) {
     let back = pick(&wedge, &|e| (e.start() - e.end()).z.abs() > 2.4 && [e.start(), e.end()].iter().all(|p| (p.x - 18.0).abs() < 1e-9 && (p.y + 9.0).abs() < 1e-9));
     let wedge = ductile_brep::ops::fillet::blend_edges_variable(&wedge, &back, 0.2, 1.0, false).unwrap_or(wedge);
     doc.add_body("Variable blends", wedge);
+    // Two curves joined by a curvature-continuous bridge, one of them
+    // extended along its own shape.
+    {
+        use ductile_brep::curves::{bridge_curve, curve_end, extend_segment, Extension};
+        use ductile_brep::profile::{wire_from_segments, Segment};
+        use ductile_geom::{Curve3, NurbsCurve};
+        let arc = Segment::new(Curve3::Circle { frame: at(-4.0, -12.0, 0.0), radius: 2.0 }, 3.14, 5.0);
+        let pts = [(3.0, -15.0), (4.0, -13.0), (6.0, -14.5), (8.0, -13.0)].map(|(x, y)| DVec3::new(x, y, 0.0));
+        let sp = NurbsCurve::interpolate(&pts, 3);
+        let (t0, t1) = sp.domain();
+        let spline = Segment::new(Curve3::Nurbs(sp), t0, t1);
+        let bridge = bridge_curve(&curve_end(&arc, true), &curve_end(&spline, false), 2, [1.0, 1.0]);
+        let (b0, b1) = bridge.domain();
+        doc.add_body("Arc", wire_from_segments(&[arc]));
+        doc.add_body("Bridge", wire_from_segments(&[Segment::new(Curve3::Nurbs(bridge), b0, b1)]));
+        doc.add_body("Spline", wire_from_segments(&extend_segment(&spline, true, 1.2, Extension::Natural)));
+    }
     // Capsule end: cylinder with a hemispherical cap.
     let cap = op(make_cylinder(&at(13.0, 3.0, 0.0), 2.5, 4.0), make_sphere(DVec3::new(13.0, 3.0, 4.0), 2.5), BoolOp::Union);
     doc.add_body("Capsule", cap);

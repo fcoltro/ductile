@@ -1637,6 +1637,236 @@ impl Tool for CurveEditTool {
     }
 }
 
+// --------------------------------------------------------- Bridge/Extend ----
+
+/// An open end of a curve chain in a wire object.
+#[derive(Clone)]
+struct ChainEnd {
+    object: ObjectId,
+    chain: usize,
+    at_end: bool,
+    /// Point and outward derivatives.
+    d: [DVec3; 4],
+}
+
+/// Open chain ends of the selected curve objects; only those at selected
+/// vertices when any are selected.
+fn selected_chain_ends(doc: &Document) -> (Vec<(ObjectId, std::sync::Arc<Body>)>, Vec<ChainEnd>) {
+    use ductile_brep::profile::wire_chains;
+    let targets: Vec<_> = doc
+        .selected_objects()
+        .into_iter()
+        .filter_map(|id| doc.object(id).filter(|o| o.body.kind == ductile_brep::BodyKind::Wire).map(|o| (id, o.body.clone())))
+        .collect();
+    let picked: Vec<DVec3> = doc.selection.iter().filter_map(|p| if let Pick::Vertex(o, v) = p { doc.object(*o).map(|ob| ob.body.vertex(*v)) } else { None }).collect();
+    let mut ends = Vec::new();
+    for (id, b) in &targets {
+        for (ci, c) in wire_chains(b).iter().enumerate() {
+            if c.is_closed() || c.segments.is_empty() {
+                continue;
+            }
+            for at_end in [false, true] {
+                let seg = if at_end { c.segments.last().unwrap() } else { &c.segments[0] };
+                let d = ductile_brep::curves::curve_end(seg, at_end);
+                if picked.is_empty() || picked.iter().any(|p| p.distance(d[0]) < 1e-6) {
+                    ends.push(ChainEnd { object: *id, chain: ci, at_end, d });
+                }
+            }
+        }
+    }
+    (targets, ends)
+}
+
+/// Bridge curves: a new curve joining two open curve ends with G0 to G3
+/// continuity.
+pub struct BridgeTool {
+    ends: [ChainEnd; 2],
+    pub continuity: usize,
+    pub tension: [f64; 2],
+}
+
+impl BridgeTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let (_, ends) = selected_chain_ends(doc);
+        // The closest pair of ends on different chains.
+        let mut best: Option<(f64, usize, usize)> = None;
+        for i in 0..ends.len() {
+            for j in i + 1..ends.len() {
+                if ends[i].object == ends[j].object && ends[i].chain == ends[j].chain && ends.len() > 2 {
+                    continue;
+                }
+                let d = ends[i].d[0].distance(ends[j].d[0]);
+                if d > 1e-9 && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, i, j));
+                }
+            }
+        }
+        let (_, i, j) = best?;
+        Some(Self { ends: [ends[i].clone(), ends[j].clone()], continuity: 2, tension: [1.0, 1.0] })
+    }
+
+    fn curve(&self) -> Body {
+        let c = ductile_brep::curves::bridge_curve(&self.ends[0].d, &self.ends[1].d, self.continuity, self.tension);
+        let (t0, t1) = c.domain();
+        ductile_brep::profile::wire_from_segments(&[ductile_brep::profile::Segment::new(ductile_geom::Curve3::Nurbs(c), t0, t1)])
+    }
+}
+
+impl Tool for BridgeTool {
+    fn name(&self) -> &'static str {
+        "Bridge curves"
+    }
+    fn hint(&self) -> String {
+        format!("Bridge curves: G{} continuity, tension {:.2}; set them in the panel, click or Enter to finish", self.continuity, self.tension[0])
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        Some(self.curve())
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut ch = ui
+            .horizontal(|ui| {
+                let mut ch = false;
+                for (k, label) in ["G0", "G1", "G2", "G3"].into_iter().enumerate() {
+                    ch |= ui.radio_value(&mut self.continuity, k, label).changed();
+                }
+                ch
+            })
+            .inner;
+        if self.continuity > 0 {
+            ch |= drag_value(ui, "Tension start", &mut self.tension[0], 0.01);
+            ch |= drag_value(ui, "Tension end", &mut self.tension[1], 0.01);
+            self.tension = self.tension.map(|t| t.clamp(0.05, 10.0));
+        }
+        ch
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        if let Some(v) = v {
+            self.tension = [v.clamp(0.05, 10.0); 2];
+        }
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        doc.add_body("Bridge", self.curve());
+        true
+    }
+}
+
+/// Extend curve: lengthen open curves past their ends, along their own
+/// shape or straight along the end tangent.
+pub struct ExtendTool {
+    targets: Vec<(ObjectId, std::sync::Arc<Body>)>,
+    ends: Vec<ChainEnd>,
+    pub natural: bool,
+    pub value: f64,
+    start_t: Option<f64>,
+    typed: Option<f64>,
+}
+
+impl ExtendTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let (targets, ends) = selected_chain_ends(doc);
+        if ends.is_empty() {
+            return None;
+        }
+        Some(Self { targets, ends, natural: true, value: 0.0, start_t: None, typed: None })
+    }
+
+    fn amount(&self) -> f64 {
+        self.typed.unwrap_or(self.value).max(0.0)
+    }
+
+    fn extended(&self, id: ObjectId, b: &Body) -> Option<Body> {
+        use ductile_brep::curves::{extend_segment, Extension};
+        use ductile_brep::profile::{wire_chains, wire_from_segments};
+        let len = self.amount();
+        let mine: Vec<&ChainEnd> = self.ends.iter().filter(|e| e.object == id).collect();
+        if len < 1e-9 || mine.is_empty() {
+            return None;
+        }
+        let how = if self.natural { Extension::Natural } else { Extension::Linear };
+        let mut segs = Vec::new();
+        for (ci, c) in wire_chains(b).into_iter().enumerate() {
+            let mut s = c.segments;
+            for e in mine.iter().filter(|e| e.chain == ci) {
+                if e.at_end {
+                    let last = s.pop()?;
+                    s.extend(extend_segment(&last, true, len, how));
+                } else {
+                    let first = s.remove(0);
+                    let mut out = extend_segment(&first, false, len, how);
+                    out.extend(s);
+                    s = out;
+                }
+            }
+            segs.extend(s);
+        }
+        Some(wire_from_segments(&segs))
+    }
+}
+
+impl Tool for ExtendTool {
+    fn name(&self) -> &'static str {
+        "Extend curve"
+    }
+    fn hint(&self) -> String {
+        format!("Extend curve: drag or type a length ({:.4}), click or Enter to finish", self.amount())
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if self.typed.is_none() {
+            let e = &self.ends[0];
+            let t = height_from_ray(e.d[0], e.d[1].normalize_or_zero(), &p.ray);
+            let t0 = *self.start_t.get_or_insert(t);
+            self.value = snap_len((t - t0).max(0.0), p.world_per_px);
+        }
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let mut out: Option<Body> = None;
+        for (id, b) in &self.targets {
+            if let Some(e) = self.extended(*id, b) {
+                match &mut out {
+                    None => out = Some(e),
+                    Some(o) => o.append(&e),
+                }
+            }
+        }
+        out
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut v = self.amount();
+        let mut ch = drag_value(ui, "Length", &mut v, 0.01);
+        if ch {
+            self.typed = Some(v);
+        }
+        ch |= ui.horizontal(|ui| ui.radio_value(&mut self.natural, true, "Natural").changed() | ui.radio_value(&mut self.natural, false, "Linear").changed()).inner;
+        ch
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        self.targets.iter().map(|t| t.0).filter(|id| self.ends.iter().any(|e| e.object == *id)).collect()
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v;
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let mut any = false;
+        for (id, b) in self.targets.clone() {
+            if let Some(e) = self.extended(id, &b) {
+                doc.replace_body(id, e);
+                any = true;
+            }
+        }
+        any
+    }
+}
+
 // ----------------------------------------------------------------- Trim ----
 
 /// Click pieces of curves, between their crossings with other curves, to

@@ -360,6 +360,180 @@ fn offset_segment(s: &Segment, d: f64, z: DVec3) -> Option<Segment> {
     }
 }
 
+/// Point and first three derivatives of `seg` at one of its ends, with
+/// respect to a parameter that grows away from the segment (outwards).
+pub fn curve_end(seg: &Segment, at_end: bool) -> [DVec3; 4] {
+    // Curve parameter at the end, and the sign that turns it outwards.
+    let (t, sign) = match (at_end, seg.reversed) {
+        (true, false) => (seg.t1, 1.0),
+        (true, true) => (seg.t0, -1.0),
+        (false, false) => (seg.t0, -1.0),
+        (false, true) => (seg.t1, 1.0),
+    };
+    let d = seg.curve.derivs(t);
+    // Third derivative by a one-sided difference taken inside the segment.
+    let h = 1e-3 * (seg.t1 - seg.t0).abs().max(1e-9);
+    let dd = |x: f64| seg.curve.derivs(x)[2];
+    let d3 = (dd(t) * 3.0 - dd(t - sign * h) * 4.0 + dd(t - 2.0 * sign * h)) * (sign / (2.0 * h));
+    [d[0], d[1] * sign, d[2], d3 * sign]
+}
+
+/// A curve from the end `a` (point and outward derivatives, see
+/// [`curve_end`]) to the end `b`, leaving `a` and entering `b` with
+/// continuity G`k` (0 = straight line, 1 tangent, 2 curvature,
+/// 3 curvature rate). `tension` scales how far the ends' directions
+/// carry into the bridge; 1 is a natural default.
+///
+/// The bridge is one Bézier of degree 2k + 1 whose first k derivatives at
+/// each end equal the end curve's, after the linear reparameterization
+/// set by the tension, so the joins are exactly G`k`.
+pub fn bridge_curve(a: &[DVec3; 4], b: &[DVec3; 4], k: usize, tension: [f64; 2]) -> NurbsCurve {
+    let k = k.min(3);
+    let n = 2 * k + 1;
+    let gap = a[0].distance(b[0]).max(1e-12);
+    let ha = tension[0] * gap / a[1].length().max(1e-12);
+    let hb = -tension[1] * gap / b[1].length().max(1e-12);
+    let binom = |n: usize, k: usize| (0..k).fold(1.0, |acc, i| acc * (n - i) as f64 / (i + 1) as f64);
+    // n! / (n - m)!
+    let falling = |m: usize| (0..m).fold(1.0, |acc, i| acc * (n - i) as f64);
+    let mut p = vec![DVec3::ZERO; n + 1];
+    p[0] = a[0];
+    p[n] = b[0];
+    for m in 1..=k {
+        let mut s = a[m] * ha.powi(m as i32) / falling(m);
+        for i in 0..m {
+            s -= p[i] * (if (m - i) % 2 == 0 { 1.0 } else { -1.0 } * binom(m, i));
+        }
+        p[m] = s;
+        let mut s = b[m] * hb.powi(m as i32) / falling(m);
+        for i in 0..m {
+            s -= p[n - i] * (if i % 2 == 0 { 1.0 } else { -1.0 } * binom(m, i));
+        }
+        p[n - m] = if m % 2 == 0 { s } else { -s };
+    }
+    let mut knots = vec![0.0; n + 1];
+    knots.extend(std::iter::repeat_n(1.0, n + 1));
+    NurbsCurve::from_points(n, knots, &p)
+}
+
+/// How [`extend_segment`] continues a curve past its end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Extension {
+    /// Along the end tangent.
+    Linear,
+    /// Along the curve's own shape: lines and arcs stay lines and arcs,
+    /// splines continue their last polynomial piece.
+    Natural,
+}
+
+/// Lengthens `seg` by `len` past its end (`at_end`) or its start. The
+/// result replaces `seg`: one segment, or two where a straight piece is
+/// added to a curve.
+pub fn extend_segment(seg: &Segment, at_end: bool, len: f64, how: Extension) -> Vec<Segment> {
+    if len <= 1e-12 {
+        return vec![seg.clone()];
+    }
+    if how == Extension::Linear && !seg.curve.is_linear() {
+        let e = curve_end(seg, at_end);
+        let tip = e[0] + e[1].normalize() * len;
+        return if at_end {
+            vec![seg.clone(), Segment::line(e[0], tip)]
+        } else {
+            vec![Segment::line(tip, e[0]), seg.clone()]
+        };
+    }
+    // Whether the curve parameter grows towards the extended end.
+    let up = at_end != seg.reversed;
+    let grow = |dt: f64| {
+        let (t0, t1) = if up { (seg.t0, seg.t1 + dt) } else { (seg.t0 - dt, seg.t1) };
+        Segment { t0, t1, ..seg.clone() }
+    };
+    match &seg.curve {
+        Curve3::Line { .. } => vec![grow(len)],
+        Curve3::Circle { radius, .. } => {
+            let span = (seg.t1 - seg.t0).abs();
+            vec![grow((len / radius).min(std::f64::consts::TAU - span - 1e-6).max(0.0))]
+        }
+        Curve3::Ellipse { .. } => {
+            // Arc length grows monotonically with the angle: bisect.
+            let span = (seg.t1 - seg.t0).abs();
+            let (mut lo, mut hi) = (0.0, std::f64::consts::TAU - span - 1e-6);
+            let extra = |dt: f64| {
+                let s = grow(dt);
+                s.curve.length(s.t0, s.t1) - seg.curve.length(seg.t0, seg.t1)
+            };
+            if extra(hi) <= len {
+                return vec![grow(hi.max(0.0))];
+            }
+            for _ in 0..60 {
+                let mid = 0.5 * (lo + hi);
+                if extra(mid) < len {
+                    lo = mid
+                } else {
+                    hi = mid
+                }
+            }
+            vec![grow(0.5 * (lo + hi))]
+        }
+        Curve3::Nurbs(_) => {
+            // Work on the curve oriented towards the extended end.
+            let mut c = seg.curve.to_nurbs(seg.t0, seg.t1);
+            if !up {
+                c = c.reversed();
+            }
+            let tail = natural_tail(&c, len);
+            let mut joined = NurbsCurve::join(&[c, tail]);
+            if !up {
+                joined = joined.reversed();
+            }
+            let (t0, t1) = joined.domain();
+            vec![Segment { curve: Curve3::Nurbs(joined), t0, t1, reversed: seg.reversed }]
+        }
+    }
+}
+
+/// The continuation of `c` past its end by arc length `len`: its last
+/// Bézier piece, evaluated beyond its parameter range by blossoming.
+fn natural_tail(c: &NurbsCurve, len: f64) -> NurbsCurve {
+    let last = c.bezier_segments().pop().unwrap();
+    let n = last.degree;
+    // Blossom of the piece (taken on [0, 1]) at the given arguments.
+    let blossom = |args: &[f64]| {
+        let mut q = last.ctrl.clone();
+        for (j, &u) in args.iter().enumerate() {
+            for i in 0..n - j {
+                q[i] = q[i] * (1.0 - u) + q[i + 1] * u;
+            }
+        }
+        q[0]
+    };
+    let piece = |tau: f64| {
+        let ctrl = (0..=n)
+            .map(|i| {
+                let mut args = vec![1.0; n - i];
+                args.extend(std::iter::repeat_n(tau, i));
+                blossom(&args)
+            })
+            .collect();
+        let mut knots = vec![0.0; n + 1];
+        knots.extend(std::iter::repeat_n(1.0, n + 1));
+        NurbsCurve::new(n, knots, ctrl)
+    };
+    // Newton on the piece's length, from the end speed of the curve.
+    let speed0 = piece(1.0 + 1e-6).derivs(0.0, 1)[1].length() / 1e-6;
+    let mut tau = 1.0 + len / speed0.max(1e-12);
+    for _ in 0..20 {
+        let p = piece(tau);
+        let err = len - p.length();
+        if err.abs() < 1e-9 * len.max(1.0) {
+            break;
+        }
+        let speed = p.derivs(1.0, 1)[1].length() / (tau - 1.0);
+        tau = (tau + err / speed.max(1e-12)).max(1.0 + 1e-9);
+    }
+    piece(tau)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,5 +607,82 @@ mod tests {
         let inner = offset_chain(&rect(4.0, 3.0), true, 0.5, DVec3::Z);
         assert_eq!(inner.len(), 4);
         assert!((area(&inner) - 3.0 * 2.0).abs() < 1e-9, "{}", area(&inner));
+    }
+
+    fn curvature(d: &[DVec3]) -> f64 {
+        d[1].cross(d[2]).length() / d[1].length().powi(3)
+    }
+
+    #[test]
+    fn bridges_match_the_ends() {
+        let arc = Segment::new(Curve3::Circle { frame: Frame::WORLD, radius: 2.0 }, 0.0, 1.0);
+        let line = Segment::line(DVec3::new(5.0, 3.0, 1.0), DVec3::new(8.0, 3.0, 1.0));
+        let a = curve_end(&arc, true);
+        let b = curve_end(&line, false);
+        for k in 0..=3 {
+            let c = bridge_curve(&a, &b, k, [1.0, 1.0]);
+            assert_eq!(c.degree, 2 * k + 1);
+            let s = c.derivs(0.0, 2);
+            let e = c.derivs(1.0, 2);
+            assert!(s[0].distance(a[0]) < 1e-12 && e[0].distance(b[0]) < 1e-12);
+            if k >= 1 {
+                assert!(s[1].normalize().distance(a[1].normalize()) < 1e-6, "k={k}");
+                // The bridge enters the line along it.
+                assert!(e[1].normalize().distance(-b[1].normalize()) < 1e-6, "k={k}");
+            }
+            if k >= 2 {
+                assert!((curvature(&s) - 0.5).abs() < 1e-5, "k={k} {}", curvature(&s));
+                assert!(curvature(&e) < 1e-6, "k={k}");
+            }
+        }
+        // G3: the curvature's rate of change at the arc end is zero as on the arc.
+        let c = bridge_curve(&a, &b, 3, [1.0, 1.0]);
+        let h = 1e-4;
+        let dk = (curvature(&c.derivs(h, 2)) - curvature(&c.derivs(0.0, 2))) / h;
+        assert!(dk.abs() < 1e-2, "{dk}");
+        // Tension pulls the bridge further along the end directions.
+        let loose = bridge_curve(&a, &b, 1, [2.0, 2.0]);
+        assert!(loose.length() > bridge_curve(&a, &b, 1, [1.0, 1.0]).length());
+    }
+
+    #[test]
+    fn extends_curves() {
+        let line = Segment::line(DVec3::ZERO, DVec3::X);
+        let l = extend_segment(&line, true, 0.5, Extension::Natural);
+        assert_eq!(l.len(), 1);
+        assert!(l[0].end().distance(DVec3::new(1.5, 0.0, 0.0)) < 1e-12);
+        let l = extend_segment(&line.flipped(), true, 0.5, Extension::Natural);
+        assert!(l[0].end().distance(DVec3::new(-0.5, 0.0, 0.0)) < 1e-12);
+
+        let arc = Segment::new(Curve3::Circle { frame: Frame::WORLD, radius: 2.0 }, 0.0, 1.0);
+        let a = extend_segment(&arc, false, 1.0, Extension::Natural);
+        assert_eq!(a.len(), 1);
+        assert!((a[0].t0 + 0.5).abs() < 1e-12);
+        let a = extend_segment(&arc, true, 1.0, Extension::Linear);
+        assert_eq!(a.len(), 2);
+        assert!((a[1].start().distance(a[1].end()) - 1.0).abs() < 1e-12);
+
+        // A parabola continues as the same parabola.
+        let par = NurbsCurve::from_points(
+            2,
+            vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            &[DVec3::ZERO, DVec3::new(0.5, 0.0, 0.0), DVec3::new(1.0, 1.0, 0.0)],
+        );
+        let seg = Segment::new(Curve3::Nurbs(par.clone()), 0.0, 1.0);
+        let before = par.length();
+        for (at_end, rev) in [(true, false), (false, false), (true, true)] {
+            let s = if rev { seg.flipped() } else { seg.clone() };
+            let out = extend_segment(&s, at_end, 0.7, Extension::Natural);
+            assert_eq!(out.len(), 1);
+            let o = &out[0];
+            let Curve3::Nurbs(n) = &o.curve else { panic!() };
+            assert!((n.length() - before - 0.7).abs() < 1e-6, "{}", n.length() - before);
+            let tip = if at_end { o.end() } else { o.start() };
+            assert!((tip.y - tip.x * tip.x).abs() < 1e-9, "{tip}");
+            // The untouched end stays put.
+            let other = if at_end { o.start() } else { o.end() };
+            let orig = if at_end { s.start() } else { s.end() };
+            assert!(other.distance(orig) < 1e-12);
+        }
     }
 }

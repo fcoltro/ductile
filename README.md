@@ -25,7 +25,11 @@ code from them.
   Fillet (Shift+F) with curves selected rounds their corners (or just the
   selected vertices'); Offset curve (Alt+C) offsets them in their plane,
   rounding outside corners; Trim (Alt+T) deletes the pieces you click
-  between curve crossings.
+  between curve crossings. Bridge (Alt+B) joins two curve ends with a new
+  curve that meets them with G0 to G3 continuity and adjustable tension;
+  Extend (Alt+X) lengthens open curves past their ends, naturally (lines
+  and arcs stay lines and arcs, splines continue their own polynomial) or
+  straight along the end tangent.
 - Extrude (E): push/pull planar faces, or turn closed planar curves (with
   holes) into solids, with live preview.
 - Revolve (V) closed curves by any angle about a selected edge or the
@@ -73,7 +77,7 @@ code from them.
 - Move / rotate / scale / mirror, linear and radial arrays (Alt+A,
   Alt+Shift+A), undo/redo.
 
-In progress: bridge and extend curves.
+In progress: more of Plasticity's curve and surface tools.
 
 ## Layout
 
