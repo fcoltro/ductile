@@ -46,7 +46,10 @@ pub struct DuctileApp {
     preview_body: Option<Body>,
     pub status: String,
     box_select: Option<BoxSelect>,
-    typed: String,
+    /// The typed-value field, open while Some (Tab or a digit opens it).
+    typed: Option<String>,
+    /// A character already taken from its key event, so its text event is skipped.
+    typed_echo: Option<char>,
     pub show_grid: bool,
     pub show_edges: bool,
     pub palette_open: bool,
@@ -110,7 +113,8 @@ impl DuctileApp {
             preview_body: None,
             status: "Welcome to Ductile. Press F for the command palette, F1 for help.".into(),
             box_select: None,
-            typed: String::new(),
+            typed: None,
+            typed_echo: None,
             show_grid: true,
             show_edges: true,
             palette_open: false,
@@ -152,13 +156,13 @@ impl DuctileApp {
 
     pub fn start_tool(&mut self, t: Box<dyn Tool>) {
         self.tool = Some(t);
-        self.typed.clear();
+        self.typed = None;
         self.tool_from_key = false;
     }
 
     pub fn cancel_tool(&mut self) {
         self.tool = None;
-        self.typed.clear();
+        self.typed = None;
     }
 
     fn finish_tool(&mut self) {
@@ -172,7 +176,7 @@ impl DuctileApp {
                 self.status = format!("{} done", t.name());
             }
         }
-        self.typed.clear();
+        self.typed = None;
     }
 
     // ----------------------------------------------------------- frame ----
@@ -525,11 +529,16 @@ impl DuctileApp {
             }
         }
         self.view_gizmo(ui, rect);
-        if !self.typed.is_empty() {
+        if let Some(t) = &self.typed {
+            let shown = match crate::expr::eval(t) {
+                Some(v) if t.parse::<f64>().is_err() => format!("= {t}  ({})", fmt_value(v)),
+                None if !t.is_empty() => format!("= {t}  ?"),
+                _ => format!("= {t}"),
+            };
             ui.painter().text(
                 rect.left_bottom() + egui::vec2(12.0, -12.0),
                 egui::Align2::LEFT_BOTTOM,
-                format!("= {}", self.typed),
+                format!("{shown}\u{258f}"),
                 egui::FontId::monospace(16.0),
                 theme::ACCENT,
             );
@@ -678,12 +687,33 @@ impl DuctileApp {
         }
     }
 
+    /// Hands the typed field's value to the tool (None while it doesn't parse).
+    fn apply_typed(&mut self) {
+        let v = self.typed.as_deref().and_then(crate::expr::eval);
+        if let Some(t) = self.tool.as_mut() {
+            t.typed_value(v);
+        }
+    }
+
     fn handle_keys(&mut self, ctx: &egui::Context) {
         if ctx.egui_wants_keyboard_input() {
             return;
         }
         let events = ctx.input(|i| i.events.clone());
         for ev in events {
+            if let egui::Event::Text(text) = &ev {
+                if let (Some(t), true) = (self.typed.as_mut(), self.tool.is_some()) {
+                    let mut chars = text.chars();
+                    if let (Some(c), Some(e)) = (chars.clone().next(), self.typed_echo.take()) {
+                        if c == e {
+                            chars.next();
+                        }
+                    }
+                    t.extend(chars);
+                    self.apply_typed();
+                }
+                continue;
+            }
             let egui::Event::Key { key, pressed: true, modifiers, .. } = ev else { continue };
             if let Some(cmd) = self.assigning.take() {
                 self.status = if key == egui::Key::Escape {
@@ -698,6 +728,31 @@ impl DuctileApp {
                 continue;
             }
             // Modal typing for active tools.
+            if self.tool.is_some() && self.typed.is_some() {
+                match key {
+                    egui::Key::Backspace => {
+                        self.typed.as_mut().unwrap().pop();
+                        self.apply_typed();
+                    }
+                    egui::Key::Escape => {
+                        // Back to the pointer's value; Escape again cancels.
+                        self.typed = None;
+                        self.tool.as_mut().unwrap().typed_value(None);
+                    }
+                    egui::Key::Tab => self.typed = None,
+                    egui::Key::Enter => {
+                        self.typed = None;
+                        match self.tool.as_mut().unwrap().accept() {
+                            ToolOutcome::Finished => self.finish_tool(),
+                            ToolOutcome::Cancelled => self.cancel_tool(),
+                            ToolOutcome::Continue => {}
+                        }
+                    }
+                    // Characters arrive as text.
+                    _ => {}
+                }
+                continue;
+            }
             if self.tool.is_some() {
                 let digit = match key {
                     egui::Key::Num0 => Some('0'),
@@ -714,19 +769,20 @@ impl DuctileApp {
                     egui::Key::Minus => Some('-'),
                     _ => None,
                 };
-                if let Some(d) = digit {
-                    self.typed.push(d);
-                    let v = self.typed.parse::<f64>().ok();
-                    self.tool.as_mut().unwrap().typed_value(v);
+                if key == egui::Key::Tab {
+                    self.typed = Some(String::new());
+                    continue;
+                }
+                if let (Some(d), false) = (digit, modifiers.ctrl || modifiers.alt) {
+                    self.typed = Some(d.to_string());
+                    self.typed_echo = Some(d);
+                    self.apply_typed();
+                    continue;
+                }
+                if self.tool.as_mut().unwrap().command_key(key, modifiers) {
                     continue;
                 }
                 match key {
-                    egui::Key::Backspace => {
-                        self.typed.pop();
-                        let v = self.typed.parse::<f64>().ok();
-                        self.tool.as_mut().unwrap().typed_value(v);
-                        continue;
-                    }
                     egui::Key::Escape => {
                         self.cancel_tool();
                         self.status = "Cancelled".into();
@@ -976,4 +1032,10 @@ impl DuctileApp {
     pub fn arc_mesh(&self, id: ObjectId) -> Option<Arc<BodyMesh>> {
         self.doc.object(id).map(|o| o.mesh.clone())
     }
+}
+
+/// A computed typed value, without trailing zeros.
+fn fmt_value(v: f64) -> String {
+    let s = format!("{v:.4}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }

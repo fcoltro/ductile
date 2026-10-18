@@ -9,6 +9,7 @@ mod app;
 mod background;
 mod camera;
 mod commands;
+mod expr;
 mod keymap;
 mod document;
 mod icons;

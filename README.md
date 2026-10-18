@@ -135,7 +135,10 @@ makes a pipe, G / R / S move, rotate and scale, 1–4 pick vertices, edges,
 faces or solids, A selects all, Shift+R repeats the last command, / frames
 the selection and Space sets the construction plane from it. Every
 command, with or without a key, is in the palette; right-click one there
-to give it a new shortcut. Changes are kept in
+to give it a new shortcut. Inside a command, Tab (or any digit) opens a
+typed value that takes arithmetic and units (`10+2.5`, `3*4mm`, `1in`,
+`45deg`); Escape drops it back to the pointer. Extrude, like Plasticity's,
+takes Q to join, W to cut, Shift+E to intersect and B for a new body. Changes are kept in
 `~/.config/ductile/keymap.txt` as lines like `Box = Shift+B`.
 
 ## Layout

@@ -71,6 +71,11 @@ pub trait Tool {
     fn typed_value(&mut self, _v: Option<f64>) {}
     /// Axis constraint keys.
     fn constrain_axis(&mut self, _axis: usize) {}
+    /// The command's own keys (Plasticity's in-command keys); true when
+    /// the key was used.
+    fn command_key(&mut self, _key: egui::Key, _m: egui::Modifiers) -> bool {
+        false
+    }
     /// Whether a preview is still computing in the background.
     fn busy(&self) -> bool {
         false
@@ -756,6 +761,7 @@ pub enum ExtrudeOp {
     NewBody,
     Join,
     Cut,
+    Intersect,
 }
 
 /// The visible solid one of whose planar faces holds region `r`, with that
@@ -1276,6 +1282,7 @@ impl ExtrudeTool {
         let d = self.value();
         let (regions, open, normal, body) = (self.regions.clone(), self.open.clone(), self.normal, self.body.clone());
         let onto = self.on_solid_op(d).zip(self.onto.as_ref().map(|o| o.1.clone()));
+        let face_op = self.bool_op(d > 0.0);
         Box::new(move || {
             if d.abs() < 1e-9 {
                 return (None, None);
@@ -1307,13 +1314,13 @@ impl ExtrudeTool {
                     },
                     None => (Some(prism), None),
                 },
-                (Ok(Some(prism)), Some(body)) => {
-                    let op = if d > 0.0 { BoolOp::Union } else { BoolOp::Difference };
-                    match boolean(body, &prism, op) {
+                (Ok(Some(prism)), Some(body)) => match face_op {
+                    None => (Some(prism), None),
+                    Some(op) => match boolean(body, &prism, op) {
                         Ok(b) => (Some(b), None),
                         Err(e) => (None, Some(e.to_string())),
-                    }
-                }
+                    },
+                },
             }
         })
     }
@@ -1321,14 +1328,26 @@ impl ExtrudeTool {
     /// The boolean an extrusion of curves applies to the solid they were
     /// drawn on, if any.
     fn on_solid_op(&self, d: f64) -> Option<ductile_brep::ops::boolean::BoolOp> {
-        use ductile_brep::ops::boolean::BoolOp;
         let (_, _, n) = self.onto.as_ref()?;
+        self.bool_op(self.normal.dot(*n) * d > 0.0)
+    }
+
+    /// The boolean chosen, `auto_union` saying what Auto does.
+    fn bool_op(&self, auto_union: bool) -> Option<ductile_brep::ops::boolean::BoolOp> {
+        use ductile_brep::ops::boolean::BoolOp;
         match self.op {
             ExtrudeOp::NewBody => None,
             ExtrudeOp::Join => Some(BoolOp::Union),
             ExtrudeOp::Cut => Some(BoolOp::Difference),
-            ExtrudeOp::Auto => Some(if self.normal.dot(*n) * d > 0.0 { BoolOp::Union } else { BoolOp::Difference }),
+            ExtrudeOp::Intersect => Some(BoolOp::Intersection),
+            ExtrudeOp::Auto => Some(if auto_union { BoolOp::Union } else { BoolOp::Difference }),
         }
+    }
+
+    /// The object the result replaces, if any.
+    fn replaced(&self) -> Option<ObjectId> {
+        let on = self.onto.as_ref().filter(|_| self.on_solid_op(self.value()).is_some()).map(|o| o.0);
+        self.target.filter(|_| self.op != ExtrudeOp::NewBody).or(on)
     }
 }
 
@@ -1339,7 +1358,18 @@ impl Tool for ExtrudeTool {
     fn hint(&self) -> String {
         match self.bg.latest().and_then(|c| c.1) {
             Some(e) => format!("Extrude failed: {e}"),
-            None => format!("Extrude: move along the normal or type a distance ({:.4}), click or Enter to finish", self.value()),
+            None if self.onto.is_some() || self.body.is_some() => format!(
+                "Extrude ({}): move along the normal or Tab to type a distance ({:.4}); Q join, W cut, Shift+E intersect, B new body",
+                match self.op {
+                    ExtrudeOp::Auto => "auto",
+                    ExtrudeOp::NewBody => "new body",
+                    ExtrudeOp::Join => "join",
+                    ExtrudeOp::Cut => "cut",
+                    ExtrudeOp::Intersect => "intersect",
+                },
+                self.value()
+            ),
+            None => format!("Extrude: move along the normal or Tab to type a distance ({:.4}), click or Enter to finish", self.value()),
         }
     }
     fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
@@ -1370,10 +1400,10 @@ impl Tool for ExtrudeTool {
         if ch {
             self.typed = Some(d);
         }
-        if self.onto.is_some() {
+        if self.onto.is_some() || self.body.is_some() {
             ui.horizontal(|ui| {
                 ui.label("Solid");
-                for (op, name) in [(ExtrudeOp::Auto, "Auto"), (ExtrudeOp::NewBody, "New"), (ExtrudeOp::Join, "Join"), (ExtrudeOp::Cut, "Cut")] {
+                for (op, name) in [(ExtrudeOp::Auto, "Auto"), (ExtrudeOp::NewBody, "New"), (ExtrudeOp::Join, "Join"), (ExtrudeOp::Cut, "Cut"), (ExtrudeOp::Intersect, "Intersect")] {
                     ch |= ui.selectable_value(&mut self.op, op, name).changed();
                 }
             });
@@ -1381,8 +1411,7 @@ impl Tool for ExtrudeTool {
         ch
     }
     fn hidden_objects(&self) -> Vec<ObjectId> {
-        let on = self.onto.as_ref().filter(|_| self.on_solid_op(self.value()).is_some()).map(|o| o.0);
-        match self.target.or(on) {
+        match self.replaced() {
             Some(t) if self.bg.latest().and_then(|r| r.0).is_some() => vec![t],
             _ => vec![],
         }
@@ -1390,11 +1419,23 @@ impl Tool for ExtrudeTool {
     fn typed_value(&mut self, v: Option<f64>) {
         self.typed = v;
     }
+    fn command_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
+        if self.onto.is_none() && self.body.is_none() || m.ctrl || m.alt {
+            return false;
+        }
+        self.op = match (key, m.shift) {
+            (egui::Key::Q, false) => ExtrudeOp::Join,
+            (egui::Key::W, false) => ExtrudeOp::Cut,
+            (egui::Key::E, true) => ExtrudeOp::Intersect,
+            (egui::Key::B, false) => ExtrudeOp::NewBody,
+            _ => return false,
+        };
+        true
+    }
     fn commit(&mut self, doc: &mut Document) -> bool {
         let Some(b) = self.bg.wait(&self.key(), || self.job()).0 else { return false };
         doc.selection.clear();
-        let on = self.onto.as_ref().filter(|_| self.on_solid_op(self.value()).is_some()).map(|o| o.0);
-        match self.target.or(on) {
+        match self.replaced() {
             Some(t) => doc.replace_body(t, b),
             None => {
                 let id = doc.add_body("Extrusion", b);
@@ -3549,6 +3590,29 @@ mod tests {
             assert_eq!(doc.objects.len(), 2, "no new body");
             let v = volume(&doc.object(bx).unwrap().body);
             assert!((v - expect).abs() < 1e-2, "{d}: {v} vs {expect}");
+        }
+    }
+
+    #[test]
+    fn boolean_keys_inside_extrude() {
+        use ductile_brep::profile::{wire_from_segments, Segment};
+        use std::f64::consts::{PI, TAU};
+        let circle = circle_at(DVec3::new(2.0, 1.5, 1.0), 1.0);
+        // Pulled down into the box: Q joins (no change), W cuts, Shift+E
+        // keeps the overlap, B leaves the box alone and adds the cylinder.
+        for (key, shift, expect, objects) in [(egui::Key::Q, false, 12.0, 2), (egui::Key::W, false, 12.0 - 0.5 * PI, 2), (egui::Key::E, true, 0.5 * PI, 2), (egui::Key::B, false, 12.0, 3)] {
+            let mut doc = Document::default();
+            let bx = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 3.0, 1.0)));
+            let c = doc.add_body("Circle", wire_from_segments(&[Segment::new(circle.clone(), 0.0, TAU)]));
+            doc.selection.insert(Pick::Object(c));
+            let mut e = ExtrudeTool::new(&doc).unwrap();
+            let m = if shift { egui::Modifiers::SHIFT } else { egui::Modifiers::NONE };
+            assert!(e.command_key(key, m));
+            e.typed_value(crate::expr::eval("-1/2"));
+            assert!(e.commit(&mut doc));
+            assert_eq!(doc.objects.len(), objects, "{key:?}");
+            let v = volume(&doc.object(bx).unwrap().body);
+            assert!((v - expect).abs() < 1e-2, "{key:?}: {v} vs {expect}");
         }
     }
 
