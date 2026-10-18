@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Topology and modeling operations of the Ductile kernel.
 
+pub mod ops;
 pub mod primitives;
+pub mod profile;
 pub mod tess;
 pub mod topo;
 

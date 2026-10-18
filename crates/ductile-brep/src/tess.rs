@@ -121,12 +121,12 @@ pub fn tessellate(body: &Body, opts: &TessOptions) -> BodyMesh {
 
 /// A boundary sample in UV with its exact 3D position.
 #[derive(Clone, Copy, Debug)]
-struct BSample {
-    uv: DVec2,
-    p: DVec3,
+pub struct BSample {
+    pub uv: DVec2,
+    pub p: DVec3,
 }
 
-fn is_singular(s: &Surface, uv: DVec2) -> bool {
+pub fn is_singular(s: &Surface, uv: DVec2) -> bool {
     match s {
         Surface::Sphere { .. } => (uv.y.abs() - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
         Surface::Cone { radius, half_angle, .. } => (radius + uv.y * half_angle.tan()).abs() < 1e-9,
@@ -139,7 +139,10 @@ fn is_singular(s: &Surface, uv: DVec2) -> bool {
 }
 
 /// Builds the UV polygon of each loop of face `f`.
-fn face_uv_loops(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> Vec<Vec<BSample>> {
+/// UV polylines of every coedge of face `f`, grouped by loop, with seams
+/// placed on the correct side of the period, periodic coordinates unwrapped
+/// continuously and hole loops shifted into the outer loop's period.
+pub fn face_coedge_uvs(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> Vec<Vec<(Coedge, Vec<BSample>)>> {
     let face = body.face(f);
     let surf = &face.surface;
     let pu = surf.period_u();
@@ -246,39 +249,52 @@ fn face_uv_loops(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> Vec<Vec
                 }
             }
         }
-        let mut poly: Vec<BSample> = Vec::new();
-        for s in coedge_uvs {
-            for x in s {
-                if let Some(last) = poly.last() {
-                    if last.uv.distance(x.uv) < 1e-12 {
-                        continue;
-                    }
-                }
-                poly.push(x);
-            }
-        }
-        if poly.len() > 1 && poly[0].uv.distance(poly.last().unwrap().uv) < 1e-9 {
-            poly.pop();
-        }
-        out.push(poly);
+        out.push(l.coedges.iter().copied().zip(coedge_uvs).collect::<Vec<_>>());
     }
-    // Shift hole loops (and loops of faces without seams) into the outer loop's period.
+    // Shift hole loops into the outer loop's period.
     if out.len() > 1 {
-        let (umin, umax) = range(&out[0], |s| s.uv.x);
-        let (vmin, vmax) = range(&out[0], |s| s.uv.y);
+        let all0: Vec<BSample> = out[0].iter().flat_map(|(_, s)| s.iter().copied()).collect();
+        let (umin, umax) = range(&all0, |s| s.uv.x);
+        let (vmin, vmax) = range(&all0, |s| s.uv.y);
         let center = DVec2::new(0.5 * (umin + umax), 0.5 * (vmin + vmax));
         for h in out.iter_mut().skip(1) {
-            let (a, b) = range(h, |s| s.uv.x);
-            let (c, d) = range(h, |s| s.uv.y);
+            let allh: Vec<BSample> = h.iter().flat_map(|(_, s)| s.iter().copied()).collect();
+            let (a, b) = range(&allh, |s| s.uv.x);
+            let (c, d) = range(&allh, |s| s.uv.y);
             let hc = DVec2::new(0.5 * (a + b), 0.5 * (c + d));
-            let aligned = surf.align_periodic(hc, center);
-            let shift = aligned - hc;
-            for s in h.iter_mut() {
-                s.uv += shift;
+            let shift = surf.align_periodic(hc, center) - hc;
+            for (_, s) in h.iter_mut() {
+                for x in s.iter_mut() {
+                    x.uv += shift;
+                }
             }
         }
     }
     out
+}
+
+/// Flattened UV polygon of each loop of face `f`.
+fn face_uv_loops(body: &Body, f: FaceId, edges: &[Vec<(f64, DVec3)>]) -> Vec<Vec<BSample>> {
+    face_coedge_uvs(body, f, edges)
+        .into_iter()
+        .map(|l| {
+            let mut poly: Vec<BSample> = Vec::new();
+            for (_, s) in l {
+                for x in s {
+                    if let Some(last) = poly.last() {
+                        if last.uv.distance(x.uv) < 1e-12 {
+                            continue;
+                        }
+                    }
+                    poly.push(x);
+                }
+            }
+            if poly.len() > 1 && poly[0].uv.distance(poly.last().unwrap().uv) < 1e-9 {
+                poly.pop();
+            }
+            poly
+        })
+        .collect()
 }
 
 fn range(s: &[BSample], f: impl Fn(&BSample) -> f64) -> (f64, f64) {
@@ -287,7 +303,7 @@ fn range(s: &[BSample], f: impl Fn(&BSample) -> f64) -> (f64, f64) {
 
 /// True if counter-clockwise loops in UV correspond to clockwise loops
 /// about the face's outward normal.
-fn face_uv_flipped(body: &Body, f: FaceId) -> bool {
+pub fn face_uv_flipped(body: &Body, f: FaceId) -> bool {
     let face = body.face(f);
     let s = &face.surface;
     // Pick a regular parameter point.
