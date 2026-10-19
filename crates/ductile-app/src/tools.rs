@@ -554,6 +554,11 @@ pub struct TransformTool {
     /// follow with a smooth falloff, and whether the mirror (in u) moves too.
     pub falloff: usize,
     pub mirror: bool,
+    /// Freestyle (F): the move runs from a clicked point to a second one,
+    /// both snapping, instead of from wherever the mouse first was.
+    freestyle: bool,
+    /// In freestyle, whether the start point has been clicked.
+    anchored: bool,
 }
 
 impl TransformTool {
@@ -603,7 +608,7 @@ impl TransformTool {
             }
         }
         let pivot = if bb.is_empty() { DVec3::ZERO } else { bb.center() };
-        Self { kind, targets, controls, surface_controls, faces, edges, pivot, start: None, current: None, axis: None, typed: None, value: 0.0, falloff: 0, mirror: false }
+        Self { kind, targets, controls, surface_controls, faces, edges, pivot, start: None, current: None, axis: None, typed: None, value: 0.0, falloff: 0, mirror: false, freestyle: false, anchored: false }
     }
 
     /// The object's body after applying `m` to it, or to its selected
@@ -741,7 +746,21 @@ impl Tool for TransformTool {
         self.kind == TransformKind::Move
     }
     fn keys(&self) -> Vec<(&'static str, &'static str)> {
-        vec![("X Y Z", "Axis"), ("Tab", "Value"), ("Ctrl", "Snap off")]
+        let mut k = vec![("X Y Z", "Axis"), ("Tab", "Value"), ("Ctrl", "Snap off")];
+        if self.kind == TransformKind::Move {
+            k.push(("F", "Freestyle"));
+        }
+        k
+    }
+    fn command_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
+        if key == egui::Key::F && self.kind == TransformKind::Move && !m.ctrl && !m.alt {
+            self.freestyle = !self.freestyle;
+            self.anchored = false;
+            self.start = None;
+            self.current = None;
+            return true;
+        }
+        false
     }
     fn name(&self) -> &'static str {
         match self.kind {
@@ -757,9 +776,46 @@ impl Tool for TransformTool {
             Some(2) => " along Z",
             _ => "",
         };
+        if self.freestyle {
+            return if self.anchored {
+                format!("Move freestyle{ax}: click where the start point goes")
+            } else {
+                "Move freestyle: click the point to move from".into()
+            };
+        }
         format!("{}{ax}: move the mouse, X/Y/Z to constrain, type a value, click or Enter to confirm, Esc to cancel", self.name())
     }
     fn pointer(&mut self, _doc: &Document, cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if self.freestyle {
+            let at = p.point.or_else(|| p.ray.hit_plane(cplane.frame.origin, cplane.frame.z));
+            if !self.anchored {
+                if p.clicked {
+                    if let Some(a) = at {
+                        self.start = Some(a);
+                        self.current = Some(a);
+                        self.pivot = a;
+                        self.anchored = true;
+                    }
+                }
+                return ToolOutcome::Continue;
+            }
+            if let (Some(s), Some(a)) = (self.start, at) {
+                // With an axis, the move keeps to it through the start point.
+                let a = match self.axis_dir() {
+                    Some(d) => {
+                        let h = p.ray.hit_plane(s, d.cross(p.ray.dir).cross(d).try_normalize().unwrap_or(-p.ray.dir)).unwrap_or(a);
+                        s + d * d.dot(if p.point.is_some() { a - s } else { h - s })
+                    }
+                    None => a,
+                };
+                self.current = Some(a);
+            }
+            self.value = self.matrix().w_axis.truncate().length();
+            if p.clicked {
+                return ToolOutcome::Finished;
+            }
+            return ToolOutcome::Continue;
+        }
         // Work on a plane through the pivot facing the camera (or the axis plane).
         let normal = match (self.kind, self.axis_dir()) {
             (TransformKind::Rotate, Some(a)) => a,
@@ -5347,6 +5403,23 @@ mod tests {
         assert_eq!(o.body.kind, ductile_brep::BodyKind::Wire);
         let bb = o.body.bbox();
         assert!(bb.max.z - bb.min.z < 3e-3 && (bb.min.x + 3.0).abs() < 0.1, "{bb:?}");
+    }
+
+    #[test]
+    fn freestyle_move_goes_point_to_point() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", make_box(&Frame::WORLD, DVec3::splat(1.0)));
+        doc.selection.insert(Pick::Object(id));
+        let mut t = TransformTool::new(TransformKind::Move, &doc);
+        // The mouse wanders before F; freestyle ignores where it was.
+        assert!(!click(&mut t, &doc, DVec3::new(5.0, 5.0, 0.0), false));
+        assert!(t.command_key(egui::Key::F, egui::Modifiers::NONE));
+        assert!(!click(&mut t, &doc, DVec3::new(1.0, 1.0, 0.0), true));
+        assert!(!click(&mut t, &doc, DVec3::new(2.0, 3.0, 0.0), false));
+        assert!(click(&mut t, &doc, DVec3::new(3.0, 1.0, 0.0), true));
+        assert!(t.commit(&mut doc));
+        let bb = doc.object(id).unwrap().body.bbox();
+        assert!((bb.min.x - 2.0).abs() < 0.01 && bb.min.y.abs() < 0.01, "{bb:?}");
     }
 
     /// A click straight down onto the construction plane at `p`.
