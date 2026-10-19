@@ -2379,7 +2379,31 @@ pub enum BlendShape {
     Round,
     /// Curvature continuous with the faces.
     Smooth,
+    /// Circular, sized by the width of its chord rather than its radius.
+    Chordal,
     Chamfer,
+}
+
+/// The angle between the normals of an edge's two faces, `frac` of the
+/// way along it.
+fn edge_turn(b: &Body, e: ductile_brep::EdgeId, frac: f64) -> Option<f64> {
+    let ed = b.edge(e);
+    let p = ed.curve.point(ed.t0 + (ed.t1 - ed.t0) * frac);
+    let ns: Vec<DVec3> = b
+        .edge_faces(e)
+        .iter()
+        .map(|(f, _)| {
+            let uv = b.face(*f).surface.project(p, None);
+            b.face_normal(*f, uv.x, uv.y)
+        })
+        .collect();
+    (ns.len() == 2).then(|| ns[0].angle_between(ns[1])).filter(|a| *a > 1e-6)
+}
+
+/// The radius whose arc spans a chord `c` between faces whose normals are
+/// `turn` apart.
+fn chord_radius(c: f64, turn: f64) -> f64 {
+    c / (2.0 * (turn / 2.0).sin())
 }
 
 pub struct FilletTool {
@@ -2441,11 +2465,27 @@ impl FilletTool {
         use ductile_brep::ops::fillet::{blend_edge_between, blend_edges, blend_edges_variable, Blend};
         let (body, edges, (r, shape, variable, end_radius, limits)) = (self.body.clone(), self.edges.clone(), self.key());
         Box::new(move || {
+            // Chordal: the radius from the chord at each edge's ends; one
+            // fillet where they agree, else a varying one along one edge.
+            let (r, shape, variable, end_radius) = if shape != BlendShape::Chordal || r <= 1e-9 {
+                (r, shape, variable, end_radius)
+            } else {
+                let ends: Option<Vec<(f64, f64)>> = edges.iter().map(|e| Some((chord_radius(r, edge_turn(&body, *e, 0.0)?), chord_radius(r, edge_turn(&body, *e, 1.0)?)))).collect();
+                let Some(ends) = ends else { return (None, Some("chordal fillets need edges between two faces".into())) };
+                let (lo, hi) = ends.iter().fold((f64::MAX, 0.0f64), |(lo, hi), (a, b)| (lo.min(a.min(*b)), hi.max(a.max(*b))));
+                if hi - lo <= 1e-3 * hi {
+                    (0.5 * (lo + hi), BlendShape::Round, false, end_radius)
+                } else if ends.len() == 1 {
+                    (ends[0].0, BlendShape::Round, true, ends[0].1)
+                } else {
+                    return (None, Some("for a chordal fillet the edges must meet their faces at one angle (or pick one edge)".into()));
+                }
+            };
             if r <= 1e-9 {
                 (None, None)
             } else if let Some((s0, s1)) = limits {
                 let blend = match shape {
-                    BlendShape::Round => Blend::Fillet(r),
+                    BlendShape::Round | BlendShape::Chordal => Blend::Fillet(r),
                     BlendShape::Smooth => Blend::Smooth(r),
                     BlendShape::Chamfer => Blend::Chamfer(r),
                 };
@@ -2460,7 +2500,7 @@ impl FilletTool {
                 }
             } else {
                 let blend = match shape {
-                    BlendShape::Round => Blend::Fillet(r),
+                    BlendShape::Round | BlendShape::Chordal => Blend::Fillet(r),
                     BlendShape::Smooth => Blend::Smooth(r),
                     BlendShape::Chamfer => Blend::Chamfer(r),
                 };
@@ -2521,16 +2561,21 @@ impl Tool for FilletTool {
     }
     fn panel(&mut self, ui: &mut egui::Ui) -> bool {
         let mut r = self.value();
-        let mut ch = drag_value(ui, if self.shape == BlendShape::Chamfer { "Distance" } else { "Radius" }, &mut r, 0.01);
+        let label = match self.shape {
+            BlendShape::Chamfer => "Distance",
+            BlendShape::Chordal => "Chord",
+            _ => "Radius",
+        };
+        let mut ch = drag_value(ui, label, &mut r, 0.01);
         if ch {
             self.typed = Some(r.max(0.0));
         }
         ui.horizontal(|ui| {
-            for (shape, label) in [(BlendShape::Round, "Round"), (BlendShape::Smooth, "Smooth (G2)"), (BlendShape::Chamfer, "Chamfer")] {
+            for (shape, label) in [(BlendShape::Round, "Round"), (BlendShape::Chordal, "Chordal"), (BlendShape::Smooth, "Smooth (G2)"), (BlendShape::Chamfer, "Chamfer")] {
                 ch |= ui.radio_value(&mut self.shape, shape, label).changed();
             }
         });
-        if self.shape != BlendShape::Chamfer {
+        if self.shape != BlendShape::Chamfer && self.shape != BlendShape::Chordal {
             ch |= ui.checkbox(&mut self.variable, "Variable radius (straight edges)").changed();
             if self.variable {
                 let mut e = self.end_radius;
@@ -5136,6 +5181,26 @@ mod tests {
         let mut o = ShellTool::new(&doc, OffsetMode::Solid).unwrap();
         o.typed_value(Some(0.1));
         assert!(o.commit(&mut doc));
+    }
+
+    #[test]
+    fn chordal_fillets_size_by_their_chord() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::splat(2.0)));
+        let e = doc.object(id).unwrap().body.edge_ids().next().unwrap();
+        doc.selection.insert(Pick::Edge(id, e));
+        let volume = |shape: BlendShape, value: f64| {
+            let mut f = FilletTool::new(&doc, false).unwrap();
+            f.shape = shape;
+            f.typed = Some(value);
+            let b = (f.job())().0.unwrap();
+            ductile_brep::tess::tessellate(&b, &Default::default()).volume()
+        };
+        // At a right angle the chord is the radius times the square root of two.
+        let round = volume(BlendShape::Round, 0.5);
+        let chordal = volume(BlendShape::Chordal, 0.5 * 2f64.sqrt());
+        assert!((round - chordal).abs() < 1e-9, "{round} vs {chordal}");
+        assert!(round < 8.0);
     }
 
     #[test]

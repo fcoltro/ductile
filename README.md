@@ -159,7 +159,9 @@ code from them.
   where a corner's third edge stays sharp.
   Straight edges between planes can also take a radius varying linearly
   along the edge (Variable radius in the Fillet panel): the round blend is
-  then an exact cone, the smooth one its G2 counterpart.
+  then an exact cone, the smooth one its G2 counterpart. Chordal sizes a
+  round blend by the width of its chord instead of its radius; along one
+  edge whose faces open up, the radius varies to keep the chord.
   Limit points (L, one straight edge between planes) blend only part of
   the edge, between two fractions along it, ending square where the sharp
   edge carries on.
