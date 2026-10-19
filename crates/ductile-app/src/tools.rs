@@ -2422,11 +2422,13 @@ pub struct FilletTool {
     /// (a single straight edge between flat faces).
     pub limited: bool,
     pub limits: (f64, f64),
+    /// Smooth (G2) sections: 0.5 the default, higher fuller.
+    pub tension: f64,
     typed: Option<f64>,
     bg: Background<FilletKey, (Option<Body>, Option<String>)>,
 }
 
-type FilletKey = (f64, BlendShape, bool, f64, Option<(f64, f64)>);
+type FilletKey = (f64, BlendShape, bool, f64, Option<(f64, f64)>, f64);
 
 impl FilletTool {
     /// Starts on the selected edges of the first object that has any.
@@ -2449,7 +2451,7 @@ impl FilletTool {
             .sum();
         let dir = (-n).try_normalize().unwrap_or(DVec3::Z);
         let shape = if chamfer { BlendShape::Chamfer } else { BlendShape::Round };
-        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, shape, variable: false, end_radius: 1.0, limited: false, limits: (0.25, 0.75), typed: None, bg: Background::default() })
+        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, shape, variable: false, end_radius: 1.0, limited: false, limits: (0.25, 0.75), tension: 0.5, typed: None, bg: Background::default() })
     }
 
     fn value(&self) -> f64 {
@@ -2457,14 +2459,14 @@ impl FilletTool {
     }
 
     fn key(&self) -> FilletKey {
-        (self.value(), self.shape, self.variable, self.end_radius, (self.limited && self.edges.len() == 1).then_some(self.limits))
+        (self.value(), self.shape, self.variable, self.end_radius, (self.limited && self.edges.len() == 1).then_some(self.limits), self.tension)
     }
 
     /// The blend computation for the current values, owning its inputs.
     fn job(&self) -> Box<dyn FnOnce() -> (Option<Body>, Option<String>) + Send> {
         use ductile_brep::ops::fillet::{blend_edge_between, blend_edges, blend_edges_variable, Blend};
-        let (body, edges, (r, shape, variable, end_radius, limits)) = (self.body.clone(), self.edges.clone(), self.key());
-        Box::new(move || {
+        let (body, edges, (r, shape, variable, end_radius, limits, tension)) = (self.body.clone(), self.edges.clone(), self.key());
+        Box::new(move || ductile_brep::ops::fillet::with_tension(tension, || {
             // Chordal: the radius from the chord at each edge's ends; one
             // fillet where they agree, else a varying one along one edge.
             let (r, shape, variable, end_radius) = if shape != BlendShape::Chordal || r <= 1e-9 {
@@ -2509,7 +2511,7 @@ impl FilletTool {
                     Err(e) => (None, Some(e.to_string())),
                 }
             }
-        })
+        }))
     }
 }
 
@@ -2575,6 +2577,13 @@ impl Tool for FilletTool {
                 ch |= ui.radio_value(&mut self.shape, shape, label).changed();
             }
         });
+        if self.shape == BlendShape::Smooth {
+            let mut t = self.tension;
+            if drag_value(ui, "Tension", &mut t, 0.01) {
+                self.tension = t.clamp(0.1, 0.8);
+                ch = true;
+            }
+        }
         if self.shape != BlendShape::Chamfer && self.shape != BlendShape::Chordal {
             ch |= ui.checkbox(&mut self.variable, "Variable radius (straight edges)").changed();
             if self.variable {

@@ -288,7 +288,7 @@ pub(crate) fn section_ctrl(blend: Blend, c: DVec3, p1: DVec3, p2: DVec3) -> Vec<
     let (x, w) = arc_mid(c, p1, p2);
     match blend {
         Blend::Smooth(_) => {
-            let (a, b) = (0.3, 0.6);
+            let (a, b) = super::fillet::smooth_section_ab();
             [p1, p1.lerp(x, a), p1.lerp(x, b), p2.lerp(x, b), p2.lerp(x, a), p2].iter().map(|p| p.extend(1.0)).collect()
         }
         _ => vec![p1.extend(1.0), (x * w).extend(w), p2.extend(1.0)],

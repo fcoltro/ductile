@@ -45,6 +45,27 @@ pub enum FilletError {
 }
 
 thread_local! {
+    /// Tension of smooth (G2) blend sections; 0.5 is the default shape.
+    static TENSION: std::cell::Cell<f64> = const { std::cell::Cell::new(0.5) };
+}
+
+/// Runs `f` with smooth (G2) blends at tension `t`: 0.5 by default,
+/// higher sections fuller (nearer the sharp corner), lower flatter.
+pub fn with_tension<R>(t: f64, f: impl FnOnce() -> R) -> R {
+    let old = TENSION.replace(t.clamp(0.1, 0.8));
+    let out = f();
+    TENSION.set(old);
+    out
+}
+
+/// Where a smooth section's second and third control points sit along
+/// each face's tangent, as fractions of the way to the corner.
+pub(crate) fn smooth_section_ab() -> (f64, f64) {
+    let t = TENSION.get();
+    (0.6 * t, 1.2 * t)
+}
+
+thread_local! {
     /// Set while retrying a blend with edges between planes and cylinders
     /// rolled rather than given exact tools.
     static ROLL_EXTRUSIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -1491,6 +1512,24 @@ mod smooth_tests {
         let removed = smooth_corner_area(r) * edges + 8.0 * r * r * r * crate::ops::corner::removed_fraction(80);
         let expect = w * d * h - removed;
         assert!((vol(&f) - expect).abs() < 2e-3 * removed, "{} vs {expect}", vol(&f));
+    }
+
+    #[test]
+    fn smooth_blends_take_a_tension() {
+        // Fuller sections (higher tension) leave more material, and the
+        // corners still close up tangentially.
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let all: Vec<EdgeId> = b.edge_ids().collect();
+        let vols: Vec<f64> = [0.3, 0.5, 0.7]
+            .iter()
+            .map(|t| {
+                let f = with_tension(*t, || blend_edges(&b, &all, Blend::Smooth(0.5))).unwrap();
+                assert_eq!(open_edges(&f), 0);
+                assert!(worst_crease(&f) < 1e-3, "tension {t}: {}", worst_crease(&f));
+                vol(&f)
+            })
+            .collect();
+        assert!(vols[0] < vols[1] && vols[1] < vols[2], "{vols:?}");
     }
 
     #[test]

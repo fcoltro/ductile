@@ -27,15 +27,12 @@ use ductile_geom::nurbs::basis::{ders_basis_funs, find_span};
 use ductile_geom::nurbs::curve::solve_dense;
 use ductile_geom::{Curve3, DVec2, DVec3, DVec4, Frame, NurbsCurve, NurbsSurface, Surface};
 
-/// The normalized smooth section from `(1, 0)` to `(0, 1)`.
-const SECTION: [DVec2; 6] = [
-    DVec2::new(1.0, 0.0),
-    DVec2::new(1.0, 0.3),
-    DVec2::new(1.0, 0.6),
-    DVec2::new(0.6, 1.0),
-    DVec2::new(0.3, 1.0),
-    DVec2::new(0.0, 1.0),
-];
+/// The normalized smooth section from `(1, 0)` to `(0, 1)`, at the
+/// current tension.
+fn section_pts() -> [DVec2; 6] {
+    let (a, b) = super::fillet::smooth_section_ab();
+    [DVec2::new(1.0, 0.0), DVec2::new(1.0, a), DVec2::new(1.0, b), DVec2::new(b, 1.0), DVec2::new(a, 1.0), DVec2::new(0.0, 1.0)]
+}
 
 const DEGREE: usize = 5;
 /// Control points per direction of the fitted patches and inner curves.
@@ -49,7 +46,7 @@ fn knots() -> Vec<f64> {
 }
 
 fn section(u: f64) -> DVec2 {
-    let mut p = SECTION;
+    let mut p = section_pts();
     for k in 1..6 {
         for i in 0..6 - k {
             p[i] = p[i].lerp(p[i + 1], u);
@@ -95,7 +92,7 @@ fn half_param(s: f64) -> f64 {
 /// Quintic Bézier half of the section from `(1, 0)` to the middle, mapped
 /// to world points by the affine `map`, with the patch knots inserted.
 fn half_curve(map: impl Fn(DVec2) -> DVec3) -> NurbsCurve {
-    let mut p = SECTION;
+    let mut p = section_pts();
     let mut left = [DVec2::ZERO; 6];
     for (j, slot) in left.iter_mut().enumerate() {
         *slot = p[0];

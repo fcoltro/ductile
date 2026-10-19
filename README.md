@@ -153,7 +153,7 @@ code from them.
   top rim in one go; or a side edge between a spline face and a plane,
   closed off by the caps it runs into. Blends can be round, smooth (G2:
   curvature-continuous sections that leave the faces with zero curvature,
-  for class-A reflections) or chamfered. Smooth blends get faired,
+  for class-A reflections, fuller or flatter with a tension) or chamfered. Smooth blends get faired,
   curvature-continuous corner patches where three of them meet, between
   faces at any angle (a box, a hexagonal prism), and meet in clean mitres
   where a corner's third edge stays sharp.
