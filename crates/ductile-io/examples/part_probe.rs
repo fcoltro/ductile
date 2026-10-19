@@ -2,7 +2,8 @@
 //! Blends on everyday parts, one case each: reports which ones fail or
 //! leave a broken solid.
 //!
-//! cargo run --release -p ductile-brep --example part_probe
+//! cargo run --release -p ductile-io --example part_probe [OUT_DIR]
+//! With OUT_DIR, each result is also written there as STEP to look at.
 
 use ductile_brep::ops::boolean::{boolean, open_edges, BoolOp};
 use ductile_brep::ops::fillet::{blend_edges, Blend};
@@ -30,6 +31,11 @@ fn all(b: &Body) -> Vec<EdgeId> {
 fn report(name: &str, before: &Body, r: Result<Body, impl std::fmt::Display>) -> Option<Body> {
     match r {
         Ok(b) => {
+            if let Some(dir) = std::env::args().nth(1) {
+                let slug: String = name.trim().chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
+                let mut f = std::fs::File::create(std::path::Path::new(&dir).join(format!("{slug}.step"))).unwrap();
+                ductile_io::step::write_step(&mut f, name, &[(name, &b)]).unwrap();
+            }
             let open = open_edges(&b);
             println!("{:<44} {} faces, volume {:.4} -> {:.4}{}", name, b.faces.len(), vol(before), vol(&b), if open > 0 { format!(", {open} OPEN EDGES") } else { String::new() });
             Some(b)
