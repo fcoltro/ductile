@@ -42,6 +42,7 @@ pub enum Command {
     ConstrainedSurface,
     SelectPrevious,
     UnwrapFace,
+    PolySplines,
     MakeUnique,
     SelectAll,
     DeselectAll,
@@ -203,6 +204,7 @@ impl Command {
         Command::ConstrainedSurface,
         Command::SelectPrevious,
         Command::UnwrapFace,
+        Command::PolySplines,
         Command::MakeUnique,
         Command::SelectAll,
         Command::DeselectAll,
@@ -365,6 +367,7 @@ impl Command {
             ConstrainedSurface => "Constrained surface (through points)",
             SelectPrevious => "Select previous (inputs of the last operation)",
             UnwrapFace => "Unwrap face (lay flat)",
+            PolySplines => "PolySplines (mesh to smooth surfaces)",
             MakeUnique => "Make instance unique",
             SelectAll => "Select all",
             DeselectAll => "Deselect all",
@@ -723,6 +726,12 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 app.doc.selection.extend(made.into_iter().map(Pick::Object));
                 app.start_tool(std::boxed::Box::new(TransformTool::new(TransformKind::Move, &app.doc)));
             }
+        }
+        PolySplines => {
+            app.status = match polyspline_selected(&mut app.doc) {
+                Ok(n) => format!("PolySplines: {n} smooth patches; the mesh is hidden"),
+                Err(e) => e,
+            };
         }
         UnwrapFace => {
             let faces = app.doc.selected_faces();
@@ -1382,6 +1391,34 @@ pub fn import_svg(doc: &mut Document, path: &std::path::Path) -> Result<usize, S
 
 /// Adds an OBJ, STL or 3MF file's meshes as reference mesh objects (an OBJ's
 /// objects grouped under the file's name); returns the triangle count.
+/// Turns the selected mesh objects into smooth spline bodies (PolySplines),
+/// hiding the meshes; the number of patches made.
+pub fn polyspline_selected(doc: &mut Document) -> Result<usize, String> {
+    let meshes: Vec<(crate::document::ObjectId, String, ductile_brep::TriMesh)> = doc.selected_objects().into_iter().filter_map(|id| doc.object(id).and_then(|o| o.body.mesh.clone().map(|m| (id, o.name.clone(), m)))).collect();
+    if meshes.is_empty() {
+        return Err("PolySplines: select an imported mesh (OBJ quads work best)".into());
+    }
+    let mut made = Vec::new();
+    for (id, name, m) in &meshes {
+        let faces: Vec<Vec<usize>> = if m.polygons.is_empty() { m.triangles.iter().map(|t| t.iter().map(|i| *i as usize).collect()).collect() } else { m.polygons.iter().map(|p| p.iter().map(|i| *i as usize).collect()).collect() };
+        let cage = ductile_brep::ops::polysplines::PolyMesh { points: m.positions.clone(), faces };
+        let b = ductile_brep::ops::polysplines::polysplines(&cage).map_err(|e| format!("PolySplines: {e}"))?;
+        made.push((*id, name.clone(), b));
+    }
+    doc.checkpoint("PolySplines");
+    doc.selection.clear();
+    let mut patches = 0;
+    for (mesh, name, b) in made {
+        patches += b.faces.len();
+        if let Some(o) = doc.objects.iter_mut().find(|o| o.id == mesh) {
+            o.visible = false;
+        }
+        let id = doc.add_body(&format!("{name} splines"), b);
+        doc.selection.insert(Pick::Object(id));
+    }
+    Ok(patches)
+}
+
 pub fn import_mesh(doc: &mut Document, path: &std::path::Path) -> Result<usize, String> {
     let stem = path.file_stem().map_or("Mesh".to_string(), |s| s.to_string_lossy().into_owned());
     let meshes = if is_ext(path, "stl") {
@@ -1908,6 +1945,28 @@ pub fn demo_scene(doc: &mut Document) {
 #[cfg(test)]
 mod native_tests {
     use super::*;
+
+    #[test]
+    fn splines_an_imported_quad_mesh() {
+        let dir = std::env::temp_dir().join(format!("ductile-ps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cube.obj");
+        let mut obj = String::new();
+        for i in 0..8 {
+            obj += &format!("v {} {} {}\n", i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        }
+        obj += "f 1 3 4 2\nf 5 6 8 7\nf 1 2 6 5\nf 3 7 8 4\nf 1 5 7 3\nf 2 4 8 6\n";
+        std::fs::write(&path, obj).unwrap();
+        let mut doc = Document::default();
+        import_mesh(&mut doc, &path).unwrap();
+        let mesh = doc.objects[0].id;
+        assert_eq!(doc.objects[0].body.mesh.as_ref().unwrap().polygons.len(), 6, "the quads are kept");
+        assert_eq!(polyspline_selected(&mut doc).unwrap(), 96);
+        let made = doc.objects.last().unwrap();
+        assert_eq!(made.body.kind, ductile_brep::BodyKind::Solid);
+        assert!(!doc.object(mesh).unwrap().visible);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn appends_files_and_numbers_versions() {

@@ -190,6 +190,12 @@ code from them.
   (binary or ASCII) and 3MF come in as reference meshes, shaded smooth across
   gentle bends and sharp at creases, that move, hide, snap and measure
   like any object. An OBJ's objects and a 3MF's build items become a group.
+- PolySplines (Edit menu or palette) turns a selected mesh, best a quad
+  cage from a subdivision modeller, into a smooth solid (or sheet, when
+  open) of untrimmed spline patches: one exact bicubic patch per regular
+  quad, curvature continuous with its neighbours, and a tangent N-sided
+  fill round each vertex where three, five or more quads meet. Triangles
+  and other polygons are subdivided first. The mesh is hidden.
 - STEP import (File > Import STEP, or `ductile part.step`): planes,
   cylinders, cones, spheres, tori, B-spline and rational surfaces, surfaces
   of extrusion and revolution, in any length unit. Parts written by

@@ -839,8 +839,6 @@ fn fit_g1(sides: [&NurbsCurve; 4], cross: &dyn Fn(DVec3) -> Option<(DVec3, DVec3
 /// tangent planes, smooth (C1) across the spokes, their first rows round
 /// the centre in one plane, and the rest faired.
 pub fn patch_n_g1(boundary: &Loop3, neighbours: &[Neighbour]) -> Option<Body> {
-    use crate::ops::corner::Lsq;
-    use ductile_geom::nurbs::basis::{basis_funs, ders_basis_funs, find_span};
     if neighbours.len() != boundary.segments.len() {
         return None;
     }
@@ -867,6 +865,22 @@ pub fn patch_n_g1(boundary: &Loop3, neighbours: &[Neighbour]) -> Option<Body> {
         cs.push(fit_uniform(&halves[k].0, 10)?);
         cs.push(fit_uniform(&halves[(k + ns - 1) % ns].1.reversed(), 10)?);
     }
+    let mut sw = Sewer::new(BodyKind::Sheet, tolerance(std::slice::from_ref(boundary)));
+    for s in fill_quads(&cs, &|i, t| cross(cs[i].point(t)))? {
+        sw.patch(s);
+    }
+    Some(sw.body)
+}
+
+/// The quadrilaterals of an N-sided fill (see [`patch_n_g1`]) from its
+/// edges: `cs[2k]` runs from corner k along side k to its middle,
+/// `cs[2k + 1]` from corner k back along side k - 1 to that one's middle;
+/// all non-rational cubics on the same knots. `cross(i, t)` gives the
+/// faces' tangent plane at parameter `t` of edge `i`, as for [`fit_g1`].
+pub(crate) fn fill_quads(cs: &[NurbsCurve], cross: &dyn Fn(usize, f64) -> Option<(DVec3, DVec3)>) -> Option<Vec<NurbsSurface>> {
+    use crate::ops::corner::Lsq;
+    use ductile_geom::nurbs::basis::{basis_funs, ders_basis_funs, find_span};
+    let ns = cs.len() / 2;
     let (deg, knots, n) = (cs[0].degree, cs[0].knots.clone(), cs[0].ctrl.len());
     let centre = cs.iter().flat_map(|c| c.ctrl.iter().map(|h| h.truncate() / h.w)).sum::<DVec3>() / (cs.len() * n) as f64;
     let cp = |c: &NurbsCurve, i: usize| c.ctrl[i].truncate() / c.ctrl[i].w - centre;
@@ -936,13 +950,14 @@ pub fn patch_n_g1(boundary: &Loop3, neighbours: &[Neighbour]) -> Option<Body> {
         let f = deg as f64 / (knots[deg + 1] - knots[1]);
         for (k, g) in grids.iter().enumerate() {
             for along_u in [true, false] {
-                let curve = &cs[if along_u { 2 * k } else { 2 * k + 1 }];
+                let edge = if along_u { 2 * k } else { 2 * k + 1 };
+                let curve = &cs[edge];
                 let at_grid = |m: usize, row: usize| if along_u { g[m][row] } else { g[row][m] };
                 let samples = 4 * n;
                 for smp in 0..samples {
                     let t = knots[deg] + (knots[n] - knots[deg]) * (smp as f64 + 0.5) / samples as f64;
                     let at = curve.point(t);
-                    let Some((nrm, d)) = cross(at) else { continue };
+                    let Some((nrm, d)) = cross(edge, t) else { continue };
                     // How far across: the arc leaving along d to the
                     // piece's opposite side, a spoke (from the last fit, or
                     // guessed straight from the side's middle to the hub).
@@ -1088,11 +1103,7 @@ pub fn patch_n_g1(boundary: &Loop3, neighbours: &[Neighbour]) -> Option<Body> {
             .collect();
         x = build(Some(&ss), Some(nc), Some(&seams));
     }
-    let mut sw = Sewer::new(BodyKind::Sheet, tolerance(std::slice::from_ref(boundary)));
-    for s in surfaces(&x) {
-        sw.patch(s);
-    }
-    Some(sw.body)
+    Some(surfaces(&x))
 }
 
 /// A cubic with `m` control points on uniform knots over [0, 1] fitted to

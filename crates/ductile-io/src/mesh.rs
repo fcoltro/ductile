@@ -120,7 +120,7 @@ pub fn read_stl(data: &[u8]) -> crate::Result<TriMesh> {
 /// polygons split into triangles.
 pub fn read_obj(text: &str) -> crate::Result<Vec<(String, TriMesh)>> {
     let mut verts: Vec<DVec3> = vec![];
-    let mut out: Vec<(String, Vec<[u32; 3]>)> = vec![(String::new(), vec![])];
+    let mut out: Vec<(String, Vec<Vec<u32>>)> = vec![(String::new(), vec![])];
     for line in text.lines() {
         let mut w = line.split_whitespace();
         match w.next() {
@@ -140,9 +140,8 @@ pub fn read_obj(text: &str) -> crate::Result<Vec<(String, TriMesh)>> {
                     .filter(|i| *i >= 0 && (*i as usize) < verts.len())
                     .map(|i| i as u32)
                     .collect();
-                let tris = &mut out.last_mut().unwrap().1;
-                for k in 1..idx.len().saturating_sub(1) {
-                    tris.push([idx[0], idx[k], idx[k + 1]]);
+                if idx.len() >= 3 {
+                    out.last_mut().unwrap().1.push(idx);
                 }
             }
             Some("o") | Some("g") => {
@@ -159,17 +158,24 @@ pub fn read_obj(text: &str) -> crate::Result<Vec<(String, TriMesh)>> {
     let meshes: Vec<(String, TriMesh)> = out
         .into_iter()
         .filter(|o| !o.1.is_empty())
-        .map(|(name, tris)| {
+        .map(|(name, polys)| {
             // Each object keeps only the vertices it uses.
             let mut map: std::collections::HashMap<u32, u32> = Default::default();
             let mut m = TriMesh::default();
-            for t in tris {
-                m.triangles.push(t.map(|i| {
-                    *map.entry(i).or_insert_with(|| {
-                        m.positions.push(verts[i as usize]);
-                        m.positions.len() as u32 - 1
+            for poly in polys {
+                let local: Vec<u32> = poly
+                    .iter()
+                    .map(|&i| {
+                        *map.entry(i).or_insert_with(|| {
+                            m.positions.push(verts[i as usize]);
+                            m.positions.len() as u32 - 1
+                        })
                     })
-                }));
+                    .collect();
+                for k in 1..local.len() - 1 {
+                    m.triangles.push([local[0], local[k], local[k + 1]]);
+                }
+                m.polygons.push(local);
             }
             (name, m)
         })

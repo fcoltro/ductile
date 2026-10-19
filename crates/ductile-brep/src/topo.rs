@@ -110,6 +110,10 @@ pub enum BodyKind {
 pub struct TriMesh {
     pub positions: Vec<DVec3>,
     pub triangles: Vec<[u32; 3]>,
+    /// The polygons the triangles were cut from, when the file had them
+    /// (OBJ quads): a subdivision cage for PolySplines.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub polygons: Vec<Vec<u32>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

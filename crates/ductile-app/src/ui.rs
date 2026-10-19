@@ -49,7 +49,7 @@ fn app_menu(app: &mut DuctileApp, ui: &mut egui::Ui) {
         }
     });
     ui.menu_button("Edit", |ui| {
-        for c in [Command::Undo, Command::Redo, Command::Duplicate, Command::Instance, Command::MakeUnique, Command::DeleteRedundant, Command::CompleteEdge, Command::UnwrapFace, Command::Delete, Command::SelectAll, Command::DeselectAll, Command::SelectPrevious, Command::Hide, Command::Isolate, Command::UnhideAll] {
+        for c in [Command::Undo, Command::Redo, Command::Duplicate, Command::Instance, Command::MakeUnique, Command::DeleteRedundant, Command::CompleteEdge, Command::UnwrapFace, Command::PolySplines, Command::Delete, Command::SelectAll, Command::DeselectAll, Command::SelectPrevious, Command::Hide, Command::Isolate, Command::UnhideAll] {
             menu_item(app, ui, c);
         }
     });
