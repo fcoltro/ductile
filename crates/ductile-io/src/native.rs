@@ -54,11 +54,24 @@ pub struct NativeDocument {
     /// Placed dimensions: the two points and the offset of the line.
     #[serde(default)]
     pub dimensions: Vec<[[f64; 3]; 3]>,
+    #[serde(default)]
+    pub images: Vec<NativeImage>,
+}
+
+/// A reference image: the file it shows and where it is placed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NativeImage {
+    pub path: String,
+    /// Centre, x axis and normal.
+    pub frame: [[f64; 3]; 3],
+    pub width: f64,
+    pub opacity: f32,
+    pub visible: bool,
 }
 
 impl NativeDocument {
     pub fn new(objects: Vec<NativeObject>) -> Self {
-        Self { format: "ductile".into(), version: FORMAT_VERSION, objects, groups: vec![], dimensions: vec![] }
+        Self { format: "ductile".into(), version: FORMAT_VERSION, objects, groups: vec![], dimensions: vec![], images: vec![] }
     }
 
     pub fn to_json(&self) -> crate::Result<String> {

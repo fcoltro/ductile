@@ -138,6 +138,23 @@ struct GpuObject {
     visible: bool,
 }
 
+struct GpuImage {
+    ubo: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    /// The pixels uploaded: identity of the shared buffer.
+    key: usize,
+}
+
+/// A reference image as drawn: shared RGBA pixels, size, the four corners
+/// (bottom left, bottom right, top right, top left) and opacity.
+pub struct ImageDraw {
+    pub id: u64,
+    pub pixels: std::sync::Arc<Vec<u8>>,
+    pub size: [u32; 2],
+    pub corners: [glam::DVec3; 4],
+    pub opacity: f32,
+}
+
 struct Targets {
     size: [u32; 2],
     msaa_view: wgpu::TextureView,
@@ -157,6 +174,10 @@ pub struct ViewportRenderer {
     line_pipeline: wgpu::RenderPipeline,
     overlay_pipeline: wgpu::RenderPipeline,
     bg_pipeline: wgpu::RenderPipeline,
+    image_pipeline: wgpu::RenderPipeline,
+    image_bgl: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    images: Vec<(u64, GpuImage)>,
     targets: Option<Targets>,
     objects: HashMap<u64, GpuObject>,
     pub xray: bool,
@@ -340,7 +361,60 @@ impl ViewportRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("image shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("image.wgsl").into()),
+        });
+        let image_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("image bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+            ],
+        });
+        let image_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("image layout"),
+            bind_group_layouts: &[Some(&cam_bgl), Some(&image_bgl)],
+            immediate_size: 0,
+        });
+        let image_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("reference images"),
+            layout: Some(&image_layout),
+            vertex: wgpu::VertexState { module: &image_shader, entry_point: Some("vs_image"), buffers: &[], compilation_options: Default::default() },
+            fragment: Some(wgpu::FragmentState {
+                module: &image_shader,
+                entry_point: Some("fs_image"),
+                targets: &[Some(wgpu::ColorTargetState { format: COLOR_FORMAT, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState { cull_mode: None, ..Default::default() },
+            depth_stencil: depth(false, wgpu::CompareFunction::LessEqual),
+            multisample: ms,
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("image sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         Self {
+            image_pipeline,
+            image_bgl,
+            sampler,
+            images: Vec::new(),
             device,
             queue,
             cam_buf,
@@ -504,6 +578,55 @@ impl ViewportRenderer {
         self.targets = Some(Targets { size, msaa_view, depth_view, resolve_view, texture_id });
     }
 
+    /// Brings the reference images up to date: new pixels are uploaded,
+    /// placement and opacity rewritten, removed images dropped.
+    pub fn set_images(&mut self, draws: &[ImageDraw]) {
+        self.images.retain(|(id, _)| draws.iter().any(|d| d.id == *id));
+        for d in draws {
+            let key = std::sync::Arc::as_ptr(&d.pixels) as usize;
+            let mut u = [0f32; 20];
+            for (i, c) in d.corners.iter().enumerate() {
+                u[i * 4..i * 4 + 3].copy_from_slice(&c.as_vec3().to_array());
+                u[i * 4 + 3] = 1.0;
+            }
+            u[16] = d.opacity;
+            if let Some((_, g)) = self.images.iter().find(|(id, g)| *id == d.id && g.key == key) {
+                self.queue.write_buffer(&g.ubo, 0, bytemuck::cast_slice(&u));
+                continue;
+            }
+            self.images.retain(|(id, _)| *id != d.id);
+            let size = wgpu::Extent3d { width: d.size[0].max(1), height: d.size[1].max(1), depth_or_array_layers: 1 };
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("reference image"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &d.pixels,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * size.width), rows_per_image: Some(size.height) },
+                size,
+            );
+            let view = tex.create_view(&Default::default());
+            let ubo = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: Some("image ubo"), contents: bytemuck::cast_slice(&u), usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST });
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("image bg"),
+                layout: &self.image_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: ubo.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                ],
+            });
+            self.images.push((d.id, GpuImage { ubo, bind_group, key }));
+        }
+    }
+
     /// Renders the scene and returns the egui texture holding the result.
     pub fn render(
         &mut self,
@@ -578,6 +701,13 @@ impl ViewportRenderer {
                 pass.set_vertex_buffer(0, o.vbuf.slice(..));
                 pass.set_index_buffer(o.ibuf.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..o.index_count, 0, 0..1);
+            }
+            if !self.images.is_empty() {
+                pass.set_pipeline(&self.image_pipeline);
+                for (_, g) in &self.images {
+                    pass.set_bind_group(1, &g.bind_group, &[]);
+                    pass.draw(0..6, 0..1);
+                }
             }
             pass.set_pipeline(&self.line_pipeline);
             for o in self.objects.values().filter(|o| o.visible) {

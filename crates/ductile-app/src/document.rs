@@ -101,6 +101,8 @@ pub struct Document {
     pub objects: Vec<Object>,
     pub groups: Vec<Group>,
     pub dimensions: Vec<Dimension>,
+    /// Reference images to model over (outside undo).
+    pub images: Vec<crate::refimage::RefImage>,
     /// The active collection: new objects go into it.
     pub active_group: Option<GroupId>,
     pub selection: BTreeSet<Pick>,
@@ -122,6 +124,7 @@ impl Default for Document {
             objects: vec![],
             groups: vec![],
             dimensions: vec![],
+            images: vec![],
             active_group: None,
             selection: BTreeSet::new(),
             hover: None,

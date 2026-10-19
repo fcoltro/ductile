@@ -36,6 +36,7 @@ egui-wgpu = "0.37"
 egui = "0.37"
 log = "0.4"
 png = "0.18"
+jpeg-decoder = { version = "0.3", default-features = false }
 env_logger = "0.11"
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 ttf-parser = "0.25"

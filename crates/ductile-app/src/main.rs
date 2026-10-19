@@ -18,6 +18,7 @@ mod document;
 mod icons;
 mod picking;
 mod recent;
+mod refimage;
 mod select;
 mod render;
 mod text;

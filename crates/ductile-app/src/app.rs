@@ -205,6 +205,14 @@ impl DuctileApp {
 
     fn sync_renderer(&mut self) {
         let Some(r) = self.renderer.as_mut() else { return };
+        let images: Vec<crate::render::ImageDraw> = self
+            .doc
+            .images
+            .iter()
+            .filter(|i| i.visible)
+            .map(|i| crate::render::ImageDraw { id: i.id, pixels: i.pixels.clone(), size: i.size, corners: i.corners(), opacity: i.opacity })
+            .collect();
+        r.set_images(&images);
         let ids: std::collections::HashSet<ObjectId> = self.doc.objects.iter().map(|o| o.id).collect();
         self.uploaded.retain(|id, _| ids.contains(id));
         r.retain_objects(|id| ids.contains(&id) || id == PREVIEW_ID);

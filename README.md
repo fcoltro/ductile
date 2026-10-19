@@ -162,6 +162,9 @@ code from them.
   and silhouettes as an SVG drawing, with the lines behind surfaces dashed
   in their own group. Headless: `--export-hidden-line OUT.svg` (with
   `--camera` to choose the view).
+- Reference images (File > Reference image): a PNG or JPEG placed on the
+  construction plane to model over, with opacity, size, centre, turn and
+  flip in the side panel; saved with the document by path.
 - Mesh import (File > Import mesh, or `ductile scan.stl`): OBJ, STL
   (binary or ASCII) and 3MF come in as reference meshes, shaded smooth across
   gentle bends and sharp at creases, that move, hide, snap and measure

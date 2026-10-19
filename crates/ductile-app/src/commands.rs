@@ -19,6 +19,7 @@ pub enum Command {
     ImportStep,
     ImportSvg,
     ImportMesh,
+    ImportImage,
     ExportStep,
     ExportStl,
     ExportObj,
@@ -157,6 +158,7 @@ impl Command {
         Command::ImportStep,
         Command::ImportSvg,
         Command::ImportMesh,
+        Command::ImportImage,
         Command::ExportStep,
         Command::ExportStl,
         Command::ExportObj,
@@ -296,6 +298,7 @@ impl Command {
             ImportStep => "Import STEP…",
             ImportSvg => "Import SVG curves…",
             ImportMesh => "Import mesh (OBJ, STL, 3MF)…",
+            ImportImage => "Reference image (PNG, JPEG)…",
             ExportStep => "Export STEP…",
             ExportStl => "Export STL…",
             ExportObj => "Export OBJ…",
@@ -505,6 +508,14 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                         format!("Imported {n} triangle(s) from {}", path.display())
                     }
                     Err(e) => format!("Mesh import failed: {e}"),
+                };
+            }
+        }
+        ImportImage => {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg"]).pick_file() {
+                app.status = match add_reference_image(&mut app.doc, &path) {
+                    Ok(()) => format!("Placed {} on the construction plane", path.display()),
+                    Err(e) => format!("Could not open {}: {e}", path.display()),
                 };
             }
         }
@@ -1224,6 +1235,16 @@ pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), Strin
         });
     }
     doc.dimensions = nd.dimensions.iter().map(|[a, b, o]| crate::document::Dimension { a: DVec3::from_array(*a), b: DVec3::from_array(*b), offset: DVec3::from_array(*o) }).collect();
+    for im in &nd.images {
+        // Pictures are kept by path; a missing one is skipped.
+        let path = std::path::PathBuf::from(&im.path);
+        if add_reference_image(doc, &path).is_ok() {
+            if let Some(i) = doc.images.last_mut() {
+                let [o, x, z] = im.frame.map(DVec3::from_array);
+                (i.frame, i.width, i.opacity, i.visible) = (Frame::new(o, z, x), im.width, im.opacity, im.visible);
+            }
+        }
+    }
     for o in nd.objects {
         let id = doc.add_body(&o.name, o.body);
         if let Some(ob) = doc.objects.iter_mut().find(|x| x.id == id) {
@@ -1257,6 +1278,19 @@ pub fn open_file(app: &mut DuctileApp, path: &std::path::Path) {
     }
 }
 
+/// Places a picture on the construction plane, centred on its origin,
+/// sized to the scene (10 units across for an empty one).
+pub fn add_reference_image(doc: &mut Document, path: &std::path::Path) -> Result<(), String> {
+    let (px, size) = crate::refimage::load_rgba(path)?;
+    let bb = doc.bbox();
+    let width = if bb.is_empty() { 10.0 } else { bb.diagonal().max(1.0) };
+    let id = doc.images.iter().map(|i| i.id).max().unwrap_or(0) + 1;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Image".into());
+    doc.images.push(crate::refimage::RefImage { id, name, path: path.to_path_buf(), pixels: std::sync::Arc::new(px), size, frame: crate::tools::current_cplane().frame, width, opacity: 0.6, visible: true });
+    doc.dirty = true;
+    Ok(())
+}
+
 /// Writes the document as a native file.
 pub fn write_native(doc: &Document, path: &std::path::Path) -> Result<(), String> {
     let nd = ductile_io::native::NativeDocument::new(
@@ -1281,6 +1315,11 @@ pub fn write_native(doc: &Document, path: &std::path::Path) -> Result<(), String
         .map(|g| ductile_io::native::NativeGroup { id: g.id, name: g.name.clone(), parent: g.parent, visible: g.visible, locked: g.locked })
         .collect();
     nd.dimensions = doc.dimensions.iter().map(|d| [d.a.to_array(), d.b.to_array(), d.offset.to_array()]).collect();
+    nd.images = doc
+        .images
+        .iter()
+        .map(|i| ductile_io::native::NativeImage { path: i.path.to_string_lossy().into_owned(), frame: [i.frame.origin.to_array(), i.frame.x.to_array(), i.frame.z.to_array()], width: i.width, opacity: i.opacity, visible: i.visible })
+        .collect();
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }

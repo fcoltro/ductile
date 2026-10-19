@@ -39,7 +39,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                     }
                 }
                 ui.separator();
-                for c in [Command::Save, Command::SaveAs, Command::ImportStep, Command::ImportSvg, Command::ImportMesh, Command::ExportStep, Command::ExportStl, Command::ExportObj, Command::ExportHiddenLine] {
+                for c in [Command::Save, Command::SaveAs, Command::ImportStep, Command::ImportSvg, Command::ImportMesh, Command::ImportImage, Command::ExportStep, Command::ExportStl, Command::ExportObj, Command::ExportHiddenLine] {
                     menu_item(app, ui, c);
                 }
             });
@@ -258,9 +258,60 @@ pub fn side_panel(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 outliner_act(app, a, shift);
             }
         });
+        if !app.doc.images.is_empty() {
+            ui.separator();
+            reference_images(app, ui);
+        }
         ui.separator();
         properties(app, ui);
     });
+}
+
+/// The reference images: shown, opacity, size and placement.
+fn reference_images(app: &mut DuctileApp, ui: &mut egui::Ui) {
+    ui.label(RichText::new("Reference images").strong());
+    let mut remove = None;
+    let cplane = crate::tools::current_cplane().frame;
+    for (k, img) in app.doc.images.iter_mut().enumerate() {
+        egui::CollapsingHeader::new(&img.name).id_salt(("refimg", img.id)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut img.visible, "Shown");
+                if ui.small_button("Delete").clicked() {
+                    remove = Some(k);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Opacity");
+                ui.add(egui::Slider::new(&mut img.opacity, 0.0..=1.0));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Width");
+                ui.add(egui::DragValue::new(&mut img.width).speed(0.05).range(1e-3..=1e6));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Centre");
+                let o = &mut img.frame.origin;
+                for c in [&mut o.x, &mut o.y, &mut o.z] {
+                    ui.add(egui::DragValue::new(c).speed(0.05));
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui.small_button("Turn 90°").clicked() {
+                    img.frame = ductile_geom::Frame::new(img.frame.origin, img.frame.z, img.frame.y);
+                }
+                if ui.small_button("Flip").clicked() {
+                    img.frame = ductile_geom::Frame::new(img.frame.origin, -img.frame.z, -img.frame.x);
+                }
+                if ui.small_button("Onto cplane").clicked() {
+                    img.frame = ductile_geom::Frame::new(img.frame.origin, cplane.z, cplane.x);
+                }
+            });
+        });
+    }
+    if let Some(k) = remove {
+        app.doc.images.remove(k);
+        app.doc.dirty = true;
+    }
 }
 
 /// Something done in the Outliner, applied after drawing it.
