@@ -26,7 +26,8 @@ code from them.
   face can be picked, offset or extruded on their own. Both also take a
   surface (sheet) that reaches across the solid in place of curves. Knife
   mode (K while drawing any curve) splits just the face the curve is drawn
-  on; earlier imprints survive later booleans. Draft tilts
+  on; earlier imprints survive later booleans. Delete redundant topology merges
+  them away again. Draft tilts
   selected planar faces about the line where they meet a neutral plane
   through their base, by a dragged or typed angle. Intersection curves
   adds the curves where selected solids cross; Project (I)

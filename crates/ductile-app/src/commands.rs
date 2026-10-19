@@ -29,6 +29,7 @@ pub enum Command {
     Delete,
     Duplicate,
     Instance,
+    DeleteRedundant,
     MakeUnique,
     SelectAll,
     DeselectAll,
@@ -168,6 +169,7 @@ impl Command {
         Command::Delete,
         Command::Duplicate,
         Command::Instance,
+        Command::DeleteRedundant,
         Command::MakeUnique,
         Command::SelectAll,
         Command::DeselectAll,
@@ -308,6 +310,7 @@ impl Command {
             Delete => "Delete",
             Duplicate => "Duplicate",
             Instance => "Instance (linked copy)",
+            DeleteRedundant => "Delete redundant topology",
             MakeUnique => "Make instance unique",
             SelectAll => "Select all",
             DeselectAll => "Deselect all",
@@ -613,6 +616,29 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 app.doc.selection.clear();
                 app.doc.selection.extend(made.into_iter().map(Pick::Object));
                 app.start_tool(std::boxed::Box::new(TransformTool::new(TransformKind::Move, &app.doc)));
+            }
+        }
+        DeleteRedundant => {
+            let ids: Vec<crate::document::ObjectId> = app.doc.selected_objects().into_iter().filter(|id| app.doc.object(*id).is_some_and(|o| o.body.kind != ductile_brep::BodyKind::Wire && o.body.mesh.is_none())).collect();
+            if ids.is_empty() {
+                app.status = "Delete redundant topology: select solids or sheets".into();
+            } else {
+                app.doc.checkpoint("Delete redundant topology");
+                let mut gone = 0;
+                for id in ids {
+                    let b = app.doc.object(id).unwrap().body.clone();
+                    let s = ductile_brep::ops::heal::simplify(&b);
+                    if s.faces.len() + s.edges.len() < b.faces.len() + b.edges.len() {
+                        gone += b.faces.len() + b.edges.len() - s.faces.len() - s.edges.len();
+                        app.doc.replace_body(id, s);
+                    }
+                }
+                if gone == 0 {
+                    app.doc.undo();
+                    app.status = "Nothing redundant to remove".into();
+                } else {
+                    app.status = format!("Removed {gone} redundant faces and edges");
+                }
             }
         }
         MakeUnique => {
