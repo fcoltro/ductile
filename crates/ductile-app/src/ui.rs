@@ -1042,6 +1042,20 @@ pub fn prefs_window(app: &mut DuctileApp, ctx: &egui::Context) {
             ui.add(egui::DragValue::new(&mut p.autosave_minutes).range(0..=120).suffix(" min"));
         });
         ui.checkbox(&mut p.load_last_session, "Open the last session on startup");
+        ui.add_space(6.0);
+        ui.label(RichText::new("Backups").strong());
+        ui.label(RichText::new("Saving over a file keeps its old copy").color(theme::TEXT_DIM));
+        egui::Grid::new("backup counts").num_columns(2).show(ui, |ui| {
+            for (label, n) in [("Newest to keep", &mut p.backups.recent), ("Hourly", &mut p.backups.hourly), ("Daily", &mut p.backups.daily), ("Weekly", &mut p.backups.weekly)] {
+                ui.label(label);
+                ui.add(egui::DragValue::new(n).range(0..=50));
+                ui.end_row();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Folder");
+            ui.add(egui::TextEdit::singleline(&mut p.backup_dir).hint_text("next to the file").desired_width(160.0));
+        });
     });
     app.show_prefs = open;
     if app.prefs != before {

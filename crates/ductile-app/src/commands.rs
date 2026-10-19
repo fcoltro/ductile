@@ -1505,12 +1505,16 @@ pub fn write_native(doc: &Document, path: &std::path::Path) -> Result<(), String
 }
 
 pub fn save_file(app: &mut DuctileApp, path: &std::path::Path) {
+    let backed_up = crate::backup::back_up(path, &app.prefs.backup_dir, &app.prefs.backups);
     match write_native(&app.doc, path) {
         Ok(()) => {
             app.doc.path = Some(path.to_path_buf());
             app.doc.dirty = false;
             crate::recent::push(path);
-            app.status = format!("Saved {}", path.display());
+            app.status = match backed_up {
+                Ok(()) => format!("Saved {}", path.display()),
+                Err(e) => format!("Saved {} (the backup of the old copy failed: {e})", path.display()),
+            };
         }
         Err(e) => app.status = format!("Save failed: {e}"),
     }

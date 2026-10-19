@@ -262,6 +262,11 @@ code from them.
   and drill-down on or off, mouse navigation presets (Plasticity, Blender,
   Maya, Rhino), zoom toward the cursor, the autosave interval and opening
   the last session on startup.
+- Backups: saving over a file first keeps the old copy in `<name>.backups`
+  beside it (or a folder set in Preferences), pruned to the newest few plus
+  one per hour, day and week as configured. If Ductile did not close
+  cleanly, the next start says so and File > Recover autosave brings the
+  work back.
 - While dragging a value, the number shows beside the handle (five
   decimals) and push and fillet drags draw an endless guide along their
   direction. Shift+F opens the commands that apply to the selection at

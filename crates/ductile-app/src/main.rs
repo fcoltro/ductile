@@ -7,6 +7,7 @@
 
 mod analysis;
 mod app;
+mod backup;
 mod background;
 mod camera;
 mod commands;

@@ -66,6 +66,8 @@ pub struct DuctileApp {
     pub palette_open: bool,
     /// Where the Shift+F menu of suggested commands is open.
     pub suggest_at: Option<egui::Pos2>,
+    /// Whether this run set the running marker (not headless screenshots).
+    session_marked: bool,
     /// The pointer over the viewport, for menus that open at the cursor.
     pub pointer_pos: Option<egui::Pos2>,
     pub palette_query: String,
@@ -154,6 +156,7 @@ impl DuctileApp {
             measurement: None,
             palette_open: false,
             suggest_at: None,
+            session_marked: false,
             pointer_pos: None,
             palette_query: String::new(),
             show_help: false,
@@ -179,6 +182,10 @@ impl DuctileApp {
             pending_cancel: false,
         };
         let last = crate::recent::autosave_path().filter(|p| p.exists());
+        app.session_marked = app.screenshot.is_none();
+        if app.session_marked && crate::backup::start_session() && last.is_some() {
+            app.status = "Ductile did not close cleanly last time; File > Recover autosave brings back the last autosave".into();
+        }
         if let Some(path) = opts.open {
             commands::open_file(&mut app, &path);
         } else if let (Some(p), true, false) = (last, app.prefs.load_last_session, opts.demo) {
@@ -1248,6 +1255,11 @@ fn vertex_overlay(doc: &Document, out: &mut Vec<LineInstance>) {
 }
 
 impl eframe::App for DuctileApp {
+    fn on_exit(&mut self) {
+        if self.session_marked {
+            crate::backup::end_session();
+        }
+    }
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_keys(&ctx);
