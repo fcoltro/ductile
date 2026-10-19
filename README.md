@@ -252,8 +252,9 @@ code from them.
   arrays, undo/redo. Mirror reflects across the construction plane,
   or across a selected planar face; a solid mirrored across its own face is
   joined to its reflection, so half a symmetric part becomes the whole.
-  Freestyle move (F while moving): click the point to move from, then where
-  it goes; both snap.
+  Freestyle (F while moving, rotating or scaling): click the point to move
+  from, then where it goes; rotate and scale take a pivot first. All snap, and
+  angles and factors come out exact.
 - Place (Ctrl+D) stands copies of the selection on the faces you click,
   bottom centre on the point and up along the surface normal, turned and
   scaled from the panel.

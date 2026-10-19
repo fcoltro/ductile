@@ -557,8 +557,9 @@ pub struct TransformTool {
     /// Freestyle (F): the move runs from a clicked point to a second one,
     /// both snapping, instead of from wherever the mouse first was.
     freestyle: bool,
-    /// In freestyle, whether the start point has been clicked.
-    anchored: bool,
+    /// In freestyle, the points clicked so far: Move takes from and to,
+    /// Rotate and Scale take the pivot first.
+    clicks: u8,
 }
 
 impl TransformTool {
@@ -608,7 +609,7 @@ impl TransformTool {
             }
         }
         let pivot = if bb.is_empty() { DVec3::ZERO } else { bb.center() };
-        Self { kind, targets, controls, surface_controls, faces, edges, pivot, start: None, current: None, axis: None, typed: None, value: 0.0, falloff: 0, mirror: false, freestyle: false, anchored: false }
+        Self { kind, targets, controls, surface_controls, faces, edges, pivot, start: None, current: None, axis: None, typed: None, value: 0.0, falloff: 0, mirror: false, freestyle: false, clicks: 0 }
     }
 
     /// The object's body after applying `m` to it, or to its selected
@@ -700,7 +701,7 @@ impl TransformTool {
                 }
                 let ang = a.cross(b).dot(axis).atan2(a.dot(b));
                 let step = 5f64.to_radians();
-                let ang = (ang / step).round() * step;
+                let ang = if self.freestyle { ang } else { (ang / step).round() * step };
                 rotate_about(self.pivot, axis, ang)
             }
             TransformKind::Scale => {
@@ -709,7 +710,7 @@ impl TransformTool {
                 if d0 < 1e-9 {
                     return DMat4::IDENTITY;
                 }
-                let f = ((d1 / d0) * 100.0).round() / 100.0;
+                let f = if self.freestyle { d1 / d0 } else { ((d1 / d0) * 100.0).round() / 100.0 };
                 scale_about(self.pivot, f.max(1e-3))
             }
         }
@@ -747,15 +748,13 @@ impl Tool for TransformTool {
     }
     fn keys(&self) -> Vec<(&'static str, &'static str)> {
         let mut k = vec![("X Y Z", "Axis"), ("Tab", "Value"), ("Ctrl", "Snap off")];
-        if self.kind == TransformKind::Move {
-            k.push(("F", "Freestyle"));
-        }
+        k.push(("F", "Freestyle"));
         k
     }
     fn command_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
-        if key == egui::Key::F && self.kind == TransformKind::Move && !m.ctrl && !m.alt {
+        if key == egui::Key::F && !m.ctrl && !m.alt {
             self.freestyle = !self.freestyle;
-            self.anchored = false;
+            self.clicks = 0;
             self.start = None;
             self.current = None;
             return true;
@@ -777,10 +776,11 @@ impl Tool for TransformTool {
             _ => "",
         };
         if self.freestyle {
-            return if self.anchored {
-                format!("Move freestyle{ax}: click where the start point goes")
-            } else {
-                "Move freestyle: click the point to move from".into()
+            let first = if self.kind == TransformKind::Move { 1 } else { 2 };
+            return match self.clicks {
+                0 if first == 2 => format!("{} freestyle: click the pivot", self.name()),
+                c if c < first => format!("{} freestyle: click the point to {} from", self.name(), self.name().to_lowercase()),
+                _ => format!("{} freestyle{ax}: click where that point goes", self.name()),
             };
         }
         format!("{}{ax}: move the mouse, X/Y/Z to constrain, type a value, click or Enter to confirm, Esc to cancel", self.name())
@@ -788,13 +788,16 @@ impl Tool for TransformTool {
     fn pointer(&mut self, _doc: &Document, cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
         if self.freestyle {
             let at = p.point.or_else(|| p.ray.hit_plane(cplane.frame.origin, cplane.frame.z));
-            if !self.anchored {
+            let first = if self.kind == TransformKind::Move { 1 } else { 2 };
+            if self.clicks < first {
                 if p.clicked {
                     if let Some(a) = at {
+                        if self.clicks == 0 {
+                            self.pivot = a;
+                        }
                         self.start = Some(a);
                         self.current = Some(a);
-                        self.pivot = a;
-                        self.anchored = true;
+                        self.clicks += 1;
                     }
                 }
                 return ToolOutcome::Continue;
@@ -810,7 +813,7 @@ impl Tool for TransformTool {
                 };
                 self.current = Some(a);
             }
-            self.value = self.matrix().w_axis.truncate().length();
+            self.value = if self.kind == TransformKind::Move { self.matrix().w_axis.truncate().length() } else { 0.0 };
             if p.clicked {
                 return ToolOutcome::Finished;
             }
@@ -5420,6 +5423,32 @@ mod tests {
         assert!(t.commit(&mut doc));
         let bb = doc.object(id).unwrap().body.bbox();
         assert!((bb.min.x - 2.0).abs() < 0.01 && bb.min.y.abs() < 0.01, "{bb:?}");
+    }
+
+    #[test]
+    fn freestyle_rotate_and_scale_take_a_pivot_first() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", make_box(&Frame::WORLD, DVec3::splat(1.0)));
+        doc.selection.insert(Pick::Object(id));
+        let mut t = TransformTool::new(TransformKind::Rotate, &doc);
+        assert!(t.command_key(egui::Key::F, egui::Modifiers::NONE));
+        assert!(!click(&mut t, &doc, DVec3::ZERO, true));
+        assert!(!click(&mut t, &doc, DVec3::new(1.0, 0.0, 0.0), true));
+        // 33° is off the 5° step and stays exact.
+        let a = 33f64.to_radians();
+        assert!(click(&mut t, &doc, DVec3::new(a.cos(), a.sin(), 0.0) * 2.0, true));
+        assert!(t.commit(&mut doc));
+        let bb = doc.object(id).unwrap().body.bbox();
+        assert!((bb.min.x - (-a.sin())).abs() < 0.02, "{bb:?}");
+
+        let mut t = TransformTool::new(TransformKind::Scale, &doc);
+        assert!(t.command_key(egui::Key::F, egui::Modifiers::NONE));
+        assert!(!click(&mut t, &doc, DVec3::ZERO, true));
+        assert!(!click(&mut t, &doc, DVec3::new(1.0, 0.0, 0.0), true));
+        assert!(click(&mut t, &doc, DVec3::new(0.0, 2.5, 0.0), true));
+        assert!(t.commit(&mut doc));
+        let bb = doc.object(id).unwrap().body.bbox();
+        assert!((bb.max.z - 2.5).abs() < 0.02, "{bb:?}");
     }
 
     /// A click straight down onto the construction plane at `p`.
