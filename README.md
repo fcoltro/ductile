@@ -279,6 +279,9 @@ code from them.
   selection modes, the view toggles, a drawing tool strip, a bottom
   command bar with a More menu (inapplicable commands greyed, never
   hidden), the floating command dialog and a strip of the command's keys.
+- Camera card: orthographic switch, FOV (35° by default) and Squish, a
+  dolly zoom that flattens or deepens perspective while the target stays
+  framed.
 - Selection modes combine: 1 to 4 switch to vertices, edges, faces or
   solids, 5 turns them all on, and Shift+click on a mode button (or the
   unbound Toggle … mode commands) adds or removes one. With several on, a

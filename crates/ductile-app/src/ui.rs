@@ -689,7 +689,28 @@ pub fn right_panel(app: &mut DuctileApp, ui: &mut egui::Ui) {
                         }
                     });
                 });
+                ui.add_enabled_ui(!ortho, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Squish");
+                        let mut sq = app.camera.squish;
+                        let mut ch = false;
+                        if ui.small_button("−").clicked() {
+                            sq /= 1.25;
+                            ch = true;
+                        }
+                        ch |= ui.add(egui::DragValue::new(&mut sq).range(0.25..=8.0).speed(0.02).max_decimals(2)).changed();
+                        if ui.small_button("+").clicked() {
+                            sq *= 1.25;
+                            ch = true;
+                        }
+                        if ch {
+                            app.camera.set_squish(sq);
+                        }
+                    });
+                });
                 if ui.add_sized([ui.available_width(), 22.0], egui::Button::new("Reset to default")).clicked() {
+                    app.camera.set_squish(1.0);
+                    app.camera.fov_y = crate::camera::Camera::default().fov_y;
                     app.pending.push(Command::ViewIso);
                 }
             });

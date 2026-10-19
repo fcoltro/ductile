@@ -20,6 +20,10 @@ pub struct Camera {
     pub fov_y: f64,
     pub projection: Projection,
     pub aspect: f64,
+    /// Perspective squish: above 1 the camera backs off and narrows its
+    /// view by the same factor, flattening perspective while keeping the
+    /// framing (a dolly zoom); below 1 it moves in and widens.
+    pub squish: f64,
 }
 
 impl Default for Camera {
@@ -29,9 +33,10 @@ impl Default for Camera {
             distance: 30.0,
             yaw: -0.9,
             pitch: 0.55,
-            fov_y: 40f64.to_radians(),
+            fov_y: 35f64.to_radians(),
             projection: Projection::Perspective,
             aspect: 1.5,
+            squish: 1.0,
         }
     }
 }
@@ -60,6 +65,16 @@ impl Ray {
 }
 
 impl Camera {
+    /// Sets the squish, moving the camera and changing its field of view so
+    /// the target stays framed the same.
+    pub fn set_squish(&mut self, s: f64) {
+        let s = s.clamp(0.25, 8.0);
+        let k = s / self.squish;
+        self.fov_y = 2.0 * ((self.fov_y * 0.5).tan() / k).atan();
+        self.distance *= k;
+        self.squish = s;
+    }
+
     /// Direction from the target towards the eye.
     pub fn back(&self) -> DVec3 {
         let (sy, cy) = self.yaw.sin_cos();
@@ -228,4 +243,24 @@ pub fn orthographic_rh(left: f64, right: f64, bottom: f64, top: f64, near: f64, 
         glam::DVec4::new(0.0, 0.0, r, 0.0),
         glam::DVec4::new(-(left + right) * rcp_w, -(top + bottom) * rcp_h, r * near, 1.0),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn squish_keeps_the_target_framed() {
+        let mut c = Camera { aspect: 1.0, ..Default::default() };
+        // A point beside the target, square to the view.
+        let view = (c.target - c.eye()).normalize();
+        let edge = c.target + view.cross(DVec3::Z).cross(view).normalize() * 5.0;
+        let before = c.project(edge).unwrap();
+        c.set_squish(3.0);
+        let after = c.project(edge).unwrap();
+        assert!((before.y - after.y).abs() < 1e-9, "{before} {after}");
+        assert!(c.distance > 80.0 && c.fov_y < 35f64.to_radians());
+        c.set_squish(1.0);
+        assert!((c.fov_y - 35f64.to_radians()).abs() < 1e-12 && (c.distance - 30.0).abs() < 1e-9);
+    }
 }
