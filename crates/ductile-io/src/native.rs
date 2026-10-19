@@ -22,6 +22,9 @@ pub struct NativeObject {
     /// Id of its group in the document's `groups`.
     #[serde(default)]
     pub group: Option<u64>,
+    /// Instance link: id and placement matrix (column-major).
+    #[serde(default)]
+    pub link: Option<(u64, [f64; 16])>,
 }
 
 /// An Outliner group.

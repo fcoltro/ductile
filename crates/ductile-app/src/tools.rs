@@ -721,7 +721,11 @@ impl Tool for TransformTool {
         for id in self.targets.clone() {
             if let Some(o) = doc.object(id) {
                 let b = self.moved(id, &o.body, &m);
-                doc.replace_body(id, b);
+                if self.faces.is_empty() && self.controls.is_empty() && self.surface_controls.is_empty() {
+                    doc.move_body(id, b, &m);
+                } else {
+                    doc.replace_body(id, b);
+                }
             }
         }
         true
@@ -4319,6 +4323,45 @@ mod tests {
         let (area, perimeter) = (12.0 - (4.0 - pi) * 0.25, 10.0 + pi);
         let expect = area + perimeter * 0.25 + pi * 0.0625;
         assert!((a - expect).abs() < 2e-2, "{a} vs {expect}");
+    }
+
+    #[test]
+    fn instances_share_edits_but_not_placement() {
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(2.0, 2.0, 2.0)));
+        doc.selection.insert(Pick::Object(id));
+        let copy = doc.instance_selected()[0];
+        assert_eq!(doc.instance_count(id), 2);
+        let base = doc.object(id).unwrap().body.bbox().min;
+        // Move the copy away: the original stays.
+        doc.selection.clear();
+        doc.selection.insert(Pick::Object(copy));
+        let mut t = TransformTool::new(TransformKind::Move, &doc);
+        t.typed_value(Some(5.0));
+        t.constrain_axis(0);
+        let m = t.matrix();
+        assert!(t.commit(&mut doc));
+        let shift = m.transform_point3(DVec3::ZERO);
+        assert!(shift.length() > 1.0, "{shift}");
+        let bb = |d: &Document, i| d.object(i).unwrap().body.bbox();
+        assert!(bb(&doc, id).min.distance(base) < 1e-9);
+        assert!(bb(&doc, copy).min.distance(base + shift) < 1e-9);
+        // Knife the original's top: the copy gets the cut too, where it is.
+        let mut c = CurveTool::new(CurveKind::Polyline);
+        c.command_key(egui::Key::K, egui::Modifiers::NONE);
+        click(&mut c, &doc, DVec3::new(1.0, 0.0, 2.0), true);
+        click(&mut c, &doc, DVec3::new(1.0, 2.0, 2.0), true);
+        c.accept();
+        assert!(c.commit(&mut doc));
+        assert_eq!(doc.object(id).unwrap().body.faces.len(), 7);
+        assert_eq!(doc.object(copy).unwrap().body.faces.len(), 7);
+        assert!(bb(&doc, copy).min.distance(base + shift) < 1e-9);
+        // Unique again: edits stay put.
+        doc.selection.clear();
+        doc.selection.insert(Pick::Object(copy));
+        assert_eq!(doc.make_unique_selected(), 1);
+        assert_eq!(doc.instance_count(id), 0);
     }
 
     #[test]

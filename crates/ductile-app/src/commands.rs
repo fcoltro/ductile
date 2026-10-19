@@ -27,6 +27,8 @@ pub enum Command {
     Redo,
     Delete,
     Duplicate,
+    Instance,
+    MakeUnique,
     SelectAll,
     DeselectAll,
     Hide,
@@ -161,6 +163,8 @@ impl Command {
         Command::Redo,
         Command::Delete,
         Command::Duplicate,
+        Command::Instance,
+        Command::MakeUnique,
         Command::SelectAll,
         Command::DeselectAll,
         Command::Hide,
@@ -296,6 +300,8 @@ impl Command {
             Redo => "Redo",
             Delete => "Delete",
             Duplicate => "Duplicate",
+            Instance => "Instance (linked copy)",
+            MakeUnique => "Make instance unique",
             SelectAll => "Select all",
             DeselectAll => "Deselect all",
             Hide => "Hide selected",
@@ -578,6 +584,28 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 app.doc.selection.clear();
                 app.doc.selection.extend(made.into_iter().map(Pick::Object));
                 app.start_tool(std::boxed::Box::new(TransformTool::new(TransformKind::Move, &app.doc)));
+            }
+        }
+        Instance => {
+            if app.doc.selected_objects().is_empty() {
+                app.status = "Instance: select objects to place again".into();
+            } else {
+                app.doc.checkpoint("Instance");
+                let made = app.doc.instance_selected();
+                app.set_mode(SelectMode::Object);
+                app.doc.selection.clear();
+                app.doc.selection.extend(made.into_iter().map(Pick::Object));
+                app.start_tool(std::boxed::Box::new(TransformTool::new(TransformKind::Move, &app.doc)));
+            }
+        }
+        MakeUnique => {
+            app.doc.checkpoint("Make unique");
+            let n = app.doc.make_unique_selected();
+            if n == 0 {
+                app.doc.undo();
+                app.status = "Make unique: select instances".into();
+            } else {
+                app.status = format!("{n} instance(s) made unique");
             }
         }
         SelectAll | InvertSelection => {
@@ -1195,6 +1223,7 @@ pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), Strin
             if let Some(c) = o.color {
                 ob.color = c;
             }
+            ob.link = o.link.map(|(id, m)| crate::document::Link { id, placement: ductile_geom::DMat4::from_cols_array(&m) });
         }
     }
     Ok(())
@@ -1227,6 +1256,7 @@ pub fn write_native(doc: &Document, path: &std::path::Path) -> Result<(), String
                 locked: o.locked,
                 group: o.group,
                 material: Some([o.metalness, o.roughness]),
+                link: o.link.map(|l| (l.id, l.placement.to_cols_array())),
             })
             .collect(),
     );

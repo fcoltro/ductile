@@ -38,6 +38,17 @@ pub struct Object {
     pub group: Option<GroupId>,
     /// Bumped whenever geometry changes so the renderer re-uploads.
     pub revision: u64,
+    /// Instances: objects sharing a link id are one shape placed several
+    /// times; editing one edits them all.
+    pub link: Option<Link>,
+}
+
+/// An instance's link: its id, and where this copy sits (the shared shape
+/// carried by `placement` gives this object's body).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Link {
+    pub id: u64,
+    pub placement: ductile_geom::DMat4,
 }
 
 /// Something the user can select or hover.
@@ -210,7 +221,7 @@ impl Document {
         let rev = self.bump();
         let n = self.objects.iter().filter(|o| o.name.starts_with(name)).count();
         let name = if n == 0 { name.to_string() } else { format!("{name}.{n:03}") };
-        self.objects.push(Object { id, name, body: Arc::new(body), mesh, color: DEFAULT_COLOR, metalness: 0.0, roughness: 0.45, visible: true, locked: false, group: self.active_group, revision: rev });
+        self.objects.push(Object { id, name, body: Arc::new(body), mesh, color: DEFAULT_COLOR, metalness: 0.0, roughness: 0.45, visible: true, locked: false, group: self.active_group, revision: rev, link: None });
         self.dirty = true;
         id
     }
@@ -225,6 +236,85 @@ impl Document {
         // Sub-object picks may no longer be valid.
         self.selection.retain(|p| !matches!(p, Pick::Face(o, _) | Pick::Edge(o, _) | Pick::Vertex(o, _) | Pick::Control(o, _, _) | Pick::SurfaceControl(o, _, _) if *o == id));
         self.dirty = true;
+        // The other instances follow, each in its own place.
+        let Some(link) = self.object(id).and_then(|o| o.link) else { return };
+        if link.placement.determinant().abs() < 1e-12 {
+            return;
+        }
+        let shape = self.object(id).unwrap().body.transformed(&link.placement.inverse());
+        let others: Vec<(ObjectId, ductile_geom::DMat4)> = self.objects.iter().filter_map(|o| o.link.filter(|l| l.id == link.id && o.id != id).map(|l| (o.id, l.placement))).collect();
+        for (oid, m) in others {
+            let b = shape.transformed(&m);
+            let rev = self.bump();
+            if let Some(o) = self.objects.iter_mut().find(|o| o.id == oid) {
+                o.mesh = Arc::new(mesh_body(&b));
+                o.body = Arc::new(b);
+                o.revision = rev;
+            }
+            self.selection.retain(|p| matches!(p, Pick::Object(_)) || p.object() != oid);
+        }
+    }
+
+    /// Moves a whole object by `m`: its body becomes `body` (already
+    /// moved), and an instance moves alone, leaving the others in place.
+    pub fn move_body(&mut self, id: ObjectId, body: Body, m: &ductile_geom::DMat4) {
+        let link = self.object(id).and_then(|o| o.link);
+        if let Some(o) = self.objects.iter_mut().find(|o| o.id == id) {
+            o.link = None;
+        }
+        self.replace_body(id, body);
+        if let (Some(l), Some(o)) = (link, self.objects.iter_mut().find(|o| o.id == id)) {
+            o.link = Some(Link { id: l.id, placement: *m * l.placement });
+        }
+    }
+
+    /// Linked copies of the selected objects, in place; returns them.
+    pub fn instance_selected(&mut self) -> Vec<ObjectId> {
+        let ids = self.selected_objects();
+        let mut next = self.objects.iter().filter_map(|o| o.link.map(|l| l.id)).max().map_or(1, |m| m + 1);
+        let mut made = Vec::new();
+        for id in ids {
+            let Some(o) = self.object(id).cloned() else { continue };
+            let link = o.link.unwrap_or_else(|| {
+                next += 1;
+                Link { id: next - 1, placement: ductile_geom::DMat4::IDENTITY }
+            });
+            if let Some(x) = self.objects.iter_mut().find(|x| x.id == id) {
+                x.link = Some(link);
+            }
+            let copy = self.add_body(&o.name, (*o.body).clone());
+            if let Some(c) = self.objects.iter_mut().find(|x| x.id == copy) {
+                (c.group, c.color, c.metalness, c.roughness, c.link) = (o.group, o.color, o.metalness, o.roughness, Some(link));
+            }
+            made.push(copy);
+        }
+        made
+    }
+
+    /// Unlinks the selected instances; returns how many were linked.
+    pub fn make_unique_selected(&mut self) -> usize {
+        let ids = self.selected_objects();
+        let mut n = 0;
+        for o in self.objects.iter_mut().filter(|o| ids.contains(&o.id)) {
+            n += o.link.take().is_some() as usize;
+        }
+        // A link left with one member is no link.
+        let counts = self.objects.iter().filter_map(|o| o.link.map(|l| l.id)).fold(std::collections::HashMap::new(), |mut m, l| {
+            *m.entry(l).or_insert(0) += 1;
+            m
+        });
+        for o in self.objects.iter_mut() {
+            if o.link.is_some_and(|l| counts[&l.id] < 2) {
+                o.link = None;
+            }
+        }
+        n
+    }
+
+    /// How many objects share `id`'s link (0 when it has none).
+    pub fn instance_count(&self, id: ObjectId) -> usize {
+        let Some(l) = self.object(id).and_then(|o| o.link) else { return 0 };
+        self.objects.iter().filter(|o| o.link.is_some_and(|x| x.id == l.id)).count()
     }
 
     pub fn remove(&mut self, id: ObjectId) {

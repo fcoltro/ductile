@@ -44,7 +44,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 }
             });
             ui.menu_button("Edit", |ui| {
-                for c in [Command::Undo, Command::Redo, Command::Duplicate, Command::Delete, Command::SelectAll, Command::DeselectAll, Command::Hide, Command::Isolate, Command::UnhideAll] {
+                for c in [Command::Undo, Command::Redo, Command::Duplicate, Command::Instance, Command::MakeUnique, Command::Delete, Command::SelectAll, Command::DeselectAll, Command::Hide, Command::Isolate, Command::UnhideAll] {
                     menu_item(app, ui, c);
                 }
             });
@@ -505,6 +505,9 @@ fn properties(app: &mut DuctileApp, ui: &mut egui::Ui) {
         })
             .color(theme::TEXT_DIM),
     );
+    if o.link.is_some() {
+        ui.label(RichText::new("Instance: edits apply to every linked copy").color(theme::TEXT_DIM));
+    }
     let bb = b.bbox();
     let s = bb.size();
     ui.label(RichText::new(format!("Size {:.3} × {:.3} × {:.3}", s.x, s.y, s.z)).color(theme::TEXT_DIM));

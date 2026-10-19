@@ -37,7 +37,9 @@ code from them.
   and bosses close up, and fillets or chamfers between planes grow back to
   a sharp edge. Otherwise the solid becomes an open sheet. Duplicate
   (Shift+D) in face or edge mode copies the selected faces out as a sheet
-  or the selected edges out as curves.
+  or the selected edges out as curves. Instance (Alt+D) places linked
+  copies: each moves on its own, but editing one (fillet, knife, boolean...)
+  edits them all, until Make unique unlinks it. Links are saved.
 - Construction planes from the selection, as in Plasticity: Space sets one
   and turns the view to it, Shift+Space sets it without moving the view.
   A planar face gives its plane; a face and an edge, the plane standing on
