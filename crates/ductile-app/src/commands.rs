@@ -1423,7 +1423,8 @@ pub fn polyspline_selected(doc: &mut Document) -> Result<usize, String> {
     for (id, name, m) in &meshes {
         let faces: Vec<Vec<usize>> = if m.polygons.is_empty() { m.triangles.iter().map(|t| t.iter().map(|i| *i as usize).collect()).collect() } else { m.polygons.iter().map(|p| p.iter().map(|i| *i as usize).collect()).collect() };
         let cage = ductile_brep::ops::polysplines::PolyMesh { points: m.positions.clone(), faces };
-        let b = ductile_brep::ops::polysplines::polysplines(&cage).map_err(|e| format!("PolySplines: {e}"))?;
+        // Rectangles of regular patches merge into single surfaces.
+        let b = ductile_brep::ops::polysplines::polysplines_with(&cage, true).map_err(|e| format!("PolySplines: {e}"))?;
         made.push((*id, name.clone(), b));
     }
     doc.checkpoint("PolySplines");
@@ -1982,7 +1983,8 @@ mod native_tests {
         import_mesh(&mut doc, &path).unwrap();
         let mesh = doc.objects[0].id;
         assert_eq!(doc.objects[0].body.mesh.as_ref().unwrap().polygons.len(), 6, "the quads are kept");
-        assert_eq!(polyspline_selected(&mut doc).unwrap(), 96);
+        // 96 patches, the regular ones merged into 63 faces.
+        assert_eq!(polyspline_selected(&mut doc).unwrap(), 63);
         let made = doc.objects.last().unwrap();
         assert_eq!(made.body.kind, ductile_brep::BodyKind::Solid);
         assert!(!doc.object(mesh).unwrap().visible);

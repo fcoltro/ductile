@@ -74,12 +74,34 @@ impl Sewer {
 
     /// As [`Sewer::patch`], with the normal flipped when `reversed`.
     pub fn patch_oriented(&mut self, s: NurbsSurface, reversed: bool) {
+        self.patch_split_oriented(s, &[], &[], reversed);
+    }
+
+    /// As [`Sewer::patch`], its sides broken into separate edges at the
+    /// given u and v parameters.
+    pub fn patch_split(&mut self, s: NurbsSurface, us: &[f64], vs: &[f64]) {
+        self.patch_split_oriented(s, us, vs, false);
+    }
+
+    fn patch_split_oriented(&mut self, s: NurbsSurface, us: &[f64], vs: &[f64], reversed: bool) {
         let ((u0, u1), (v0, v1)) = s.domain();
-        let iso = |c: NurbsCurve, rev: bool| {
+        // The side along `c`, in pieces between the breaks, run backwards
+        // when `rev`.
+        let side = |c: NurbsCurve, breaks: &[f64], rev: bool| -> Vec<Segment> {
             let (a, b) = c.domain();
-            Segment { curve: Curve3::Nurbs(c), t0: a, t1: b, reversed: rev }
+            let mut ts = vec![a];
+            ts.extend(breaks.iter().copied().filter(|t| *t > a && *t < b));
+            ts.push(b);
+            let mut out: Vec<Segment> = ts.windows(2).map(|w| Segment { curve: Curve3::Nurbs(c.clone()), t0: w[0], t1: w[1], reversed: rev }).collect();
+            if rev {
+                out.reverse();
+            }
+            out
         };
-        let mut lp = vec![iso(s.iso_v(v0), false), iso(s.iso_u(u1), false), iso(s.iso_v(v1), true), iso(s.iso_u(u0), true)];
+        let mut lp = side(s.iso_v(v0), us, false);
+        lp.extend(side(s.iso_u(u1), vs, false));
+        lp.extend(side(s.iso_v(v1), us, true));
+        lp.extend(side(s.iso_u(u0), vs, true));
         if reversed {
             lp = lp.into_iter().rev().map(|x| x.flipped()).collect();
         }

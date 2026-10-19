@@ -230,7 +230,7 @@ fn with_ghosts(m: &PolyMesh, topo: &Topo) -> Result<(PolyMesh, Vec<bool>), PolyS
     }
     // A boundary vertex's ghost on its edge in (from prev) and out (to next).
     let mut ghost: HashMap<(usize, bool), usize> = HashMap::new();
-    let mut add = |out: &mut PolyMesh, p: DVec3| {
+    let add = |out: &mut PolyMesh, p: DVec3| {
         out.points.push(p);
         out.points.len() - 1
     };
@@ -280,9 +280,31 @@ fn from(f: &[usize], v: usize) -> [usize; 4] {
 }
 
 /// The bicubic Bézier patch of a regular quadrilateral: u from its first
-/// corner to its second, v from its first to its fourth. Points missing
-/// past a boundary are reflected across it.
+/// corner to its second, v from its first to its fourth.
 fn regular_patch(m: &PolyMesh, topo: &Topo, q: &[usize]) -> NurbsSurface {
+    let pos = patch_grid(m, topo, q);
+    // Uniform cubic B-spline to Bézier, in each direction.
+    const M: [[f64; 4]; 4] = [[1.0, 4.0, 1.0, 0.0], [0.0, 4.0, 2.0, 0.0], [0.0, 2.0, 4.0, 0.0], [0.0, 1.0, 4.0, 1.0]];
+    let mut ctrl = Vec::with_capacity(16);
+    for a in 0..4 {
+        for b in 0..4 {
+            let mut s = DVec3::ZERO;
+            for i in 0..4 {
+                for j in 0..4 {
+                    s += pos[i][j] * (M[a][i] * M[b][j] / 36.0);
+                }
+            }
+            ctrl.push(s.extend(1.0));
+        }
+    }
+    let k = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+    NurbsSurface::new(3, 3, k.clone(), k, 4, 4, ctrl)
+}
+
+/// The 4×4 B-spline control grid round a regular quadrilateral, indexed
+/// [u][v] with its corners at [1..=2][1..=2]. Points missing past a
+/// boundary are reflected across it.
+fn patch_grid(m: &PolyMesh, topo: &Topo, q: &[usize]) -> [[DVec3; 4]; 4] {
     let p = |i: usize| m.points[i];
     let mut g = [[None::<usize>; 4]; 4];
     let (v0, v1, v2, v3) = (q[0], q[1], q[2], q[3]);
@@ -341,22 +363,111 @@ fn regular_patch(m: &PolyMesh, topo: &Topo, q: &[usize]) -> NurbsSurface {
             pos[i][j] = 2.0 * pos[i1][j] - pos[i2][j];
         }
     }
-    // Uniform cubic B-spline to Bézier, in each direction.
-    const M: [[f64; 4]; 4] = [[1.0, 4.0, 1.0, 0.0], [0.0, 4.0, 2.0, 0.0], [0.0, 2.0, 4.0, 0.0], [0.0, 1.0, 4.0, 1.0]];
-    let mut ctrl = Vec::with_capacity(16);
-    for a in 0..4 {
-        for b in 0..4 {
-            let mut s = DVec3::ZERO;
-            for i in 0..4 {
-                for j in 0..4 {
-                    s += pos[i][j] * (M[a][i] * M[b][j] / 36.0);
+    pos
+}
+
+/// Rectangles of the faces marked `free`, found greedily: each a grid of
+/// faces (rows along v, each face's corners from `from`), growing along u
+/// then v while the faces stay free and the rectangle does not wrap onto
+/// itself.
+fn blocks(m: &PolyMesh, topo: &Topo, free: &[bool]) -> Vec<Vec<Vec<[usize; 4]>>> {
+    let mut claimed = vec![false; m.faces.len()];
+    let mut out = Vec::new();
+    for f in 0..m.faces.len() {
+        if !free[f] || claimed[f] {
+            continue;
+        }
+        let first = from(&m.faces[f], m.faces[f][0]);
+        claimed[f] = true;
+        let mut verts: BTreeSet<usize> = first.iter().copied().collect();
+        let mut row = vec![first];
+        loop {
+            let q = *row.last().unwrap();
+            let Some(&g) = topo.directed.get(&(q[2], q[1])) else { break };
+            let n = from(&m.faces[g], q[1]);
+            if !free[g] || claimed[g] || verts.contains(&n[1]) || verts.contains(&n[2]) {
+                break;
+            }
+            claimed[g] = true;
+            verts.extend([n[1], n[2]]);
+            row.push(n);
+        }
+        let mut rows = vec![row];
+        'grow: loop {
+            let mut next = Vec::new();
+            let mut new = BTreeSet::new();
+            for q in rows.last().unwrap() {
+                let Some(&g) = topo.directed.get(&(q[3], q[2])) else { break 'grow };
+                let n = from(&m.faces[g], q[3]);
+                if !free[g] || claimed[g] || verts.contains(&n[2]) || verts.contains(&n[3]) {
+                    break 'grow;
+                }
+                new.insert(n[3]);
+                new.insert(n[2]);
+                next.push((g, n));
+            }
+            if new.len() != next.len() + 1 {
+                break;
+            }
+            for (g, _) in &next {
+                claimed[*g] = true;
+            }
+            verts.extend(new);
+            rows.push(next.into_iter().map(|x| x.1).collect());
+        }
+        out.push(rows);
+    }
+    out
+}
+
+/// One bicubic B-spline surface over a rectangle of regular faces, C2
+/// throughout and the same surface as its faces' patches.
+fn block_surface(m: &PolyMesh, topo: &Topo, rows: &[Vec<[usize; 4]>]) -> NurbsSurface {
+    let (nu, nv) = (rows[0].len(), rows.len());
+    let mut net = vec![vec![DVec3::ZERO; nv + 3]; nu + 3];
+    for (r, row) in rows.iter().enumerate() {
+        for (c, q) in row.iter().enumerate() {
+            let g = patch_grid(m, topo, q);
+            for (a, col) in g.iter().enumerate() {
+                for (b, p) in col.iter().enumerate() {
+                    net[c + a][r + b] = *p;
                 }
             }
-            ctrl.push(s.extend(1.0));
         }
     }
-    let k = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
-    NurbsSurface::new(3, 3, k.clone(), k, 4, 4, ctrl)
+    let net: Vec<Vec<DVec3>> = net.iter().map(|col| clamp_uniform(col)).collect();
+    let net: Vec<Vec<DVec3>> = (0..nv + 3).map(|j| clamp_uniform(&net.iter().map(|col| col[j]).collect::<Vec<_>>())).collect();
+    let knots = |n: usize| -> Vec<f64> { (0..n + 7).map(|i| (i.saturating_sub(3)).min(n) as f64).collect() };
+    let mut ctrl = Vec::with_capacity((nu + 3) * (nv + 3));
+    for i in 0..nu + 3 {
+        for row in &net {
+            ctrl.push(row[i].extend(1.0));
+        }
+    }
+    NurbsSurface::new(3, 3, knots(nu), knots(nv), nu + 3, nv + 3, ctrl)
+}
+
+/// The uniform cubic B-spline over `pts` (knots 0, 1, 2, ...) on its own
+/// domain, as control points over clamped knots: the same curve.
+fn clamp_uniform(pts: &[DVec3]) -> Vec<DVec3> {
+    let knots: Vec<f64> = (0..pts.len() + 4).map(|k| k as f64).collect();
+    let (knots, pts) = clamp_front(&knots, pts);
+    // The far end, by clamping the reversed curve's front.
+    let end = knots[knots.len() - 1];
+    let back: Vec<f64> = knots.iter().rev().map(|k| end - k).collect();
+    let rev: Vec<DVec3> = pts.into_iter().rev().collect();
+    let (_, pts) = clamp_front(&back, &rev);
+    pts.into_iter().rev().collect()
+}
+
+/// A cubic's front clamped: its first domain knot raised to multiplicity
+/// four and the control points before it dropped.
+fn clamp_front(knots: &[f64], pts: &[DVec3]) -> (Vec<f64>, Vec<DVec3>) {
+    let a = knots[3];
+    let c = NurbsCurve::from_points(3, knots.to_vec(), pts).insert_knot(a, 2);
+    let mut k = c.knots[2..].to_vec();
+    k[0] = a;
+    (k, c.ctrl[2..].iter().map(|h| h.truncate() / h.w).collect())
 }
 
 /// Edge `i` of a patch built for corners `q` (from `q[i]` to `q[i + 1]`)
@@ -370,14 +481,21 @@ fn patch_edge(s: &NurbsSurface, i: usize) -> NurbsCurve {
     }
 }
 
-/// Splines a polygon mesh: a solid when the mesh is closed, else a sheet.
+/// Splines a polygon mesh: a solid when the mesh is closed, else a sheet,
+/// with one patch per quadrilateral.
 pub fn polysplines(mesh: &PolyMesh) -> Result<Body, PolySplineError> {
+    polysplines_with(mesh, false)
+}
+
+/// As [`polysplines`]; with `merge`, rectangles of regular patches are
+/// joined into single B-spline surfaces (the same shape, fewer faces).
+pub fn polysplines_with(mesh: &PolyMesh, merge: bool) -> Result<Body, PolySplineError> {
     let mut m = mesh.clone();
     let mut topo = Topo::new(&m)?;
     let closed = topo.directed.keys().all(|(a, b)| topo.directed.contains_key(&(*b, *a)));
     let mut keep = vec![true; m.faces.len()];
     let mut steps = 0;
-    let mut step = |m: &mut PolyMesh, topo: &mut Topo, keep: &mut Vec<bool>| -> Result<(), PolySplineError> {
+    let step = |m: &mut PolyMesh, topo: &mut Topo, keep: &mut Vec<bool>| -> Result<(), PolySplineError> {
         // Each face splits into one quadrilateral per corner, in order.
         *keep = m.faces.iter().zip(keep.iter()).flat_map(|(f, k)| std::iter::repeat_n(*k, f.len())).collect();
         *m = catmull_clark(m)?;
@@ -409,10 +527,15 @@ pub fn polysplines(mesh: &PolyMesh) -> Result<Body, PolySplineError> {
     }
     let size = m.points.iter().fold(1.0f64, |a, p| a.max(p.abs().max_element()));
     let mut sw = crate::ops::sheet::Sewer::new(if closed { BodyKind::Solid } else { BodyKind::Sheet }, 1e-7 * size);
-    let mut faces: Vec<usize> = patches.keys().copied().collect();
-    faces.sort();
-    for f in faces.into_iter().filter(|f| keep[*f]) {
-        sw.patch(patches[&f].clone());
+    // Surfaces to sew: regular ones (merged or not) first, then fills.
+    let mut out: Vec<NurbsSurface> = Vec::new();
+    if merge {
+        let free: Vec<bool> = (0..m.faces.len()).map(|f| keep[f] && patches.contains_key(&f)).collect();
+        out.extend(blocks(&m, &topo, &free).iter().map(|b| block_surface(&m, &topo, b)));
+    } else {
+        let mut faces: Vec<usize> = patches.keys().copied().filter(|f| keep[*f]).collect();
+        faces.sort();
+        out.extend(faces.into_iter().map(|f| patches[&f].clone()));
     }
     // Fills round extraordinary vertices.
     for v in (0..m.points.len()).filter(|v| ev[*v] && topo.vertex_faces[*v].iter().any(|f| keep[*f])) {
@@ -469,8 +592,30 @@ pub fn polysplines(mesh: &PolyMesh) -> Result<Body, PolySplineError> {
         };
         // One quadrilateral per ring face, in ring order.
         for (s, _) in crate::ops::sheet::fill_quads(&cs, &cross).ok_or(PolySplineError::Fit)?.into_iter().zip(&kept).filter(|x| *x.1) {
-            sw.patch(s);
+            out.push(s);
         }
+    }
+    // A merged surface's sides break wherever another face's corner sits
+    // on them, so neighbours share edges.
+    let corners: Vec<DVec3> = out
+        .iter()
+        .flat_map(|s| {
+            let ((u0, u1), (v0, v1)) = s.domain();
+            [s.point(u0, v0), s.point(u1, v0), s.point(u1, v1), s.point(u0, v1)]
+        })
+        .collect();
+    let tol = 1e-7 * size;
+    for s in out {
+        let ((u0, u1), (v0, v1)) = s.domain();
+        let breaks = |knots: &[f64], lo: f64, hi: f64, at: &dyn Fn(f64) -> [DVec3; 2]| -> Vec<f64> {
+            let mut ks: Vec<f64> = knots.iter().copied().filter(|k| *k > lo && *k < hi).collect();
+            ks.dedup();
+            ks.retain(|k| at(*k).iter().any(|p| corners.iter().any(|c| c.distance(*p) < tol)));
+            ks
+        };
+        let us = breaks(&s.knots_u, u0, u1, &|u| [s.point(u, v0), s.point(u, v1)]);
+        let vs = breaks(&s.knots_v, v0, v1, &|v| [s.point(u0, v), s.point(u1, v)]);
+        sw.patch_split(s, &us, &vs);
     }
     Ok(sw.body)
 }
@@ -576,6 +721,30 @@ mod tests {
     }
 
     #[test]
+    fn merges_regular_patches_into_larger_surfaces() {
+        let b = polysplines_with(&cube(), true).unwrap();
+        assert_eq!(open_edges(&b), 0);
+        assert!(b.faces.len() < 96, "{} faces", b.faces.len());
+        assert!(worst_kink(&b) < 0.2, "{}", worst_kink(&b));
+        // The same surface: every merged face's points lie on the unmerged body.
+        let each = polysplines(&cube()).unwrap();
+        for f in b.face_ids() {
+            let ductile_geom::Surface::Nurbs(s) = &b.face(f).surface else { panic!() };
+            let ((u0, u1), (v0, v1)) = s.domain();
+            let p = s.point(u0 + 0.37 * (u1 - u0), v0 + 0.61 * (v1 - v0));
+            let d = each
+                .face_ids()
+                .map(|g| {
+                    let t = &each.face(g).surface;
+                    let uv = t.project(p, None);
+                    t.point(uv.x, uv.y).distance(p)
+                })
+                .fold(f64::MAX, f64::min);
+            assert!(d < 1e-6, "{d}");
+        }
+    }
+
+    #[test]
     fn splines_a_triangle_mesh() {
         // An octahedron: eight triangles, four meeting at each corner.
         let points = vec![DVec3::X, -DVec3::X, DVec3::Y, -DVec3::Y, DVec3::Z, -DVec3::Z];
@@ -599,9 +768,15 @@ mod tests {
         }
         let id = |i: usize, j: usize| (i % nu) * nv + (j % nv);
         let faces = (0..nu).flat_map(|i| (0..nv).map(move |j| vec![id(i, j), id(i + 1, j), id(i + 1, j + 1), id(i, j + 1)])).collect();
-        let b = polysplines(&PolyMesh { points, faces }).unwrap();
+        let mesh = PolyMesh { points, faces };
+        let b = polysplines(&mesh).unwrap();
         // All regular: one patch per quadrilateral, nothing subdivided.
         assert_eq!(b.faces.len(), 32);
+        assert_eq!(open_edges(&b), 0);
+        assert!(worst_kink(&b) < 1e-4, "{}", worst_kink(&b));
+        // Merged, rectangles that stop short of wrapping round.
+        let b = polysplines_with(&mesh, true).unwrap();
+        assert!(b.faces.len() <= 4, "{} faces", b.faces.len());
         assert_eq!(open_edges(&b), 0);
         assert!(worst_kink(&b) < 1e-4, "{}", worst_kink(&b));
     }
