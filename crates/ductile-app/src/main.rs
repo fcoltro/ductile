@@ -45,6 +45,7 @@ fn main() -> eframe::Result {
             "--isophote" => opts.analysis = Some(render::Analysis::Isophote),
             "--draft" => opts.analysis = Some(render::Analysis::Draft),
             "--direction" => opts.analysis = Some(render::Analysis::Direction),
+            "--topography" => opts.analysis = Some(render::Analysis::Topography),
             "--render" => opts.analysis = Some(render::Analysis::Render),
             "--look" => opts.look = args.next().and_then(|n| render::Look::ALL.into_iter().find(|l| l.label().eq_ignore_ascii_case(&n))),
             "--curvature" => opts.curvature = true,

@@ -405,6 +405,14 @@ pub fn swatch(p: &Painter, rect: Rect, a: crate::render::Analysis) {
     let row_colour = |t: f32| -> Option<Color32> {
         match a {
             Analysis::Zebra => Some(if ((t + 1.0) * 4.0) as i32 % 2 == 0 { Color32::from_gray(225) } else { Color32::from_gray(25) }),
+            Analysis::Topography => Some({
+                let k = ((t + 1.0) * 4.0) as i32;
+                if ((t + 1.0) * 4.0).fract() < 0.18 {
+                    Color32::from_gray(20)
+                } else {
+                    [Color32::from_rgb(240, 150, 70), Color32::from_rgb(200, 170, 80), Color32::from_rgb(90, 180, 130), Color32::from_rgb(70, 130, 200), Color32::from_rgb(50, 100, 210)][(k as usize).min(4) ]
+                }
+            }),
             Analysis::Draft => Some(if t < -0.15 {
                 Color32::from_rgb(70, 170, 80)
             } else if t < 0.15 {

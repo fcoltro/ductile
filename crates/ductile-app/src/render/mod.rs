@@ -68,10 +68,12 @@ pub enum Analysis {
     Direction,
     /// Materials lit by a studio environment.
     Render,
+    /// Height bands and contour lines up the construction plane's normal.
+    Topography,
 }
 
 impl Analysis {
-    pub const ALL: [Analysis; 6] = [Analysis::None, Analysis::Render, Analysis::Zebra, Analysis::Isophote, Analysis::Draft, Analysis::Direction];
+    pub const ALL: [Analysis; 7] = [Analysis::None, Analysis::Render, Analysis::Zebra, Analysis::Isophote, Analysis::Draft, Analysis::Direction, Analysis::Topography];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -81,6 +83,7 @@ impl Analysis {
             Analysis::Draft => "Draft",
             Analysis::Direction => "Face direction",
             Analysis::Render => "Rendered",
+            Analysis::Topography => "Topography",
         }
     }
 }
@@ -222,6 +225,8 @@ pub struct ViewportRenderer {
     pub analysis: Analysis,
     /// The look of plain shaded mode.
     pub look: Look,
+    /// Height between contour lines in topography shading.
+    pub contour: f32,
     /// Pull direction and minimum angle (degrees) for draft analysis.
     pub pull: ([f32; 3], f32),
     /// Section analysis: the plane (normal, offset) beyond which the
@@ -469,6 +474,7 @@ impl ViewportRenderer {
             xray: false,
             analysis: Analysis::None,
             look: Look::Clay,
+            contour: 1.0,
             pull: ([0.0, 0.0, 1.0], 1.0),
             section: None,
         }
@@ -698,7 +704,7 @@ impl ViewportRenderer {
             forward: fwd.as_vec3().extend(self.analysis as u32 as f32).into(),
             section: self.section.unwrap_or([0.0; 4]),
             pull: [self.pull.0[0], self.pull.0[1], self.pull.0[2], self.pull.1],
-            style: [self.look as u32 as f32, 0.0, 0.0, 0.0],
+            style: [self.look as u32 as f32, self.contour, 0.0, 0.0],
         };
         self.queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(&cu));
         let line_buf = (!lines.is_empty()).then(|| {

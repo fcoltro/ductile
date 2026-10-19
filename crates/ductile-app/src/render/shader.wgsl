@@ -8,7 +8,7 @@ struct Camera {
     viewport: vec4<f32>,
     // Camera forward direction (from eye into the scene); w: the analysis
     // shading (0 none, 1 zebra, 2 isophote, 3 draft, 4 face direction,
-    // 5 rendered).
+    // 5 rendered, 6 topography).
     forward: vec4<f32>,
     // Section plane: points with dot(xyz, p) + w > 0 are cut away; off
     // when xyz is zero.
@@ -16,7 +16,7 @@ struct Camera {
     // Draft analysis: pull direction, and the minimum angle in degrees.
     pull: vec4<f32>,
     // x: the look of plain shaded mode (0 clay, 1 ceramic, 2 graphite,
-    // 3 chrome, 4 wax).
+    // 3 chrome, 4 wax); y: height between contour lines.
     style: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -226,6 +226,26 @@ fn rendered(base: vec3<f32>, n_in: vec3<f32>, world: vec3<f32>, front: bool) -> 
     return c;
 }
 
+// Topography: bands coloured from low (blue) to high (orange) up the pull
+// direction, with a fine line at every contour and a heavier one every
+// fifth.
+fn topography(c: vec3<f32>, world: vec3<f32>) -> vec3<f32> {
+    let step = max(cam.style.y, 1e-6);
+    let h = dot(world, normalize(cam.pull.xyz)) / step;
+    let t = fract(h / 10.0);
+    let band = mix(mix(vec3<f32>(0.20, 0.42, 0.85), vec3<f32>(0.30, 0.75, 0.55), smoothstep(0.0, 0.5, t)), vec3<f32>(0.95, 0.60, 0.25), smoothstep(0.5, 1.0, t));
+    var col = c * 0.45 + band * luminance(c) * 0.9;
+    let w = max(fwidth(h), 1e-5);
+    let line = 1.0 - smoothstep(0.0, w * 1.2, abs(fract(h + 0.5) - 0.5));
+    let major = 1.0 - smoothstep(0.0, w * 2.0, abs(fract(h / 5.0 + 0.5) - 0.5) * 5.0);
+    col = mix(col, vec3<f32>(0.06), max(line * 0.55, major * 0.85));
+    return col;
+}
+
+fn luminance(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.3, 0.55, 0.15)) * 1.4;
+}
+
 // Isophotes: lines where the surface meets the view at the same angle,
 // every 10°. They run smoothly over G2 surfaces and kink at G1 joins.
 fn isophote(c: vec3<f32>, n_in: vec3<f32>, world: vec3<f32>, front: bool) -> vec3<f32> {
@@ -302,6 +322,8 @@ fn fs_mesh(o: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
         c = draft(c, o.nrm, front);
     } else if (mode == 5u) {
         c = rendered(base, o.nrm, o.world, front);
+    } else if (mode == 6u) {
+        c = topography(c, o.world);
     } else if (mode == 4u) {
         if (front) {
             c = shade(vec3<f32>(0.25, 0.45, 0.95), o.nrm, o.world, true);

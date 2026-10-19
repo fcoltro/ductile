@@ -347,6 +347,10 @@ impl DuctileApp {
         }
         self.doc.hide_curves = !self.show_curves;
         crate::units::set(self.prefs.unit);
+        if r.analysis == Analysis::Topography {
+            // About eighty contours across the scene.
+            r.contour = (self.doc.bbox().diagonal() / 80.0).max(1e-3) as f32;
+        }
         // Styles depend on selection/hover; recompute when they change.
         let hidden: Vec<ObjectId> = self.tool.as_ref().map(|t| t.hidden_objects()).unwrap_or_default();
         let key = {

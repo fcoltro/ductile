@@ -218,6 +218,8 @@ code from them.
 - Shaded looks: plain shading comes in five lighting studies of our own
   (Clay, Ceramic, Graphite, Chrome, Wax), picked under the shader balls
   or with `--look NAME`; they light from the camera as matcaps do.
+- Topography shading (`--topography`): height bands and contour lines up
+  the construction plane's normal, a heavier line every fifth.
 - Zebra stripes (Alt+R, or the Zebra button) to judge surface continuity:
   stripes stay unbroken across tangent (G1) joins and keep their direction
   across curvature-continuous (G2) ones. Headless: `--zebra`.
