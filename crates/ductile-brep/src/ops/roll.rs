@@ -380,6 +380,9 @@ pub(crate) fn move_end(b: &mut Body, x: EdgeId, v: VertexId, p: DVec3, nv: Verte
         t += ((old - t) / period).round() * period;
     }
     if xe.curve.point(t).distance(p) > 1e-5 * size {
+        if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+            eprintln!("move_end: edge {} ({:?}) misses {p:.5} by {:.3e}", x.0, std::mem::discriminant(&xe.curve), xe.curve.point(t).distance(p));
+        }
         return Err(super::fillet::unsupported(line!(), file!()));
     }
     let edge = &mut b.edges[x.idx()];
