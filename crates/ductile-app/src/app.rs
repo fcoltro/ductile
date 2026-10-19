@@ -68,6 +68,8 @@ pub struct DuctileApp {
     pub palette_at: Option<egui::Pos2>,
     /// Where the Shift+F menu of suggested commands is open.
     pub suggest_at: Option<egui::Pos2>,
+    /// Quit was asked for; the window closes on the next frame.
+    pub quit_requested: bool,
     /// Points drawn on the construction plane round to the grid.
     pub grid_snap: bool,
     /// Grid spacing; 0 follows the zoom.
@@ -168,6 +170,7 @@ impl DuctileApp {
             palette_open: false,
             palette_at: None,
             suggest_at: None,
+            quit_requested: false,
             grid_snap: true,
             grid_step: 0.0,
             grid_major: 5,
@@ -208,6 +211,11 @@ impl DuctileApp {
         } else if let (Some(p), true, false) = (last, app.prefs.load_last_session, opts.demo) {
             commands::open_file(&mut app, &p);
             app.doc.path = None;
+        } else if let (Some(p), false, true) = (commands::startup_scene_path().filter(|p| p.exists()), opts.demo, app.session_marked) {
+            if commands::load_into(&mut app.doc, &p).is_ok() {
+                app.doc.path = None;
+                app.doc.dirty = false;
+            }
         } else if opts.demo {
             commands::demo_scene(&mut app.doc);
             let bb = app.doc.bbox();
@@ -1306,6 +1314,9 @@ impl eframe::App for DuctileApp {
         let cmds = std::mem::take(&mut self.pending);
         for c in cmds {
             commands::run(self, c);
+        }
+        if std::mem::take(&mut self.quit_requested) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         if std::mem::take(&mut self.pending_finish) {
             self.finish_tool();

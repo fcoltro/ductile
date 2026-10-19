@@ -17,6 +17,11 @@ pub enum Command {
     Save,
     SaveAs,
     ImportStep,
+    ImportAppend,
+    QuickSaveVersion,
+    SaveStartup,
+    NewWindow,
+    Quit,
     ImportSvg,
     ImportMesh,
     ImportImage,
@@ -173,6 +178,11 @@ impl Command {
         Command::Save,
         Command::SaveAs,
         Command::ImportStep,
+        Command::ImportAppend,
+        Command::QuickSaveVersion,
+        Command::SaveStartup,
+        Command::NewWindow,
+        Command::Quit,
         Command::ImportSvg,
         Command::ImportMesh,
         Command::ImportImage,
@@ -330,6 +340,11 @@ impl Command {
             Save => "Save",
             SaveAs => "Save as…",
             ImportStep => "Import STEP…",
+            ImportAppend => "Import/Append…",
+            QuickSaveVersion => "Quick save version",
+            SaveStartup => "Save as startup scene",
+            NewWindow => "New window",
+            Quit => "Quit",
             ImportSvg => "Import SVG curves…",
             ImportMesh => "Import mesh (OBJ, STL, 3MF)…",
             ImportImage => "Reference image (PNG, JPEG)…",
@@ -503,7 +518,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
     // Shift+R repeats modeling commands, not navigation or selection.
     let fleeting = matches!(
         cmd,
-        Repeat | Palette | Help | Preferences | ToggleLeftPanel | ToggleRightPanel | SuggestedMenu | ConvertToVertices | ConvertToEdges | ConvertToFaces | ConvertToSolids | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | Group | Ungroup | LockSelected | UnlockAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleIsophote | ToggleDraft | ToggleFaceDirection | ToggleCurvature | ToggleSection | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
+        Repeat | Palette | Help | Preferences | ToggleLeftPanel | ToggleRightPanel | SuggestedMenu | ConvertToVertices | ConvertToEdges | ConvertToFaces | ConvertToSolids | Undo | Redo | New | Open | Save | SaveAs | QuickSaveVersion | SaveStartup | NewWindow | Quit | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | Group | Ungroup | LockSelected | UnlockAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleIsophote | ToggleDraft | ToggleFaceDirection | ToggleCurvature | ToggleSection | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
     );
     if !fleeting {
         app.last_command = Some(cmd);
@@ -533,7 +548,50 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             app.doc.clear();
             app.cancel_tool();
             app.status = "New document".into();
+            // A saved startup scene stands in for the empty one.
+            if let Some(p) = startup_scene_path().filter(|p| p.exists()) {
+                if load_into(&mut app.doc, &p).is_ok() {
+                    app.doc.path = None;
+                    app.doc.dirty = false;
+                    app.status = "New document from the startup scene".into();
+                }
+            }
         }
+        ImportAppend => {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Any supported", &["ductile", "step", "stp", "svg", "obj", "stl", "3mf"]).pick_file() {
+                app.doc.checkpoint("Import");
+                app.status = match append_file(&mut app.doc, &path) {
+                    Ok(n) => {
+                        app.frame_selection();
+                        format!("Added {n} object(s) from {}", path.display())
+                    }
+                    Err(e) => format!("Import failed: {e}"),
+                };
+            }
+        }
+        QuickSaveVersion => match app.doc.path.clone() {
+            Some(p) => {
+                let v = next_version_path(&p);
+                app.status = match write_native(&app.doc, &v) {
+                    Ok(()) => format!("Saved version {}", v.display()),
+                    Err(e) => format!("Version save failed: {e}"),
+                };
+            }
+            None => run(app, SaveAs),
+        },
+        SaveStartup => {
+            app.status = match startup_scene_path().ok_or_else(|| "no config folder".to_string()).and_then(|p| write_native(&app.doc, &p)) {
+                Ok(()) => "New documents now start from this scene".into(),
+                Err(e) => format!("Could not save the startup scene: {e}"),
+            };
+        }
+        NewWindow => {
+            app.status = match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn()) {
+                Ok(_) => "Opened a new window".into(),
+                Err(e) => format!("Could not open a new window: {e}"),
+            };
+        }
+        Quit => app.quit_requested = true,
         Open => {
             if let Some(path) = rfd::FileDialog::new().add_filter("Ductile", &["ductile"]).add_filter("STEP", &["step", "stp"]).pick_file() {
                 open_file(app, &path);
@@ -1443,6 +1501,39 @@ pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), Strin
     Ok(())
 }
 
+/// Where "Save as startup scene" keeps the scene new documents start from.
+pub fn startup_scene_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
+    Some(base.join("ductile").join("startup.ductile"))
+}
+
+/// `part.ductile` → the first free `part_v2.ductile`, `part_v3.ductile`, …
+/// beside it.
+pub fn next_version_path(p: &std::path::Path) -> std::path::PathBuf {
+    let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "untitled".into());
+    let ext = p.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "ductile".into());
+    (2..).map(|n| p.with_file_name(format!("{stem}_v{n}.{ext}"))).find(|c| !c.exists()).unwrap()
+}
+
+/// Adds a file's objects to the document without replacing it; returns
+/// how many were added.
+pub fn append_file(doc: &mut Document, path: &std::path::Path) -> Result<usize, String> {
+    let mut other = Document::default();
+    load_into(&mut other, path)?;
+    let n = other.objects.len();
+    doc.selection.clear();
+    for o in &other.objects {
+        let id = doc.add_body(&o.name, (*o.body).clone());
+        if let Some(x) = doc.objects.iter_mut().find(|x| x.id == id) {
+            (x.color, x.metalness, x.roughness, x.visible) = (o.color, o.metalness, o.roughness, o.visible);
+        }
+        doc.selection.insert(crate::document::Pick::Object(id));
+    }
+    doc.images.extend(other.images);
+    doc.dimensions.extend(other.dimensions);
+    Ok(n)
+}
+
 pub fn open_file(app: &mut DuctileApp, path: &std::path::Path) {
     match load_into(&mut app.doc, path) {
         Ok(()) => {
@@ -1817,6 +1908,25 @@ pub fn demo_scene(doc: &mut Document) {
 #[cfg(test)]
 mod native_tests {
     use super::*;
+
+    #[test]
+    fn appends_files_and_numbers_versions() {
+        let dir = std::env::temp_dir().join(format!("ductile-append-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("part.ductile");
+        let mut other = Document::default();
+        other.add_body("Box", ductile_brep::primitives::make_box(&Frame::WORLD, DVec3::ONE));
+        write_native(&other, &path).unwrap();
+        let mut doc = Document::default();
+        doc.add_body("Box", ductile_brep::primitives::make_box(&Frame::WORLD, DVec3::ONE));
+        assert_eq!(append_file(&mut doc, &path).unwrap(), 1);
+        assert_eq!(doc.objects.len(), 2);
+        assert_eq!(doc.selection.len(), 1, "the added objects are selected");
+        assert_eq!(next_version_path(&path), dir.join("part_v2.ductile"));
+        std::fs::write(dir.join("part_v2.ductile"), "").unwrap();
+        assert_eq!(next_version_path(&path), dir.join("part_v3.ductile"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn groups_and_locks_survive_save_and_open() {

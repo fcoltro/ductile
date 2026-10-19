@@ -36,7 +36,15 @@ fn app_menu(app: &mut DuctileApp, ui: &mut egui::Ui) {
             }
         }
         ui.separator();
-        for c in [Command::Save, Command::SaveAs, Command::ImportStep, Command::ImportSvg, Command::ImportMesh, Command::ImportImage, Command::ExportStep, Command::ExportStl, Command::ExportObj, Command::ExportHiddenLine] {
+        for c in [Command::Save, Command::SaveAs, Command::QuickSaveVersion, Command::SaveStartup] {
+            menu_item(app, ui, c);
+        }
+        ui.separator();
+        for c in [Command::ImportAppend, Command::ImportImage, Command::ExportStep, Command::ExportStl, Command::ExportObj, Command::ExportHiddenLine] {
+            menu_item(app, ui, c);
+        }
+        ui.separator();
+        for c in [Command::NewWindow, Command::Quit] {
             menu_item(app, ui, c);
         }
     });

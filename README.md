@@ -263,6 +263,11 @@ code from them.
   drag orbits and right drag pans; Blender,
   Maya, Rhino, Moi3D, 3ds Max, Fusion 360), zoom toward the cursor, the autosave interval and opening
   the last session on startup.
+- File menu as in Plasticity: Import/Append (Ctrl+Shift+O) adds a
+  Ductile, STEP, SVG or mesh file to the open scene; Quick save version
+  writes `name_v2.ductile`, `name_v3.ductile`, … beside the file; Save as
+  startup scene makes new documents (and launches) start from the current
+  one; New window; Quit (Ctrl+Q).
 - Backups: saving over a file first keeps the old copy in `<name>.backups`
   beside it (or a folder set in Preferences), pruned to the newest few plus
   one per hour, day and week as configured. If Ductile did not close
