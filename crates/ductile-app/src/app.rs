@@ -629,7 +629,15 @@ impl DuctileApp {
         let mut labels: Vec<(DVec3, String)> = Vec::new();
         if let Some((p, label)) = self.snap_marker.take().filter(|_| self.tool.is_some()) {
             overlay.push(LineInstance::point(p, [0.3, 0.9, 1.0, 1.0], 6.0));
-            labels.extend(label.map(|l| (p, l.to_string())));
+            let tag = self.tool.as_ref().and_then(|t| t.inference());
+            let text = match (label, tag) {
+                (Some(l), Some(t)) => Some(format!("{l},{t}")),
+                (l, t) => l.map(str::to_string).or(t),
+            };
+            labels.extend(text.map(|l| (p, l)));
+        }
+        if let Some(t) = &self.tool {
+            labels.extend(t.labels());
         }
         if self.show_curvature {
             self.curvature_overlay(&mut overlay, &mut labels);

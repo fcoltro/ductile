@@ -95,6 +95,15 @@ pub trait Tool {
     fn readout(&self) -> Option<(DVec3, String)> {
         None
     }
+    /// Dimension labels in the viewport, such as a rectangle's sides.
+    fn labels(&self) -> Vec<(DVec3, String)> {
+        vec![]
+    }
+    /// What the pointer is inferring, added to the snap's label at the
+    /// cursor (the plane drawn on, "square" when a rectangle locks square).
+    fn inference(&self) -> Option<String> {
+        None
+    }
 }
 
 fn drag_value(ui: &mut egui::Ui, label: &str, v: &mut f64, speed: f64) -> bool {
@@ -1709,6 +1718,25 @@ pub struct CurveTool {
     /// Knife (K): the finished curve splits the solid faces it lies on
     /// instead of becoming a curve object.
     pub knife: bool,
+    /// The rectangle being drawn has locked to a square.
+    square: bool,
+    /// The construction plane drawn on, as a tag at the cursor.
+    plane_tag: &'static str,
+}
+
+/// The name of a construction plane for the cursor tag: XY, YZ, XZ or
+/// Plane for any other.
+fn plane_tag(cplane: &CPlane) -> &'static str {
+    let z = cplane.frame.z;
+    if z.cross(DVec3::Z).length() < 1e-9 {
+        "XY"
+    } else if z.cross(DVec3::X).length() < 1e-9 {
+        "YZ"
+    } else if z.cross(DVec3::Y).length() < 1e-9 {
+        "XZ"
+    } else {
+        "Plane"
+    }
 }
 
 /// The end of a curve or edge nearest `q` within `tol`, with the
@@ -1758,7 +1786,23 @@ fn tangent_arc(p: DVec3, t: DVec3, q: DVec3, z: DVec3) -> Option<ductile_brep::p
 
 impl CurveTool {
     pub fn new(kind: CurveKind) -> Self {
-        Self { kind, points: vec![], cursor: None, size: DVec3::ZERO, angle: 0.0, sides: 6, closed: false, typed: None, tangent: None, knife: false }
+        Self { kind, points: vec![], cursor: None, size: DVec3::ZERO, angle: 0.0, sides: 6, closed: false, typed: None, tangent: None, knife: false, square: false, plane_tag: "XY" }
+    }
+
+    /// Opposite corners of the rectangle being drawn by its corner or
+    /// center.
+    fn rect_corners(&self) -> Option<(DVec3, DVec3)> {
+        let c = *self.points.first()?;
+        let f = current_cplane().frame;
+        let (w, h) = (self.size.x, self.size.y);
+        if w.abs() < 1e-9 || h.abs() < 1e-9 {
+            return None;
+        }
+        match self.kind {
+            CurveKind::Rectangle => Some((c, c + f.x * w + f.y * h)),
+            CurveKind::CenterRectangle => Some((c - f.x * w.abs() - f.y * h.abs(), c + f.x * w.abs() + f.y * h.abs())),
+            _ => None,
+        }
     }
 
     /// Points the multi-click kinds pass through, with the cursor as the
@@ -2020,12 +2064,20 @@ impl Tool for CurveTool {
             None => p.point,
         };
         self.cursor = pt;
+        self.plane_tag = plane_tag(cplane);
+        self.square = false;
         if let (Some(c), Some(q)) = (self.points.first().copied(), pt) {
-            match self.kind {
-                CurveKind::Rectangle => {
-                    let d = cplane.frame.dir_to_local(q - c);
-                    self.size = DVec3::new(d.x, d.y, 0.0);
+            // Within a few pixels of square, the rectangle locks square.
+            let mut lock = |d: DVec3| {
+                if d.x.abs() > 1e-9 && d.y.abs() > 1e-9 && (d.x.abs() - d.y.abs()).abs() < p.world_per_px * 8.0 {
+                    self.square = true;
+                    DVec3::new(d.x, d.x.abs() * d.y.signum(), 0.0)
+                } else {
+                    DVec3::new(d.x, d.y, 0.0)
                 }
+            };
+            match self.kind {
+                CurveKind::Rectangle => self.size = lock(cplane.frame.dir_to_local(q - c)),
                 CurveKind::Circle => self.size.x = snap_len(c.distance(q), p.world_per_px),
                 CurveKind::Ellipse => {
                     let d = cplane.frame.dir_to_local(q - c);
@@ -2036,10 +2088,7 @@ impl Tool for CurveTool {
                     self.size.x = snap_len(d.truncate().length(), p.world_per_px);
                     self.angle = d.y.atan2(d.x);
                 }
-                CurveKind::CenterRectangle => {
-                    let d = cplane.frame.dir_to_local(q - c);
-                    self.size = DVec3::new(d.x, d.y, 0.0);
-                }
+                CurveKind::CenterRectangle => self.size = lock(cplane.frame.dir_to_local(q - c)),
                 _ => {}
             }
         }
@@ -2102,6 +2151,21 @@ impl Tool for CurveTool {
         for p in &self.points {
             out.push(LineInstance::point(*p, [1.0, 0.85, 0.3, 1.0], 6.0));
         }
+        if let (true, Some((a, b))) = (self.square, self.rect_corners()) {
+            out.push(LineInstance::new(a, b, [0.95, 0.3, 0.85, 1.0], 1.5));
+        }
+    }
+    fn labels(&self) -> Vec<(DVec3, String)> {
+        let Some((a, b)) = self.rect_corners() else { return vec![] };
+        let f = current_cplane().frame;
+        let d = f.dir_to_local(b - a);
+        vec![(a + f.x * d.x * 0.5, format!("{:.3}", d.x.abs())), (a + f.x * d.x + f.y * d.y * 0.5, format!("{:.3}", d.y.abs()))]
+    }
+    fn inference(&self) -> Option<String> {
+        if self.points.is_empty() && self.cursor.is_none() {
+            return None;
+        }
+        Some(if self.square { format!("square,{}", self.plane_tag) } else { self.plane_tag.to_string() })
     }
     fn panel(&mut self, ui: &mut egui::Ui) -> bool {
         let mut ch = false;
@@ -5657,6 +5721,21 @@ mod tests {
         vols.sort_by(f64::total_cmp);
         assert_eq!(vols.len(), 3, "{vols:?}");
         assert!((vols[0] - 1.0).abs() < 1e-6 && (vols[1] - 1.0).abs() < 1e-6 && (vols[2] - 7.0).abs() < 1e-6, "{vols:?}");
+    }
+
+    #[test]
+    fn rectangles_lock_square_near_the_diagonal() {
+        let doc = Document::default();
+        let mut t = CurveTool::new(CurveKind::Rectangle);
+        click(&mut t, &doc, DVec3::ZERO, true);
+        // 8 px at 0.01 per pixel: 2.0 by 2.05 locks, 2.0 by 2.2 does not.
+        click(&mut t, &doc, DVec3::new(2.0, -2.05, 0.0), false);
+        assert!(t.square && (t.size.y + 2.0).abs() < 1e-12);
+        assert_eq!(t.inference().as_deref(), Some("square,XY"));
+        assert_eq!(t.labels().iter().map(|l| l.1.as_str()).collect::<Vec<_>>(), ["2.000", "2.000"]);
+        click(&mut t, &doc, DVec3::new(2.0, 2.2, 0.0), false);
+        assert!(!t.square);
+        assert_eq!(t.inference().as_deref(), Some("XY"));
     }
 
     #[test]
