@@ -374,6 +374,11 @@ fn analytic(a: &Surface, b: &Surface, roi: &BBox3, tol: f64) -> Option<Ssi> {
             let rr = (r * r - d * d).sqrt();
             Some(Ssi::Curves(vec![circle_curve(sf.origin - pf.z * d, pf.z, pf.x, rr)]))
         }
+        (Surface::Plane { frame: pf }, Surface::Torus { frame: tf, major, minor }) if pf.z.dot(tf.z).abs() < 1e-10 && (tf.origin - pf.origin).dot(pf.z).abs() < tol => {
+            // A plane through the axis cuts the tube in two circles.
+            let w = pf.z.cross(tf.z).normalize();
+            Some(Ssi::Curves(vec![circle_curve(tf.origin + w * *major, pf.z, w, *minor), circle_curve(tf.origin - w * *major, pf.z, w, *minor)]))
+        }
         (Surface::Sphere { frame: f1, radius: r1 }, Surface::Sphere { frame: f2, radius: r2 }) => {
             let dv = f2.origin - f1.origin;
             let d = dv.length();
