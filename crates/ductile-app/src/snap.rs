@@ -16,6 +16,25 @@ pub struct Snap {
     pub label: &'static str,
 }
 
+/// Which kinds of object snap are on (Object snaps in the Snapping card).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Kinds {
+    /// Points: ends, centres, middles, quarters, intersections,
+    /// perpendicular and tangent feet.
+    pub points: bool,
+    pub edges: bool,
+    pub curves: bool,
+    pub faces: bool,
+    /// Lines through the last point along the plane's axes.
+    pub axes: bool,
+}
+
+impl Default for Kinds {
+    fn default() -> Self {
+        Kinds { points: true, edges: true, curves: true, faces: true, axes: true }
+    }
+}
+
 /// Screen distance within which a point snap takes over.
 const POINT_PX: f64 = 10.0;
 /// Screen distance within which an inference line or a curve takes over.
@@ -83,11 +102,14 @@ fn line_ray_closest(a: DVec3, u: DVec3, ray: &Ray) -> Option<DVec3> {
 
 /// The best snap under the cursor, `anchor` being the last point placed
 /// (for inference lines, perpendicular and tangent snaps).
-pub fn find(doc: &Document, cam: &Camera, cplane: &Frame, cursor: DVec2, size: DVec2, ray: &Ray, anchor: Option<DVec3>) -> Option<Snap> {
+pub fn find(doc: &Document, cam: &Camera, cplane: &Frame, cursor: DVec2, size: DVec2, ray: &Ray, anchor: Option<DVec3>, kinds: &Kinds) -> Option<Snap> {
     let hit = picking::pick_face(doc, ray);
     let cx = Ctx { doc, cam, cursor, size, hit };
     let mut best: Option<(f64, Snap)> = None;
     let offer = |p: DVec3, label: &'static str, best: &mut Option<(f64, Snap)>| {
+        if !kinds.points {
+            return;
+        }
         if let Some(d) = cx.px(p) {
             if d < POINT_PX && best.is_none_or(|b| d < b.0) {
                 *best = Some((d, Snap { point: p, label }));
@@ -189,7 +211,7 @@ pub fn find(doc: &Document, cam: &Camera, cplane: &Frame, cursor: DVec2, size: D
         return Some(s);
     }
     // Lines through the last point along the construction plane's axes.
-    if let Some(a) = anchor {
+    if let Some(a) = anchor.filter(|_| kinds.axes) {
         let mut line: Option<(f64, Snap)> = None;
         for (u, label) in [(cplane.x, "X"), (cplane.y, "Y"), (cplane.z, "Z")] {
             let Some(p) = line_ray_closest(a, u, ray) else { continue };
@@ -219,11 +241,13 @@ pub fn find(doc: &Document, cam: &Camera, cplane: &Frame, cursor: DVec2, size: D
                 let p = ed.curve.point(t);
                 t = ed.curve.closest_param_in(ray.at((p - ray.origin).dot(ray.dir)), ed.t0, ed.t1);
             }
-            let label = if ob.body.kind == ductile_brep::BodyKind::Wire { "Curve" } else { "Edge" };
-            return Some(Snap { point: ed.curve.point(t), label });
+            let curve = ob.body.kind == ductile_brep::BodyKind::Wire;
+            if (curve && kinds.curves) || (!curve && kinds.edges) {
+                return Some(Snap { point: ed.curve.point(t), label: if curve { "Curve" } else { "Edge" } });
+            }
         }
     }
-    hit.map(|h| Snap { point: h.point, label: "Face" })
+    hit.filter(|_| kinds.faces).map(|h| Snap { point: h.point, label: "Face" })
 }
 
 #[cfg(test)]

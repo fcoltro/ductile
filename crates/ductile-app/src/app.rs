@@ -68,6 +68,15 @@ pub struct DuctileApp {
     pub palette_at: Option<egui::Pos2>,
     /// Where the Shift+F menu of suggested commands is open.
     pub suggest_at: Option<egui::Pos2>,
+    /// Points drawn on the construction plane round to the grid.
+    pub grid_snap: bool,
+    /// Grid spacing; 0 follows the zoom.
+    pub grid_step: f64,
+    /// Every how many lines a major line falls.
+    pub grid_major: u32,
+    /// Lines drawn each way from the centre.
+    pub grid_count: u32,
+    pub snap_kinds: crate::snap::Kinds,
     /// Whether this run set the running marker (not headless screenshots).
     session_marked: bool,
     /// The pointer over the viewport, for menus that open at the cursor.
@@ -159,6 +168,11 @@ impl DuctileApp {
             palette_open: false,
             palette_at: None,
             suggest_at: None,
+            grid_snap: true,
+            grid_step: 0.0,
+            grid_major: 5,
+            grid_count: 30,
+            snap_kinds: Default::default(),
             session_marked: false,
             pointer_pos: None,
             palette_query: String::new(),
@@ -370,9 +384,9 @@ impl DuctileApp {
         }
         let f = self.cplane.frame;
         let wpp = self.camera.world_per_pixel(self.camera.target, self.viewport_rect.height().max(1.0) as f64);
-        let step = tools::nice_step(wpp * 40.0);
-        let major = step * 5.0;
-        let n = 30i64;
+        let step = if self.grid_step > 0.0 { self.grid_step } else { tools::nice_step(wpp * 40.0) };
+        let major = step * self.grid_major.max(1) as f64;
+        let n = self.grid_count.max(1) as i64;
         let c = f.to_local(self.camera.target);
         let cx = (c.x / major).round() * major;
         let cy = (c.y / major).round() * major;
@@ -427,16 +441,17 @@ impl DuctileApp {
     fn snap(&self, cursor: DVec2, size: DVec2, ray: &crate::camera::Ray, ctrl: bool) -> (Option<DVec3>, Option<DVec3>, Option<&'static str>) {
         let f = self.cplane.frame;
         let plane_pt = ray.hit_plane(f.origin, f.z);
-        if self.snap_enabled {
+        // Ctrl suspends snapping while it is held.
+        if self.snap_enabled && !ctrl {
             let anchor = self.tool.as_ref().and_then(|t| t.anchor());
-            if let Some(s) = crate::snap::find(&self.doc, &self.camera, &f, cursor, size, ray, anchor) {
+            if let Some(s) = crate::snap::find(&self.doc, &self.camera, &f, cursor, size, ray, anchor, &self.snap_kinds) {
                 return (Some(s.point), plane_pt, Some(s.label));
             }
         }
         let grid = plane_pt.map(|p| {
-            if ctrl || self.snap_enabled {
+            if self.grid_snap && !ctrl {
                 let wpp = self.camera.world_per_pixel(p, size.y);
-                let step = tools::nice_step(wpp * 40.0) / if ctrl { 1.0 } else { 4.0 };
+                let step = if self.grid_step > 0.0 { self.grid_step } else { tools::nice_step(wpp * 40.0) / 4.0 };
                 let l = f.to_local(p);
                 f.to_world(DVec3::new((l.x / step).round() * step, (l.y / step).round() * step, 0.0))
             } else {

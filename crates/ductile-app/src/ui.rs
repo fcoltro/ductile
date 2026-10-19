@@ -657,12 +657,50 @@ pub fn right_panel(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 if theme::switch_row(ui, "Show grid", &mut grid) {
                     app.pending.push(Command::ToggleGrid);
                 }
+                theme::switch_row(ui, "Snap to grid", &mut app.grid_snap);
+                // The spacing, halved or doubled by the buttons; 0 follows the zoom.
+                ui.horizontal(|ui| {
+                    if ui.small_button("−").on_hover_text("Halve the spacing").clicked() {
+                        app.grid_step = if app.grid_step > 0.0 { app.grid_step / 2.0 } else { 1.0 };
+                    }
+                    let w = ui.available_width() - 32.0;
+                    let text = if app.grid_step > 0.0 { None } else { Some("auto") };
+                    match text {
+                        Some(t) => {
+                            if ui.add_sized([w, 20.0], egui::Button::new(t).frame(false)).on_hover_text("Spacing follows the zoom; click for a fixed spacing").clicked() {
+                                app.grid_step = 1.0;
+                            }
+                        }
+                        None => {
+                            ui.add_sized([w, 20.0], egui::DragValue::new(&mut app.grid_step).speed(0.01).range(0.0..=1e4).max_decimals(4));
+                        }
+                    }
+                    if ui.small_button("+").on_hover_text("Double the spacing").clicked() {
+                        app.grid_step = if app.grid_step > 0.0 { app.grid_step * 2.0 } else { 1.0 };
+                    }
+                });
+                egui::Grid::new("grid sizes").num_columns(2).show(ui, |ui| {
+                    ui.label("Grid size");
+                    ui.add(egui::DragValue::new(&mut app.grid_count).range(4..=200));
+                    ui.end_row();
+                    ui.label("Line every");
+                    ui.add(egui::DragValue::new(&mut app.grid_major).range(1..=50));
+                    ui.end_row();
+                });
             });
             card(ui, "SNAPPING", |ui| {
                 let mut snap = app.snap_enabled;
                 if theme::switch_row(ui, "Object snapping", &mut snap) {
                     app.pending.push(Command::ToggleSnap);
                 }
+                egui::CollapsingHeader::new(RichText::new("OBJECT SNAPS").size(11.0).color(theme::TEXT_DIM)).id_salt("object snaps").default_open(false).show(ui, |ui| {
+                    let k = &mut app.snap_kinds;
+                    theme::switch_row(ui, "Points", &mut k.points);
+                    theme::switch_row(ui, "Edges", &mut k.edges);
+                    theme::switch_row(ui, "Curves", &mut k.curves);
+                    theme::switch_row(ui, "Faces", &mut k.faces);
+                    theme::switch_row(ui, "Axes", &mut k.axes);
+                });
                 ui.add(egui::Label::new(RichText::new("Hold Ctrl to suspend snapping while you draw").size(11.0).color(theme::TEXT_DIM)).wrap());
             });
             card(ui, "PLANES", |ui| {

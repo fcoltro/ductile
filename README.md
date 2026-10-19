@@ -279,6 +279,9 @@ code from them.
   Plasticity: End, Middle, 1/4, 3/4, Center, Intersection, Perpendicular
   and Tangent to the last point, the X / Y / Z lines through it, then
   curves, edges and faces. Snaps hidden behind a solid are ignored.
+  The Snapping card turns each kind of object snap on or off; the Grid
+  card sets snapping to the grid, a fixed spacing (or one that follows the
+  zoom), the grid's size and its major lines. Ctrl suspends all snapping.
   While sketching, the tag also names the plane drawn on ("End,XY"); a
   rectangle shows its width and height and locks square near the
   diagonal ("square,XY", with a magenta guide).
