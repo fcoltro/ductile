@@ -683,6 +683,51 @@ pub fn deform_chain(segs: &[Segment], from: &Frame, from_lo: ductile_geom::DVec2
     Some(out)
 }
 
+/// Convert vertex: runs of straight segments become splines whose control
+/// points are the run's corners, so the corners turn smooth. A closed
+/// chain of lines becomes one closed spline, starting halfway along its
+/// first side so it stays smooth all round.
+pub fn convert_corners(segs: &[Segment], closed: bool) -> Vec<Segment> {
+    let is_line = |s: &Segment| matches!(s.curve, Curve3::Line { .. });
+    let spline = |pts: &[DVec3]| {
+        let c = NurbsCurve::uniform((pts.len() - 1).min(3), pts);
+        let (t0, t1) = c.domain();
+        Segment::new(Curve3::Nurbs(c), t0, t1)
+    };
+    if closed && segs.len() >= 3 && segs.iter().all(is_line) {
+        let corners: Vec<DVec3> = segs.iter().map(|s| s.start()).collect();
+        let m = 0.5 * (corners[0] + corners[1]);
+        let mut pts = vec![m];
+        pts.extend(corners[1..].iter().copied());
+        pts.push(corners[0]);
+        pts.push(m);
+        return vec![spline(&pts)];
+    }
+    let mut out = Vec::new();
+    let mut run: Vec<DVec3> = Vec::new();
+    let flush = |run: &mut Vec<DVec3>, out: &mut Vec<Segment>| {
+        match run.len() {
+            0 | 1 => {}
+            2 => out.push(Segment::line(run[0], run[1])),
+            _ => out.push(spline(run)),
+        }
+        run.clear();
+    };
+    for s in segs {
+        if is_line(s) {
+            if run.is_empty() {
+                run.push(s.start());
+            }
+            run.push(s.end());
+        } else {
+            flush(&mut run, &mut out);
+            out.push(s.clone());
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
 /// A chain of segments run the other way.
 pub fn reverse_chain(segs: &[Segment]) -> Vec<Segment> {
     segs.iter().rev().map(reverse_segment).collect()
@@ -1104,6 +1149,24 @@ mod align_tests {
 #[cfg(test)]
 mod split_tests {
     use super::*;
+
+    #[test]
+    fn converts_corners_to_control_points() {
+        let p = [DVec3::ZERO, DVec3::new(2.0, 0.0, 0.0), DVec3::new(2.0, 2.0, 0.0), DVec3::new(0.0, 2.0, 0.0)];
+        let open: Vec<Segment> = (0..3).map(|i| Segment::line(p[i], p[i + 1])).collect();
+        let c = convert_corners(&open, false);
+        assert_eq!(c.len(), 1);
+        assert!(c[0].start().distance(p[0]) < 1e-12 && c[0].end().distance(p[3]) < 1e-12);
+        let Curve3::Nurbs(n) = &c[0].curve else { panic!() };
+        assert_eq!(n.control_points(), p.to_vec());
+        // Closed: one smooth loop.
+        let sq: Vec<Segment> = (0..4).map(|i| Segment::line(p[i], p[(i + 1) % 4])).collect();
+        let c = convert_corners(&sq, true);
+        assert_eq!(c.len(), 1);
+        assert!(c[0].start().distance(c[0].end()) < 1e-12);
+        let (t0, t1) = (c[0].t0, c[0].t1);
+        assert!(c[0].curve.tangent(t0).normalize().distance(c[0].curve.tangent(t1).normalize()) < 1e-9);
+    }
 
     #[test]
     fn split_chains_and_insert_knots() {

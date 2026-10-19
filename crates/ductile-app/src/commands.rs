@@ -90,6 +90,7 @@ pub enum Command {
     OffsetCurve,
     JoinCurves,
     SplitCurve,
+    ConvertVertex,
     DeformCurve,
     SlideCv,
     InsertKnot,
@@ -235,6 +236,7 @@ impl Command {
         Command::JoinCurves,
         Command::Trim,
         Command::SplitCurve,
+        Command::ConvertVertex,
         Command::DeformCurve,
         Command::SlideCv,
         Command::InsertKnot,
@@ -380,6 +382,7 @@ impl Command {
             JoinCurves => "Join curves or surfaces",
             Trim => "Trim curves",
             SplitCurve => "Split curve at a point",
+            ConvertVertex => "Convert corners to control points",
             DeformCurve => "Deform curves onto a face",
             SlideCv => "Slide control points",
             InsertKnot => "Insert knot (add a control point)",
@@ -998,6 +1001,16 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Select two curves (or two curve ends in vertex mode) to bridge".into(),
         },
+        ConvertVertex => {
+            let convert = |s: &[ductile_brep::profile::Segment]| {
+                let closed = s.first().zip(s.last()).is_some_and(|(a, b)| a.start().distance(b.end()) < 1e-9);
+                ductile_brep::curves::convert_corners(s, closed)
+            };
+            app.status = match crate::tools::edit_selected_curves(&mut app.doc, "Convert vertex", &convert) {
+                Ok(n) => format!("Smoothed the corners of {n} curve(s)"),
+                Err(e) => e,
+            }
+        }
         ReverseCurve => {
             app.status = match crate::tools::edit_selected_curves(&mut app.doc, "Reverse curve", &ductile_brep::curves::reverse_chain) {
                 Ok(n) => format!("Reversed {n} curve(s)"),

@@ -75,7 +75,8 @@ code from them.
   between curve crossings; Join (J) merges curves that meet end to end
   into one. Split curve cuts a curve at the points you click (a closed
   one opens there); Insert knot (K to switch) adds a control point
-  without changing the shape. Deform curve lays curves drawn over a flat
+  without changing the shape; Convert corners turns a polyline's corners
+  into control points of one smooth spline. Deform curve lays curves drawn over a flat
   face onto another face (curved too), with scale, offset and flips in its
   u, v and normal (Unwrap face lays a face flat first, exactly for planes,
   cylinders and cones, as a reference). Slide CV (Shift+G) moves selected control points along
