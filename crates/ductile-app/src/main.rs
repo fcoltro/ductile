@@ -29,6 +29,7 @@ mod snap;
 mod theme;
 mod tools;
 mod ui;
+mod units;
 
 fn main() -> eframe::Result {
     env_logger::init();

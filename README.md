@@ -288,7 +288,9 @@ code from them.
   and drill-down on or off, mouse navigation presets (Plasticity: middle
   drag orbits and right drag pans; Blender,
   Maya, Rhino, Moi3D, 3ds Max, Fusion 360), zoom toward the cursor, the autosave interval and opening
-  the last session on startup.
+  the last session on startup, and the display unit (mm, cm, m, in, ft):
+  the model stays in millimetres, while readouts, measurements and
+  dimensions show the chosen unit and a bare typed length is read in it.
 - File menu as in Plasticity: Import/Append (Ctrl+Shift+O) adds a
   Ductile, STEP, SVG or mesh file to the open scene; Quick save version
   writes `name_v2.ductile`, `name_v3.ductile`, … beside the file; Save as

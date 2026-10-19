@@ -1230,6 +1230,14 @@ pub fn prefs_window(app: &mut DuctileApp, ctx: &egui::Context) {
         });
         ui.checkbox(&mut p.zoom_to_cursor, "Zoom toward the cursor");
         ui.add_space(6.0);
+        ui.label(RichText::new("Units").strong());
+        egui::ComboBox::from_label("Lengths").selected_text(p.unit.name()).show_ui(ui, |ui| {
+            for u in crate::units::Unit::ALL {
+                ui.selectable_value(&mut p.unit, u, u.name());
+            }
+        });
+        ui.label(RichText::new("The model stays in millimetres; this sets how lengths are shown and how a bare typed number is read").color(theme::TEXT_DIM));
+        ui.add_space(6.0);
         ui.label(RichText::new("Files").strong());
         ui.horizontal(|ui| {
             ui.label("Autosave every");

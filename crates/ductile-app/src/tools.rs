@@ -132,6 +132,10 @@ pub trait Tool {
     }
     /// Typed digits from the keyboard (modal value entry).
     fn typed_value(&mut self, _v: Option<f64>) {}
+    /// Whether the typed value is a length, read in the display unit.
+    fn typed_length(&self) -> bool {
+        false
+    }
     /// Axis constraint keys.
     fn constrain_axis(&mut self, _axis: usize) {}
     /// The command's own keys, listed in the hint strip over the viewport
@@ -699,6 +703,9 @@ pub fn scale_about(p: DVec3, f: f64) -> DMat4 {
 }
 
 impl Tool for TransformTool {
+    fn typed_length(&self) -> bool {
+        self.kind == TransformKind::Move
+    }
     fn keys(&self) -> Vec<(&'static str, &'static str)> {
         vec![("X Y Z", "Axis"), ("Tab", "Value"), ("Ctrl", "Snap off")]
     }
@@ -840,7 +847,7 @@ impl Tool for TransformTool {
         let text = match self.kind {
             TransformKind::Move => {
                 let d = m.w_axis.truncate();
-                return Some((self.pivot + d, format!("{:.5}", d.length())));
+                return Some((self.pivot + d, crate::units::num(d.length())));
             }
             TransformKind::Rotate => {
                 let (_, q, _) = m.to_scale_rotation_translation();
@@ -1620,6 +1627,9 @@ impl ExtrudeTool {
 }
 
 impl Tool for ExtrudeTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn keys(&self) -> Vec<(&'static str, &'static str)> {
         vec![("Tab", "Distance"), ("Q", "Union"), ("W", "Difference"), ("Shift+E", "Intersect"), ("B", "New body")]
     }
@@ -1679,7 +1689,7 @@ impl Tool for ExtrudeTool {
         out
     }
     fn readout(&self) -> Option<(DVec3, String)> {
-        (self.start_t.is_some() || self.typed.is_some()).then(|| (self.base + self.normal * self.value(), format!("{:.5}", self.value())))
+        (self.start_t.is_some() || self.typed.is_some()).then(|| (self.base + self.normal * self.value(), crate::units::num(self.value())))
     }
     fn panel(&mut self, ui: &mut egui::Ui) -> bool {
         let mut d = self.value();
@@ -2124,6 +2134,9 @@ impl CurveTool {
 }
 
 impl Tool for CurveTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn keys(&self) -> Vec<(&'static str, &'static str)> {
         vec![("C", "Variant"), ("K", "Knife"), ("Tab", "Size"), ("Ctrl", "Snap off"), ("Enter", "Finish curve")]
     }
@@ -2255,7 +2268,7 @@ impl Tool for CurveTool {
         let Some((a, b)) = self.rect_corners() else { return vec![] };
         let f = current_cplane().frame;
         let d = f.dir_to_local(b - a);
-        vec![(a + f.x * d.x * 0.5, format!("{:.3}", d.x.abs())), (a + f.x * d.x + f.y * d.y * 0.5, format!("{:.3}", d.y.abs()))]
+        vec![(a + f.x * d.x * 0.5, crate::units::num(d.x.abs())), (a + f.x * d.x + f.y * d.y * 0.5, crate::units::num(d.y.abs()))]
     }
     fn inference(&self) -> Option<String> {
         if self.points.is_empty() && self.cursor.is_none() {
@@ -2586,6 +2599,9 @@ impl FilletTool {
 }
 
 impl Tool for FilletTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn keys(&self) -> Vec<(&'static str, &'static str)> {
         vec![("D / Tab", "Distance"), ("L", "Limit points"), ("T", "Tangent edges")]
     }
@@ -2629,7 +2645,7 @@ impl Tool for FilletTool {
         vec![Slot { title: "Select edges", detail: if self.shape == BlendShape::Chamfer { "to chamfer" } else { "to fillet" }, filled: count(self.edges.len(), "edge", "edges") }]
     }
     fn readout(&self) -> Option<(DVec3, String)> {
-        (self.start_t.is_some() || self.typed.is_some()).then(|| (self.base + self.dir * self.value(), format!("{:.5}", self.value())))
+        (self.start_t.is_some() || self.typed.is_some()).then(|| (self.base + self.dir * self.value(), crate::units::num(self.value())))
     }
     fn panel(&mut self, ui: &mut egui::Ui) -> bool {
         let mut r = self.value();
@@ -2757,6 +2773,9 @@ impl PipeTool {
 }
 
 impl Tool for PipeTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "Pipe"
     }
@@ -2895,6 +2914,9 @@ impl ShellTool {
 }
 
 impl Tool for ShellTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         match self.mode {
             OffsetMode::Shell => "Shell",
@@ -3270,6 +3292,9 @@ impl ExtendTool {
 }
 
 impl Tool for ExtendTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "Extend curve"
     }
@@ -3394,6 +3419,9 @@ impl ExtendSheetTool {
 }
 
 impl Tool for ExtendSheetTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "Extend surface"
     }
@@ -3873,6 +3901,9 @@ impl ThickenTool {
 }
 
 impl Tool for ThickenTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "Thicken"
     }
@@ -4513,6 +4544,9 @@ impl SlideCvTool {
 }
 
 impl Tool for SlideCvTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "Slide CV"
     }
@@ -4622,6 +4656,9 @@ impl RemoveFilletsTool {
 }
 
 impl Tool for RemoveFilletsTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "Remove fillets"
     }
@@ -4724,6 +4761,9 @@ impl OffsetEdgeTool {
 }
 
 impl Tool for OffsetEdgeTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "Offset edge"
     }
@@ -5956,7 +5996,7 @@ mod tests {
         click(&mut t, &doc, DVec3::new(2.0, -2.05, 0.0), false);
         assert!(t.square && (t.size.y + 2.0).abs() < 1e-12);
         assert_eq!(t.inference().as_deref(), Some("square,XY"));
-        assert_eq!(t.labels().iter().map(|l| l.1.as_str()).collect::<Vec<_>>(), ["2.000", "2.000"]);
+        assert_eq!(t.labels().iter().map(|l| l.1.as_str()).collect::<Vec<_>>(), ["2", "2"]);
         click(&mut t, &doc, DVec3::new(2.0, 2.2, 0.0), false);
         assert!(!t.square);
         assert_eq!(t.inference().as_deref(), Some("XY"));
@@ -6680,6 +6720,9 @@ impl TextTool {
 }
 
 impl Tool for TextTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "Text"
     }
@@ -7019,6 +7062,9 @@ impl TangentCircleTool {
 }
 
 impl Tool for TangentCircleTool {
+    fn typed_length(&self) -> bool {
+        true
+    }
     fn name(&self) -> &'static str {
         "Tangent circle"
     }
@@ -7219,9 +7265,7 @@ pub fn dimension_lines(d: &crate::document::Dimension, color: [f32; 4], out: &mu
 
 /// The dimension's text and where it goes.
 pub fn dimension_label(d: &crate::document::Dimension) -> (DVec3, String) {
-    let s = format!("{:.4}", d.a.distance(d.b));
-    let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
-    ((d.a + d.b) * 0.5 + d.offset, s)
+    ((d.a + d.b) * 0.5 + d.offset, crate::units::num(d.a.distance(d.b)))
 }
 
 /// Dimension: click two points, then move the line off them and click to

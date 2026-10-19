@@ -5,15 +5,27 @@
 
 /// The value of `s`, or None if it doesn't parse.
 pub fn eval(s: &str) -> Option<f64> {
-    let mut p = Parser { s: s.as_bytes(), i: 0 };
+    parse(s).map(|(v, _)| v)
+}
+
+/// A typed length in millimetres: with no unit anywhere in it, the
+/// numbers are read in the display unit.
+pub fn eval_length(s: &str) -> Option<f64> {
+    parse(s).map(|(v, unit)| if unit { v } else { v * crate::units::current().mm() })
+}
+
+/// The value, and whether any unit was written.
+fn parse(s: &str) -> Option<(f64, bool)> {
+    let mut p = Parser { s: s.as_bytes(), i: 0, unit: false };
     let v = p.sum()?;
     p.space();
-    (p.i == p.s.len() && v.is_finite()).then_some(v)
+    (p.i == p.s.len() && v.is_finite()).then_some((v, p.unit))
 }
 
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
+    unit: bool,
 }
 
 impl Parser<'_> {
@@ -122,6 +134,7 @@ impl Parser<'_> {
         ];
         for (name, f) in UNITS {
             if self.word(name) {
+                self.unit = true;
                 return *f;
             }
         }
@@ -152,5 +165,13 @@ mod tests {
         assert_eq!(eval("(1"), None);
         assert_eq!(eval("1/0"), None);
         assert_eq!(eval("5 apples"), None);
+    }
+
+    #[test]
+    fn bare_lengths_read_in_the_display_unit() {
+        crate::units::set(crate::units::Unit::Centimetre);
+        assert_eq!(super::eval_length("2+1"), Some(30.0));
+        assert_eq!(super::eval_length("4mm"), Some(4.0));
+        crate::units::set(crate::units::Unit::Millimetre);
     }
 }

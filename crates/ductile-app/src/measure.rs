@@ -14,6 +14,8 @@ pub struct Measurement {
     pub span: Option<(DVec3, DVec3)>,
 }
 
+use crate::units::{area as sq, len, num, volume as cube};
+
 fn fmt(v: f64) -> String {
     let s = format!("{v:.4}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
@@ -163,16 +165,16 @@ pub fn measure(doc: &Document) -> Option<Measurement> {
                     if p.z.cross(q.z).length() < 1e-9 {
                         let (x, y) = closest(&ga, &gb)?;
                         let d = (q.origin - p.origin).dot(p.z).abs();
-                        return Some(Measurement { text: format!("Distance {} (parallel faces)", fmt(d)), span: Some((x, x + p.z * (y - x).dot(p.z))) });
+                        return Some(Measurement { text: format!("Distance {} (parallel faces)", len(d)), span: Some((x, x + p.z * (y - x).dot(p.z))) });
                     }
                     let ang = p.z.angle_between(q.z).to_degrees();
                     let (x, y) = closest(&ga, &gb)?;
-                    return Some(Measurement { text: format!("Angle {}° · distance {}", fmt(ang.min(180.0 - ang)), fmt(x.distance(y))), span: Some((x, y)) });
+                    return Some(Measurement { text: format!("Angle {}° · distance {}", fmt(ang.min(180.0 - ang)), len(x.distance(y))), span: Some((x, y)) });
                 }
             }
             let (x, y) = closest(&ga, &gb)?;
             let d = y - x;
-            Some(Measurement { text: format!("Distance {} (dx {} dy {} dz {})", fmt(d.length()), fmt(d.x), fmt(d.y), fmt(d.z)), span: Some((x, y)) })
+            Some(Measurement { text: format!("Distance {} (dx {} dy {} dz {})", len(d.length()), num(d.x), num(d.y), num(d.z)), span: Some((x, y)) })
         }
         [a] => {
             let text = match *a {
@@ -180,8 +182,8 @@ pub fn measure(doc: &Document) -> Option<Measurement> {
                     let body = &doc.object(o)?.body;
                     let ed = body.edge(e);
                     let size = match &ed.curve {
-                        Curve3::Circle { radius, .. } => format!("Radius {} · diameter {} · length {}", fmt(*radius), fmt(2.0 * radius), fmt(ed.length())),
-                        _ => format!("Length {}", fmt(ed.length())),
+                        Curve3::Circle { radius, .. } => format!("Radius {} · diameter {} · length {}", len(*radius), len(2.0 * radius), len(ed.length())),
+                        _ => format!("Length {}", len(ed.length())),
                     };
                     match continuity(body, e) {
                         Some(c) => format!("{size} · {c}"),
@@ -195,23 +197,23 @@ pub fn measure(doc: &Document) -> Option<Measurement> {
                         (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).length() * 0.5
                     }).sum::<f64>())?;
                     match &ob.body.face(f).surface {
-                        Surface::Cylinder { radius, .. } => format!("Area {} · radius {}", fmt(area), fmt(*radius)),
-                        Surface::Sphere { radius, .. } => format!("Area {} · radius {}", fmt(area), fmt(*radius)),
-                        _ => format!("Area {}", fmt(area)),
+                        Surface::Cylinder { radius, .. } => format!("Area {} · radius {}", sq(area), len(*radius)),
+                        Surface::Sphere { radius, .. } => format!("Area {} · radius {}", sq(area), len(*radius)),
+                        _ => format!("Area {}", sq(area)),
                     }
                 }
                 Pick::Object(o) => {
                     let ob = doc.object(o)?;
                     match ob.body.kind {
-                        ductile_brep::BodyKind::Solid => format!("Volume {} · area {}", fmt(ob.mesh.volume()), fmt(ob.mesh.area())),
-                        ductile_brep::BodyKind::Sheet => format!("Area {}", fmt(ob.mesh.area())),
-                        ductile_brep::BodyKind::Wire => format!("Length {}", fmt(ob.body.edges.iter().map(|e| e.length()).sum())),
-                        ductile_brep::BodyKind::Mesh => format!("Mesh · {} triangles · area {}", ob.mesh.triangle_count(), fmt(ob.mesh.area())),
+                        ductile_brep::BodyKind::Solid => format!("Volume {} · area {}", cube(ob.mesh.volume()), sq(ob.mesh.area())),
+                        ductile_brep::BodyKind::Sheet => format!("Area {}", sq(ob.mesh.area())),
+                        ductile_brep::BodyKind::Wire => format!("Length {}", len(ob.body.edges.iter().map(|e| e.length()).sum())),
+                        ductile_brep::BodyKind::Mesh => format!("Mesh · {} triangles · area {}", ob.mesh.triangle_count(), sq(ob.mesh.area())),
                     }
                 }
                 Pick::Vertex(o, v) => {
                     let p = doc.object(o)?.body.vertex(v);
-                    format!("Point {}, {}, {}", fmt(p.x), fmt(p.y), fmt(p.z))
+                    format!("Point {}, {}, {}", num(p.x), num(p.y), num(p.z))
                 }
                 _ => return None,
             };
@@ -250,7 +252,7 @@ mod tests {
         let bc = &doc.object(c).unwrap().body;
         let rim = bc.edge_ids().find(|e| matches!(bc.edge(*e).curve, Curve3::Circle { .. })).unwrap();
         doc.selection.insert(Pick::Edge(c, rim));
-        assert!(measure(&doc).unwrap().text.starts_with("Radius 1 · diameter 2"));
+        assert!(measure(&doc).unwrap().text.starts_with("Radius 1 mm · diameter 2 mm"));
     }
 }
 
@@ -296,7 +298,7 @@ pub fn continuity(b: &Body, e: EdgeId) -> Option<String> {
         kmax = kmax.max(side[0].2.abs()).max(side[1].2.abs());
     }
     Some(if gap > 1e-5 * size {
-        format!("not G0: gap up to {}", fmt(gap))
+        format!("not G0: gap up to {}", len(gap))
     } else if angle.to_degrees() > 0.1 {
         format!("G0: faces meet at up to {}°", fmt(angle.to_degrees()))
     } else if dk > 0.02 * kmax.max(1e-9) && dk > 1e-6 / size {

@@ -342,6 +342,7 @@ impl DuctileApp {
             }
         }
         self.doc.hide_curves = !self.show_curves;
+        crate::units::set(self.prefs.unit);
         // Styles depend on selection/hover; recompute when they change.
         let hidden: Vec<ObjectId> = self.tool.as_ref().map(|t| t.hidden_objects()).unwrap_or_default();
         let key = {
@@ -787,7 +788,9 @@ impl DuctileApp {
         }
         self.view_gizmo(ui, rect);
         if let Some(t) = &self.typed {
+            let length = self.tool.as_ref().is_some_and(|t| t.typed_length());
             let shown = match crate::expr::eval(t) {
+                Some(_) if length && t.parse::<f64>().is_err() => format!("= {t}  ({})", crate::units::len(crate::expr::eval_length(t).unwrap_or(0.0))),
                 Some(v) if t.parse::<f64>().is_err() => format!("= {t}  ({})", fmt_value(v)),
                 None if !t.is_empty() => format!("= {t}  ?"),
                 _ => format!("= {t}"),
@@ -1085,7 +1088,9 @@ impl DuctileApp {
 
     /// Hands the typed field's value to the tool (None while it doesn't parse).
     fn apply_typed(&mut self) {
-        let v = self.typed.as_deref().and_then(crate::expr::eval);
+        let length = self.tool.as_ref().is_some_and(|t| t.typed_length());
+        let eval = if length { crate::expr::eval_length } else { crate::expr::eval };
+        let v = self.typed.as_deref().and_then(eval);
         if let Some(t) = self.tool.as_mut() {
             t.typed_value(v);
         }
