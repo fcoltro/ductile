@@ -129,6 +129,8 @@ pub struct Document {
     pub mode: SelectMode,
     /// Modes toggled on alongside `mode`, as bits of `SelectMode`.
     pub also: u8,
+    /// Curves are hidden by the Show curves switch, so they can't be picked.
+    pub hide_curves: bool,
     next_id: ObjectId,
     revision: u64,
     undo: Vec<Snapshot>,
@@ -155,6 +157,7 @@ impl Default for Document {
             hover: None,
             mode: SelectMode::Object,
             also: 0,
+            hide_curves: false,
             next_id: 1,
             revision: 1,
             undo: vec![],
@@ -191,6 +194,11 @@ pub fn mesh_body(body: &Body) -> BodyMesh {
 }
 
 impl Document {
+    /// Whether an object is drawn, and so can be picked.
+    pub fn shown(&self, o: &Object) -> bool {
+        o.visible && !(self.hide_curves && o.body.kind == ductile_brep::BodyKind::Wire)
+    }
+
     /// The current selection turned into another kind of element
     /// (Plasticity's Ctrl+1..4): solids give all their vertices, edges or
     /// faces; faces give their edges and corners; edges their ends and the

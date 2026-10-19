@@ -42,7 +42,7 @@ pub struct FaceHit {
 /// Closest face hit along a ray among visible objects.
 pub fn pick_face(doc: &Document, ray: &Ray) -> Option<FaceHit> {
     let mut best: Option<FaceHit> = None;
-    for o in doc.objects.iter().filter(|o| o.visible) {
+    for o in doc.objects.iter().filter(|o| doc.shown(o)) {
         let bb = o.body.bbox().expanded(1e-6);
         if bb.ray_hit(ray.origin, ray.dir).is_none() {
             continue;
@@ -135,7 +135,7 @@ fn pick_any(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, mode: Sele
 pub fn pick_region(doc: &Document, ray: &Ray) -> Option<(f64, u64)> {
     use ductile_brep::profile::{loops_plane, wire_chains};
     let mut best: Option<(f64, u64)> = None;
-    for o in doc.objects.iter().filter(|o| o.visible && o.body.kind == ductile_brep::BodyKind::Wire && !doc.is_locked(o.id)) {
+    for o in doc.objects.iter().filter(|o| doc.shown(o) && o.body.kind == ductile_brep::BodyKind::Wire && !doc.is_locked(o.id)) {
         let loops: Vec<_> = wire_chains(&o.body).into_iter().filter(|l| l.is_closed()).collect();
         if loops.is_empty() {
             continue;
@@ -181,7 +181,7 @@ pub fn pick_edge(
     occluder: Option<&FaceHit>,
 ) -> Option<(u64, EdgeId)> {
     let mut best: Option<(f64, u64, EdgeId)> = None;
-    for o in doc.objects.iter().filter(|o| o.visible) {
+    for o in doc.objects.iter().filter(|o| doc.shown(o)) {
         for (ei, poly) in o.mesh.edges.iter().enumerate() {
             for w in poly.windows(2) {
                 let (Some((a, _)), Some((b, _))) = (to_screen(cam, w[0], size), to_screen(cam, w[1], size)) else { continue };
@@ -207,7 +207,7 @@ pub fn pick_vertex(
     occluder: Option<&FaceHit>,
 ) -> Option<(u64, VertexId)> {
     let mut best: Option<(f64, u64, VertexId)> = None;
-    for o in doc.objects.iter().filter(|o| o.visible) {
+    for o in doc.objects.iter().filter(|o| doc.shown(o)) {
         for (vi, v) in o.body.vertices.iter().enumerate() {
             let Some((s, _)) = to_screen(cam, v.point, size) else { continue };
             let d = s.distance(cursor);
@@ -222,7 +222,7 @@ pub fn pick_vertex(
 /// Nearest curve or surface control point (of visible objects) to the cursor.
 pub fn pick_control(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, tol_px: f64) -> Option<Pick> {
     let mut best: Option<(f64, Pick)> = None;
-    for o in doc.objects.iter().filter(|o| o.visible && o.body.kind == ductile_brep::BodyKind::Sheet) {
+    for o in doc.objects.iter().filter(|o| doc.shown(o) && o.body.kind == ductile_brep::BodyKind::Sheet) {
         for (f, i, p) in ductile_brep::ops::sheet::surface_control_points(&o.body) {
             let Some((s, _)) = to_screen(cam, p, size) else { continue };
             let d = s.distance(cursor);
@@ -231,7 +231,7 @@ pub fn pick_control(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, to
             }
         }
     }
-    for o in doc.objects.iter().filter(|o| o.visible && o.body.kind == ductile_brep::BodyKind::Wire) {
+    for o in doc.objects.iter().filter(|o| doc.shown(o) && o.body.kind == ductile_brep::BodyKind::Wire) {
         for (e, i, p) in ductile_brep::profile::control_points(&o.body) {
             let Some((s, _)) = to_screen(cam, p, size) else { continue };
             let d = s.distance(cursor);
@@ -268,7 +268,7 @@ fn pick_box_any(doc: &Document, cam: &Camera, a: DVec2, b: DVec2, size: DVec2, m
     };
     let chosen = |pts: &[DVec3]| !pts.is_empty() && if crossing { touches(pts) } else { pts.iter().all(|p| inside(*p)) };
     let mut out = Vec::new();
-    for o in doc.objects.iter().filter(|o| o.visible) {
+    for o in doc.objects.iter().filter(|o| doc.shown(o)) {
         match mode {
             SelectMode::Object => {
                 let bb = o.body.bbox();
@@ -367,5 +367,23 @@ mod tests {
         // A box round the whole solid takes its faces and edges together.
         let picks = pick_box_in(&doc, &cam, DVec2::ZERO, size, size, &modes[..2], false);
         assert!(picks.iter().any(|p| matches!(p, Pick::Edge(..))) && picks.iter().any(|p| matches!(p, Pick::Face(..))));
+    }
+
+    #[test]
+    fn hidden_curves_cannot_be_picked() {
+        use ductile_brep::profile::{wire_from_segments, Segment};
+        let mut doc = Document::default();
+        let q = [DVec3::new(-1.0, -1.0, 0.0), DVec3::new(1.0, -1.0, 0.0), DVec3::new(1.0, 1.0, 0.0), DVec3::new(-1.0, 1.0, 0.0)];
+        let segs: Vec<Segment> = (0..4).map(|i| Segment::line(q[i], q[(i + 1) % 4])).collect();
+        let id = doc.add_body("Rectangle", wire_from_segments(&segs));
+        let mut cam = Camera { aspect: 1.0, ..Default::default() };
+        cam.target = DVec3::ZERO;
+        cam.set_view(DVec3::Z);
+        let size = DVec2::splat(800.0);
+        let mid = to_screen(&cam, DVec3::ZERO, size).unwrap().0;
+        assert_eq!(pick_in(&doc, &cam, mid, size, &[SelectMode::Object]), Some(Pick::Object(id)));
+        doc.hide_curves = true;
+        assert_eq!(pick_in(&doc, &cam, mid, size, &[SelectMode::Object]), None);
+        assert!(pick_box_in(&doc, &cam, DVec2::ZERO, size, size, &[SelectMode::Object], false).is_empty());
     }
 }

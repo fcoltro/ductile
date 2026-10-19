@@ -341,6 +341,7 @@ impl DuctileApp {
                 changed = true;
             }
         }
+        self.doc.hide_curves = !self.show_curves;
         // Styles depend on selection/hover; recompute when they change.
         let hidden: Vec<ObjectId> = self.tool.as_ref().map(|t| t.hidden_objects()).unwrap_or_default();
         let key = {
