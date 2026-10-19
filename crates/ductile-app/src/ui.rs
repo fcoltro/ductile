@@ -223,9 +223,10 @@ pub fn left_panel(app: &mut DuctileApp, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
             let mut acts = vec![];
-            ui.label(RichText::new("Scene").color(theme::TEXT));
-            outliner_level(app, ui, None, 1, &mut acts, false);
-            outliner_kinds(app, ui, &mut acts);
+            egui::CollapsingHeader::new(RichText::new("Scene").color(theme::TEXT)).id_salt("scene").default_open(true).show(ui, |ui| {
+                outliner_level(app, ui, None, 1, &mut acts, false);
+                outliner_kinds(app, ui, &mut acts);
+            });
             let shift = ui.input(|i| i.modifiers.shift);
             for a in acts {
                 outliner_act(app, a, shift);
@@ -598,17 +599,25 @@ pub fn right_panel(app: &mut DuctileApp, ui: &mut egui::Ui) {
             }
             card(ui, "SHADER MODE", |ui| {
                 let current = app.analysis();
-                egui::Grid::new("shader modes").num_columns(2).spacing([4.0, 4.0]).show(ui, |ui| {
+                egui::Grid::new("shader modes").num_columns(3).spacing([10.0, 8.0]).show(ui, |ui| {
                     for (k, a) in Analysis::ALL.into_iter().enumerate() {
-                        let b = egui::Button::new(RichText::new(a.label()).size(12.0)).selected(current == a).min_size(egui::vec2(92.0, 22.0));
-                        if ui.add(b).clicked() && current != a {
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(52.0, 40.0), egui::Sense::click());
+                        let ball = egui::Rect::from_center_size(rect.center(), egui::vec2(34.0, 34.0));
+                        crate::icons::swatch(ui.painter(), ball, a);
+                        if current == a {
+                            ui.painter().circle_stroke(ball.center(), 19.5, egui::Stroke::new(1.5, theme::ACCENT));
+                        } else if resp.hovered() {
+                            ui.painter().circle_stroke(ball.center(), 19.5, egui::Stroke::new(1.0, theme::TEXT_DIM));
+                        }
+                        if resp.on_hover_text(a.label()).clicked() && current != a {
                             app.toggle_analysis(a);
                         }
-                        if k % 2 == 1 {
+                        if k % 3 == 2 {
                             ui.end_row();
                         }
                     }
                 });
+                ui.label(RichText::new(current.label()).size(11.0).color(theme::TEXT_DIM));
                 ui.add_space(4.0);
                 let mut edges = app.show_edges;
                 if theme::switch_row(ui, "Show edges", &mut edges) {
@@ -840,20 +849,56 @@ fn outliner_level(app: &DuctileApp, ui: &mut egui::Ui, parent: Option<GroupId>, 
     }
 }
 
+/// A small glyph for what an object is: a cube for solids, a sheet for
+/// surfaces, a stroke for curves, a triangle for meshes.
+fn kind_icon(p: &egui::Painter, r: egui::Rect, o: &crate::document::Object, c: Color32) {
+    use ductile_brep::BodyKind;
+    let s = egui::Stroke::new(1.2, c);
+    let (cx, cy, h) = (r.center().x, r.center().y, r.width() * 0.42);
+    let pt = |x: f32, y: f32| egui::pos2(cx + x * h, cy + y * h);
+    if o.body.mesh.is_some() {
+        p.add(egui::Shape::closed_line(vec![pt(0.0, -0.9), pt(0.9, 0.7), pt(-0.9, 0.7)], s));
+        return;
+    }
+    match o.body.kind {
+        BodyKind::Solid => {
+            // An isometric cube: hexagon outline and the three inner edges.
+            let hex = [pt(0.0, -1.0), pt(0.87, -0.5), pt(0.87, 0.5), pt(0.0, 1.0), pt(-0.87, 0.5), pt(-0.87, -0.5)];
+            p.add(egui::Shape::closed_line(hex.to_vec(), s));
+            for q in [hex[1], hex[3], hex[5]] {
+                p.line_segment([pt(0.0, 0.0), q], s);
+            }
+        }
+        BodyKind::Sheet => {
+            p.add(egui::Shape::closed_line(vec![pt(-0.5, -0.8), pt(0.95, -0.8), pt(0.5, 0.8), pt(-0.95, 0.8)], s));
+        }
+        _ => {
+            p.add(egui::Shape::line(vec![pt(-0.9, 0.8), pt(-0.3, 0.1), pt(0.3, -0.2), pt(0.9, -0.9)], s));
+        }
+    }
+}
+
 fn object_row(app: &DuctileApp, ui: &mut egui::Ui, o: &crate::document::Object, indent: f32, acts: &mut Vec<OutlinerAct>) {
     let doc = &app.doc;
     let selected = doc.selection.contains(&crate::document::Pick::Object(o.id));
+    // Eye and lock show on the hovered row, and stay while they are off.
+    let row = egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 20.0));
+    let hovered = ui.rect_contains_pointer(row);
     ui.horizontal(|ui| {
         ui.add_space(indent);
         let (vis, locked) = (o.visible, o.locked);
-        if row_icon(ui, if vis { "Hide" } else { "Show" }, |p, r, c| crate::icons::eye(p, r, if vis { c } else { c.gamma_multiply(0.5) }, vis)) {
-            acts.push(OutlinerAct::ToggleVisible(o.id));
-        }
-        if row_icon(ui, if locked { "Unlock" } else { "Lock (shows, but can't be selected)" }, |p, r, c| crate::icons::lock(p, r, if locked { c } else { c.gamma_multiply(0.45) }, locked)) {
-            acts.push(OutlinerAct::ToggleLock(o.id));
-        }
+        let (ir, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+        kind_icon(ui.painter(), ir, o, if vis { theme::ACCENT } else { theme::TEXT_DIM });
         let text = RichText::new(o.name.as_str()).color(if vis && !locked { theme::TEXT } else { theme::TEXT_DIM });
         let r = ui.selectable_label(selected, text);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if (hovered || locked) && row_icon(ui, if locked { "Unlock" } else { "Lock (shows, but can't be selected)" }, |p, r, c| crate::icons::lock(p, r, if locked { c } else { c.gamma_multiply(0.45) }, locked)) {
+                acts.push(OutlinerAct::ToggleLock(o.id));
+            }
+            if (hovered || !vis) && row_icon(ui, if vis { "Hide" } else { "Show" }, |p, r, c| crate::icons::eye(p, r, if vis { c } else { c.gamma_multiply(0.5) }, vis)) {
+                acts.push(OutlinerAct::ToggleVisible(o.id));
+            }
+        });
         if r.clicked() && !doc.is_locked(o.id) {
             acts.push(OutlinerAct::Select(o.id));
         }

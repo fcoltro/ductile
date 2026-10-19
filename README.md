@@ -259,8 +259,9 @@ code from them.
   drag to set the value (or press D, or Tab, and type it), click or Enter
   to finish. A click before any change just selects something else.
 - Preferences (Ctrl+,), kept in `~/.config/ductile/prefs.txt`: auto-invoke
-  and drill-down on or off, mouse navigation presets (Plasticity, Blender,
-  Maya, Rhino), zoom toward the cursor, the autosave interval and opening
+  and drill-down on or off, mouse navigation presets (Plasticity: middle
+  drag orbits and right drag pans; Blender,
+  Maya, Rhino, Moi3D, 3ds Max, Fusion 360), zoom toward the cursor, the autosave interval and opening
   the last session on startup.
 - Backups: saving over a file first keeps the old copy in `<name>.backups`
   beside it (or a folder set in Preferences), pruned to the newest few plus

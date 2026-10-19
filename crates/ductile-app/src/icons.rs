@@ -381,3 +381,65 @@ pub fn folder(painter: &Painter, rect: Rect, color: Color32) {
     let p = Pen { painter, rect, stroke: Stroke::new(1.2, color) };
     p.closed(&[(0.1, 0.25), (0.4, 0.25), (0.5, 0.36), (0.9, 0.36), (0.9, 0.82), (0.1, 0.82)]);
 }
+
+/// A shaded ball previewing a shader mode, drawn from scratch: a lit
+/// sphere for plain shading, warm metal for rendered, stripes for zebra,
+/// rings for isophotes, green to red for draft and blue/red for face
+/// direction.
+pub fn swatch(p: &Painter, rect: Rect, a: crate::render::Analysis) {
+    use crate::render::Analysis;
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.5;
+    let light = c + egui::vec2(-0.35, -0.4) * r;
+    // Rows of the ball, each a horizontal chord coloured by its height.
+    let rows = (r * 2.0) as i32;
+    let row_colour = |t: f32| -> Option<Color32> {
+        match a {
+            Analysis::Zebra => Some(if ((t + 1.0) * 4.0) as i32 % 2 == 0 { Color32::from_gray(225) } else { Color32::from_gray(25) }),
+            Analysis::Draft => Some(if t < -0.15 {
+                Color32::from_rgb(70, 170, 80)
+            } else if t < 0.15 {
+                Color32::from_rgb(220, 190, 60)
+            } else {
+                Color32::from_rgb(200, 60, 55)
+            }),
+            _ => None,
+        }
+    };
+    if row_colour(0.0).is_some() {
+        for i in 0..rows {
+            let y = -r + (i as f32 + 0.5);
+            let half = (r * r - y * y).max(0.0).sqrt();
+            if let Some(col) = row_colour(y / r) {
+                p.line_segment([egui::pos2(c.x - half, c.y + y), egui::pos2(c.x + half, c.y + y)], Stroke::new(1.2, col));
+            }
+        }
+    } else {
+        let (dark, bright) = match a {
+            Analysis::Render => (Color32::from_rgb(70, 32, 24), Color32::from_rgb(255, 214, 190)),
+            Analysis::Direction => (Color32::from_rgb(20, 40, 110), Color32::from_rgb(140, 175, 255)),
+            _ => (Color32::from_gray(52), Color32::from_gray(225)),
+        };
+        if a == Analysis::Direction {
+            p.circle_filled(c, r, Color32::from_rgb(190, 50, 45));
+        }
+        // Concentric discs shrinking toward the highlight.
+        let steps = 22;
+        for i in 0..steps {
+            let t = i as f32 / (steps - 1) as f32;
+            let rad = r * (1.0 - t * 0.92) * if a == Analysis::Direction { 0.86 } else { 1.0 };
+            let centre = c.lerp(light, t * 0.9) + if a == Analysis::Direction { egui::vec2(-0.1, -0.1) * r } else { egui::Vec2::ZERO };
+            p.circle_filled(centre, rad, lerp_colour(dark, bright, t.powf(1.6)));
+        }
+    }
+    if a == Analysis::Isophote {
+        for k in 1..5 {
+            p.circle_stroke(c.lerp(light, 0.5 - k as f32 * 0.08), r * 0.2 * k as f32, Stroke::new(1.0, Color32::from_rgb(40, 60, 160)));
+        }
+    }
+}
+
+fn lerp_colour(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
+}
