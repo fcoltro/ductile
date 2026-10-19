@@ -51,6 +51,53 @@ pub struct Slot {
     pub filled: Option<String>,
 }
 
+/// A command waiting for its input: its dialog shows what to pick, and the
+/// first pick starts it (as Plasticity's dialogs open before anything is
+/// selected).
+pub struct PickFirst {
+    cmd: crate::commands::Command,
+    name: &'static str,
+    mode: SelectMode,
+    title: &'static str,
+    detail: &'static str,
+}
+
+impl PickFirst {
+    pub fn new(cmd: crate::commands::Command, name: &'static str, mode: SelectMode, title: &'static str, detail: &'static str) -> Self {
+        Self { cmd, name, mode, title, detail }
+    }
+}
+
+impl Tool for PickFirst {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn hint(&self) -> String {
+        format!("{}: {} {}", self.name, self.title.to_lowercase(), self.detail)
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, _p: &PointerInfo) -> ToolOutcome {
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        None
+    }
+    fn panel(&mut self, _ui: &mut egui::Ui) -> bool {
+        false
+    }
+    fn commit(&mut self, _doc: &mut Document) -> bool {
+        false
+    }
+    fn wants_selection(&self) -> Option<SelectMode> {
+        Some(self.mode)
+    }
+    fn then_run(&self) -> Option<crate::commands::Command> {
+        Some(self.cmd)
+    }
+    fn slots(&self) -> Vec<Slot> {
+        vec![Slot { title: self.title, detail: self.detail, filled: None }]
+    }
+}
+
 fn count(n: usize, one: &str, many: &str) -> Option<String> {
     (n > 0).then(|| format!("{n} {}", if n == 1 { one } else { many }))
 }
@@ -73,6 +120,10 @@ pub trait Tool {
         ToolOutcome::Finished
     }
     fn wants_selection(&self) -> Option<SelectMode> {
+        None
+    }
+    /// A command to start in this tool's place once something is picked.
+    fn then_run(&self) -> Option<crate::commands::Command> {
         None
     }
     /// Objects hidden while the preview stands in for them.

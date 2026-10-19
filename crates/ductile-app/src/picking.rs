@@ -111,7 +111,10 @@ fn pick_any(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, mode: Sele
     let ray = cam.ray(ndc);
     let face_hit = pick_face(doc, &ray);
     let tol_px = 7.0;
+    // Inside a closed planar curve: its region, unless a face is nearer.
+    let region = pick_region(doc, &ray).filter(|(t, _)| face_hit.as_ref().is_none_or(|h| *t < h.t));
     match mode {
+        SelectMode::Object | SelectMode::Face if region.is_some() => region.map(|(_, o)| Pick::Object(o)),
         SelectMode::Object => {
             if let Some(h) = face_hit {
                 return Some(Pick::Object(h.object));
@@ -124,6 +127,49 @@ fn pick_any(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, mode: Sele
         SelectMode::Edge => pick_edge(doc, cam, cursor, size, tol_px, face_hit.as_ref()).map(|(o, e)| Pick::Edge(o, e)),
         SelectMode::Vertex => pick_control(doc, cam, cursor, size, 10.0).or_else(|| pick_vertex(doc, cam, cursor, size, 10.0, face_hit.as_ref()).map(|(o, v)| Pick::Vertex(o, v))),
     }
+}
+
+/// The nearest visible curve object whose closed planar loops enclose the
+/// point where the ray meets their plane (holes left out), and how far
+/// along the ray.
+pub fn pick_region(doc: &Document, ray: &Ray) -> Option<(f64, u64)> {
+    use ductile_brep::profile::{loops_plane, wire_chains};
+    let mut best: Option<(f64, u64)> = None;
+    for o in doc.objects.iter().filter(|o| o.visible && o.body.kind == ductile_brep::BodyKind::Wire && !doc.is_locked(o.id)) {
+        let loops: Vec<_> = wire_chains(&o.body).into_iter().filter(|l| l.is_closed()).collect();
+        if loops.is_empty() {
+            continue;
+        }
+        let Some(plane) = loops_plane(&loops) else { continue };
+        let denom = ray.dir.dot(plane.z);
+        if denom.abs() < 1e-9 {
+            continue;
+        }
+        let t = (plane.origin - ray.origin).dot(plane.z) / denom;
+        if t <= 0.0 || best.is_some_and(|b| t >= b.0) {
+            continue;
+        }
+        let at = plane.to_local(ray.origin + ray.dir * t).truncate();
+        let tol = 1e-3 * o.body.bbox().diagonal().max(1e-9);
+        // Even-odd over all the loops: inside an outline, outside its holes.
+        let inside = loops.iter().filter(|l| point_in_polygon(at, &l.polygon(tol).iter().map(|p| plane.to_local(*p).truncate()).collect::<Vec<_>>())).count() % 2 == 1;
+        if inside {
+            best = Some((t, o.id));
+        }
+    }
+    best
+}
+
+fn point_in_polygon(p: DVec2, poly: &[DVec2]) -> bool {
+    let mut inside = false;
+    let n = poly.len();
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        if (a.y > p.y) != (b.y > p.y) && p.x < a.x + (b.x - a.x) * (p.y - a.y) / (b.y - a.y) {
+            inside = !inside;
+        }
+    }
+    inside
 }
 
 pub fn pick_edge(

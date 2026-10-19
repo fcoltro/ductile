@@ -995,6 +995,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             // Curved faces push and pull by offsetting.
             None => match ShellTool::new(&app.doc, OffsetMode::Faces) {
                 Some(t) => app.start_tool(std::boxed::Box::new(t)),
+                None if app.doc.selection.is_empty() => app.start_tool(std::boxed::Box::new(crate::tools::PickFirst::new(cmd, "Extrude", SelectMode::Face, "Select region, face, or curve", "to extrude"))),
                 None => app.status = "Select a face (face mode: 3) or closed planar curves to extrude".into(),
             },
         },
@@ -1016,6 +1017,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         CenterArc => app.start_tool(std::boxed::Box::new(CurveTool::new(CurveKind::CenterArc))),
         Revolve => match RevolveTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None if app.doc.selection.is_empty() => app.start_tool(std::boxed::Box::new(crate::tools::PickFirst::new(cmd, "Revolve", SelectMode::Object, "Select curves", "to revolve"))),
             None => app.status = "Select closed planar curves to revolve".into(),
         },
         Fillet | Chamfer => match FilletTool::new(&app.doc, cmd == Chamfer) {
@@ -1023,6 +1025,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             // With curves selected, Fillet rounds their corners.
             None => match (cmd == Fillet).then(|| CurveEditTool::new(&app.doc, false)).flatten() {
                 Some(t) => app.start_tool(std::boxed::Box::new(t)),
+                None if app.doc.selection.is_empty() => {
+                    let (name, detail) = if cmd == Chamfer { ("Chamfer", "to chamfer") } else { ("Fillet", "to fillet") };
+                    app.start_tool(std::boxed::Box::new(crate::tools::PickFirst::new(cmd, name, SelectMode::Edge, "Select edges", detail)))
+                }
                 None => app.status = "Select edges to blend (edge mode: 2), or curves to round".into(),
             },
         },

@@ -578,6 +578,14 @@ impl DuctileApp {
                 };
                 if wants.is_some() && clicked {
                     self.click_select(c, size, mods);
+                    // A command waiting for its input starts on the pick.
+                    if let Some(cmd) = self.tool.as_ref().and_then(|t| t.then_run()).filter(|_| !self.doc.selection.is_empty()) {
+                        let waiting = self.tool.take();
+                        commands::run(self, cmd);
+                        if self.tool.is_none() {
+                            self.tool = waiting;
+                        }
+                    }
                 }
                 if wants == Some(SelectMode::Edge) && resp.double_clicked() {
                     self.chain_select(c, size);
