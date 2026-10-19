@@ -1651,6 +1651,9 @@ pub struct CurveTool {
     typed: Option<f64>,
     /// A tangent arc's start direction, from the curve it leaves.
     tangent: Option<DVec3>,
+    /// Knife (K): the finished curve splits the solid faces it lies on
+    /// instead of becoming a curve object.
+    pub knife: bool,
 }
 
 /// The end of a curve or edge nearest `q` within `tol`, with the
@@ -1700,7 +1703,7 @@ fn tangent_arc(p: DVec3, t: DVec3, q: DVec3, z: DVec3) -> Option<ductile_brep::p
 
 impl CurveTool {
     pub fn new(kind: CurveKind) -> Self {
-        Self { kind, points: vec![], cursor: None, size: DVec3::ZERO, angle: 0.0, sides: 6, closed: false, typed: None, tangent: None }
+        Self { kind, points: vec![], cursor: None, size: DVec3::ZERO, angle: 0.0, sides: 6, closed: false, typed: None, tangent: None, knife: false }
     }
 
     /// Points the multi-click kinds pass through, with the cursor as the
@@ -1885,27 +1888,8 @@ impl CurveTool {
     }
 }
 
-impl Tool for CurveTool {
-    fn anchor(&self) -> Option<DVec3> {
-        self.points.last().copied()
-    }
-    fn name(&self) -> &'static str {
-        match self.kind {
-            CurveKind::Polyline => "Curve",
-            CurveKind::Spline => "Spline",
-            CurveKind::Arc => "Arc",
-            CurveKind::Rectangle => "Rectangle",
-            CurveKind::Circle => "Circle",
-            CurveKind::Ellipse => "Ellipse",
-            CurveKind::Polygon => "Polygon",
-            CurveKind::CenterRectangle | CurveKind::ThreePointRectangle => "Rectangle",
-            CurveKind::TwoPointCircle | CurveKind::ThreePointCircle => "Circle",
-            CurveKind::CenterArc => "Arc",
-            CurveKind::Slot => "Slot",
-            CurveKind::TangentArc => "Tangent arc",
-        }
-    }
-    fn hint(&self) -> String {
+impl CurveTool {
+    fn kind_hint(&self) -> String {
         match (self.kind, self.points.len()) {
             (CurveKind::Polyline, 0) => "Curve: click the first point".into(),
             (CurveKind::Polyline, _) => "Curve: click points; click the first point to close, Enter to finish open".into(),
@@ -1940,6 +1924,36 @@ impl Tool for CurveTool {
             (CurveKind::TangentArc, 0) => "Tangent arc: click the end of a curve to leave it tangentially (or any point, then a direction)".into(),
             (CurveKind::TangentArc, 1) if self.tangent.is_none() => "Tangent arc: click the direction to leave in".into(),
             (CurveKind::TangentArc, _) => "Tangent arc: click the end; D flips the direction".into(),
+        }
+    }
+}
+
+impl Tool for CurveTool {
+    fn anchor(&self) -> Option<DVec3> {
+        self.points.last().copied()
+    }
+    fn name(&self) -> &'static str {
+        match self.kind {
+            CurveKind::Polyline => "Curve",
+            CurveKind::Spline => "Spline",
+            CurveKind::Arc => "Arc",
+            CurveKind::Rectangle => "Rectangle",
+            CurveKind::Circle => "Circle",
+            CurveKind::Ellipse => "Ellipse",
+            CurveKind::Polygon => "Polygon",
+            CurveKind::CenterRectangle | CurveKind::ThreePointRectangle => "Rectangle",
+            CurveKind::TwoPointCircle | CurveKind::ThreePointCircle => "Circle",
+            CurveKind::CenterArc => "Arc",
+            CurveKind::Slot => "Slot",
+            CurveKind::TangentArc => "Tangent arc",
+        }
+    }
+    fn hint(&self) -> String {
+        let h = self.kind_hint();
+        if self.knife {
+            format!("Knife (K to stop): {h}")
+        } else {
+            format!("{h} (K: knife)")
         }
     }
     fn pointer(&mut self, _doc: &Document, cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
@@ -2075,6 +2089,10 @@ impl Tool for CurveTool {
         ch
     }
     fn command_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
+        if key == egui::Key::K && !m.any() {
+            self.knife = !self.knife;
+            return true;
+        }
         if key == egui::Key::D && !m.any() && self.kind == CurveKind::TangentArc {
             if let Some(t) = &mut self.tangent {
                 *t = -*t;
@@ -2130,11 +2148,40 @@ impl Tool for CurveTool {
         if segs.is_empty() {
             return false;
         }
+        if self.knife && knife_objects(doc, &segs) > 0 {
+            return true;
+        }
         let id = doc.add_body(self.name(), ductile_brep::profile::wire_from_segments(&segs));
         doc.selection.clear();
         doc.selection.insert(Pick::Object(id));
         true
     }
+}
+
+/// Knife: splits the faces of the visible solids that the curve lies on.
+/// How many solids it cut.
+fn knife_objects(doc: &mut Document, segs: &[ductile_brep::profile::Segment]) -> usize {
+    let chain = ductile_brep::profile::Loop3 { segments: segs.to_vec() };
+    let n = chain.normal();
+    let dir = if n.length() > 1e-9 && ductile_brep::profile::loops_plane(std::slice::from_ref(&chain)).is_some() { n.normalize() } else { current_cplane().frame.z };
+    let pts: Vec<DVec3> = segs.iter().flat_map(|s| s.sample(1e-3)).collect();
+    let ids: Vec<ObjectId> = doc
+        .objects
+        .iter()
+        .filter(|o| o.visible && !doc.is_locked(o.id) && o.body.kind == ductile_brep::BodyKind::Solid && pts.iter().any(|p| o.body.bbox().expanded(1e-6).contains(*p)))
+        .map(|o| o.id)
+        .collect();
+    let mut cut = 0;
+    for id in ids {
+        let b = doc.object(id).unwrap().body.clone();
+        if let Ok(k) = ductile_brep::ops::cut::knife(&b, std::slice::from_ref(&chain), dir) {
+            if k.faces.len() > b.faces.len() {
+                doc.replace_body(id, k);
+                cut += 1;
+            }
+        }
+    }
+    cut
 }
 
 /// Circular arc from `a` to `b` through `m`, or None when they are collinear.
@@ -4272,6 +4319,25 @@ mod tests {
         let (area, perimeter) = (12.0 - (4.0 - pi) * 0.25, 10.0 + pi);
         let expect = area + perimeter * 0.25 + pi * 0.0625;
         assert!((a - expect).abs() < 2e-2, "{a} vs {expect}");
+    }
+
+    #[test]
+    fn knife_splits_the_face_drawn_on() {
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 3.0, 2.0)));
+        let mut c = CurveTool::new(CurveKind::Polyline);
+        assert!(c.command_key(egui::Key::K, egui::Modifiers::NONE));
+        assert!(c.hint().starts_with("Knife"));
+        click(&mut c, &doc, DVec3::new(1.0, 0.0, 2.0), true);
+        click(&mut c, &doc, DVec3::new(1.0, 3.0, 2.0), true);
+        c.accept();
+        assert!(c.commit(&mut doc));
+        // No curve object: the box's top is now two faces.
+        assert_eq!(doc.objects.len(), 1);
+        let b = &doc.object(id).unwrap().body;
+        assert_eq!(b.faces.len(), 7);
+        assert!((volume(b) - 24.0).abs() < 1e-6);
     }
 
     #[test]

@@ -169,6 +169,42 @@ pub fn imprint_curves(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Body
     Ok(body)
 }
 
+/// Knife: splits only the faces the curve chains lie on, along them. The
+/// chains are imprinted straight through along `dir`, then the cuts that
+/// landed on other faces are merged away again.
+pub fn knife(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Body, BoolError> {
+    let cut = imprint_curves(solid, chains, dir)?;
+    let size = solid.bbox().diagonal().max(1e-9);
+    let tol = 1e-5 * size;
+    let polys: Vec<Vec<DVec3>> = chains
+        .iter()
+        .map(|c| {
+            let mut p = c.polygon(tol * 0.1);
+            if let Some(s) = c.segments.last() {
+                p.push(s.end());
+            }
+            p
+        })
+        .collect();
+    let old: Vec<Vec<DVec3>> = solid.edges.iter().map(|e| e.curve.tessellate(e.t0, e.t1, tol * 0.1).into_iter().map(|x| x.1).collect()).collect();
+    let near = |p: DVec3, lines: &[Vec<DVec3>]| {
+        lines.iter().any(|l| {
+            l.windows(2).any(|w| {
+                let (a, b) = (w[0], w[1]);
+                let t = ((p - a).dot(b - a) / (b - a).length_squared().max(1e-300)).clamp(0.0, 1.0);
+                p.distance(a + (b - a) * t) < tol * 10.0
+            })
+        })
+    };
+    // Merge back across cuts that are neither the knife's nor old edges.
+    let across = |b: &Body, e: crate::topo::EdgeId| {
+        let ed = b.edge(e);
+        let pts = [0.3, 0.5, 0.7].map(|f| ed.curve.point(ed.t0 + (ed.t1 - ed.t0) * f));
+        !pts.iter().all(|p| near(*p, &polys)) && !pts.iter().all(|p| near(*p, &old))
+    };
+    Ok(super::heal::simplify_across(&cut, &across))
+}
+
 /// Projects each curve chain onto the faces of `solid` along `dir` (both
 /// ways), as a wire body of the curves it traces on them.
 pub fn project_curves(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Body, BoolError> {
@@ -394,6 +430,34 @@ mod tests {
         assert_eq!(waved.faces.len(), 10);
         assert_eq!(crate::ops::boolean::open_edges(&waved), 0);
         assert!((vol(&waved) - 24.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn knife_splits_only_the_face_drawn_on() {
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let check = |k: &Body, faces: usize| {
+            assert_eq!(k.faces.len(), faces);
+            assert_eq!(crate::ops::boolean::open_edges(k), 0);
+            assert!((vol(k) - 24.0).abs() < 1e-6, "{}", vol(k));
+        };
+        // Right across the top: just the top in two.
+        let line = Loop3 { segments: vec![Segment::line(DVec3::new(1.0, 0.0, 2.0), DVec3::new(1.0, 3.0, 2.0))] };
+        let k = knife(&b, &[line], DVec3::Z).unwrap();
+        check(&k, 7);
+        // The two top edges it meets are split there.
+        assert_eq!(k.edges.len(), 15);
+        // A circle on the top: a disc in a ring, the bottom untouched.
+        let circle = Loop3 { segments: vec![Segment::new(Curve3::Circle { frame: Frame::new(DVec3::new(2.0, 1.5, 2.0), DVec3::Z, DVec3::X), radius: 1.0 }, 0.0, 2.0 * PI)] };
+        check(&knife(&b, &[circle], DVec3::Z).unwrap(), 7);
+        // Down a side face.
+        let down = Loop3 { segments: vec![Segment::line(DVec3::new(4.0, 1.0, 0.0), DVec3::new(4.0, 1.0, 2.0))] };
+        let k = knife(&b, &[down], DVec3::X).unwrap();
+        check(&k, 7);
+        // Twice in a row keeps the first cut.
+        let again = Loop3 { segments: vec![Segment::line(DVec3::new(3.0, 0.0, 2.0), DVec3::new(3.0, 3.0, 2.0))] };
+        let line = Loop3 { segments: vec![Segment::line(DVec3::new(1.0, 0.0, 2.0), DVec3::new(1.0, 3.0, 2.0))] };
+        let k = knife(&knife(&b, &[line], DVec3::Z).unwrap(), &[again], DVec3::Z).unwrap();
+        check(&k, 8);
     }
 
     #[test]

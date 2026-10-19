@@ -637,7 +637,15 @@ fn boolean_once(a: &Body, b: &Body, op: BoolOp) -> Result<Body, BoolError> {
             }
         })
         .collect();
-    let body = super::heal::simplify(&assemble(&w, faces, tol));
+    // Splits already in the inputs (imprints) stay; new ones are merged.
+    let kept: Vec<Vec<DVec3>> = [a, b].iter().flat_map(|x| super::heal::split_edge_lines(x)).collect();
+    let assembled = assemble(&w, faces, tol);
+    let body = if kept.is_empty() {
+        super::heal::simplify(&assembled)
+    } else {
+        let t = 1e-6 * assembled.bbox().diagonal().max(1e-3);
+        super::heal::simplify_across(&assembled, &|bd, e| !super::heal::edge_on_lines(bd, e, &kept, t))
+    };
     mark("assemble");
     let open = open_edges(&body);
     if debug() && open > 0 {

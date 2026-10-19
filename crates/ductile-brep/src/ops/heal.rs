@@ -11,11 +11,62 @@ use std::f64::consts::TAU;
 
 /// Merges co-planar faces and continuing edges, then compacts the body.
 pub fn simplify(body: &Body) -> Body {
+    simplify_across(body, &|_, _| true)
+}
+
+/// As [`simplify`], but faces are merged only across the edges `across`
+/// accepts.
+pub fn simplify_across(body: &Body, across: &dyn Fn(&Body, EdgeId) -> bool) -> Body {
     let tol = ductile_geom::LINEAR_TOL * (body.bbox().diagonal() / 10.0).max(0.01);
-    let mut b = merge_planar_faces(body, tol);
-    while merge_band_faces(&mut b, tol) {}
+    let mut b = merge_planar_faces(body, tol, across);
+    while merge_band_faces(&mut b, tol, across) {}
     while merge_one_vertex(&mut b, tol) {}
     compact(&b)
+}
+
+/// Polylines of the edges between two faces on one plane (imprinted
+/// splits): edges [`simplify`] would merge away.
+pub fn split_edge_lines(b: &Body) -> Vec<Vec<DVec3>> {
+    let tol = ductile_geom::LINEAR_TOL * (b.bbox().diagonal() / 10.0).max(0.01);
+    let mut users: HashMap<EdgeId, Vec<FaceId>> = HashMap::new();
+    for f in b.face_ids() {
+        for l in b.face_loops(f) {
+            for c in &l.coedges {
+                users.entry(c.edge).or_default().push(f);
+            }
+        }
+    }
+    let same = |f: FaceId, g: FaceId| match (outward_plane(b, f), outward_plane(b, g)) {
+        (Some(p), Some(q)) => p.0.dot(q.0) > 1.0 - 1e-10 && (p.1 - q.1).abs() < tol * 10.0,
+        _ => false,
+    };
+    let mut out = Vec::new();
+    for (e, fs) in &users {
+        if let [f, g] = fs[..] {
+            if f != g && same(f, g) {
+                let ed = b.edge(*e);
+                out.push(ed.curve.tessellate(ed.t0, ed.t1, tol).into_iter().map(|x| x.1).collect());
+            }
+        }
+    }
+    out
+}
+
+/// Whether `p` lies within `tol` of one of the polylines.
+pub fn near_lines(p: DVec3, lines: &[Vec<DVec3>], tol: f64) -> bool {
+    lines.iter().any(|l| {
+        l.windows(2).any(|w| {
+            let (a, b) = (w[0], w[1]);
+            let t = ((p - a).dot(b - a) / (b - a).length_squared().max(1e-300)).clamp(0.0, 1.0);
+            p.distance(a + (b - a) * t) < tol
+        })
+    })
+}
+
+/// Whether edge `e` runs along the polylines (sampled inside its span).
+pub fn edge_on_lines(b: &Body, e: EdgeId, lines: &[Vec<DVec3>], tol: f64) -> bool {
+    let ed = b.edge(e);
+    [0.3, 0.5, 0.7].iter().all(|f| near_lines(ed.curve.point(ed.t0 + (ed.t1 - ed.t0) * f), lines, tol))
 }
 
 /// Removes vertices, edges and loops that no face references.
@@ -66,7 +117,7 @@ fn find(parent: &mut [usize], i: usize) -> usize {
 }
 
 /// Merges adjacent planar faces that lie on the same oriented plane.
-fn merge_planar_faces(b: &Body, tol: f64) -> Body {
+fn merge_planar_faces(b: &Body, tol: f64, across: &dyn Fn(&Body, EdgeId) -> bool) -> Body {
     let nf = b.faces.len();
     let planes: Vec<Option<(DVec3, f64, DVec3)>> = b.face_ids().map(|f| outward_plane(b, f)).collect();
     let mut parent: Vec<usize> = (0..nf).collect();
@@ -78,8 +129,8 @@ fn merge_planar_faces(b: &Body, tol: f64) -> Body {
             }
         }
     }
-    for fs in users.values() {
-        if fs.len() != 2 || fs[0] == fs[1] {
+    for (e, fs) in &users {
+        if fs.len() != 2 || fs[0] == fs[1] || !across(b, *e) {
             continue;
         }
         let (Some(p), Some(q)) = (planes[fs[0].idx()], planes[fs[1].idx()]) else { continue };
@@ -143,7 +194,7 @@ fn same_revolved_surface(a: &Surface, b: &Surface, tol: f64) -> bool {
 /// tube is built from pieces. The joined boundary is chained through the
 /// shared vertices; faces whose chaining would branch are left alone.
 /// Returns true if something changed.
-fn merge_band_faces(b: &mut Body, tol: f64) -> bool {
+fn merge_band_faces(b: &mut Body, tol: f64, across: &dyn Fn(&Body, EdgeId) -> bool) -> bool {
     let mut users: HashMap<EdgeId, Vec<FaceId>> = HashMap::new();
     for f in b.face_ids() {
         for l in b.face_loops(f) {
@@ -161,6 +212,9 @@ fn merge_band_faces(b: &mut Body, tol: f64) -> bool {
     for (f, g) in pairs {
         let (fa, fb) = (b.face(f), b.face(g));
         if fa.reversed != fb.reversed || !same_revolved_surface(&fa.surface, &fb.surface, tol) {
+            continue;
+        }
+        if users.iter().any(|(e, u)| u.contains(&f) && u.contains(&g) && !across(b, *e)) {
             continue;
         }
         // Shared edges go, but a face round a periodic surface needs a cut
