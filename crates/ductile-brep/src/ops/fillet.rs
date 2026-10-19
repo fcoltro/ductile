@@ -253,6 +253,29 @@ fn blend_in_turn(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, Fi
 }
 
 fn blend_together(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, FilletError> {
+    match blend_tooled(body, edges, blend) {
+        // A lone edge whose tool the boolean cannot take (its blend runs
+        // tangentially into an earlier one) is rolled instead, ending in
+        // the face that caps it.
+        Err(err @ FilletError::Boolean(_)) if edges.len() == 1 => {
+            let link = super::chain::Link { edge: edges[0], fwd: true };
+            let closed = body.edge(edges[0]).is_closed();
+            let rolled = if closed { super::roll::roll_closed_edge(body, edges[0], blend) } else { super::chain::roll_chain(body, &[link], false, blend) };
+            match rolled {
+                Ok(b) => Ok(super::heal::compact(&b)),
+                Err(e) => {
+                    if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+                        eprintln!("rolled fallback: {e:?}");
+                    }
+                    Err(err)
+                }
+            }
+        }
+        r => r,
+    }
+}
+
+fn blend_tooled(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, FilletError> {
     let size = body.bbox().diagonal().max(1e-6) * 4.0;
     let mut set: BTreeSet<EdgeId> = edges.iter().copied().collect();
     // In a selection of several edges, seams and smooth edges have nothing
@@ -947,6 +970,24 @@ mod tests {
 
     fn vol(b: &Body) -> f64 {
         tessellate(b, &TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume()
+    }
+
+    #[test]
+    fn fillet_running_tangentially_into_an_earlier_one() {
+        // From the workflow stress test: the bottom edge filleted, the
+        // upright corner chamfered, then the chamfer's front edge filleted;
+        // its blend meets the first fillet tangentially at the bottom.
+        let (x, y, z) = (3.290107170143669, 2.7499716551606714, 1.328096334801292);
+        let b = make_box(&Frame::WORLD, DVec3::new(x, y, z));
+        let pick = |b: &Body, f: &dyn Fn(DVec3, DVec3) -> bool| b.edge_ids().find(|e| f(b.edge(*e).start(), b.edge(*e).end())).unwrap();
+        let e = pick(&b, &|p, q| (p.x - x).abs() < 1e-9 && (q.x - x).abs() < 1e-9 && p.z.abs() < 1e-9 && q.z.abs() < 1e-9);
+        let b = blend_edges(&b, &[e], Blend::Fillet(0.12947949379266827)).unwrap();
+        let e = pick(&b, &|p, q| (p.x - x).abs() < 1e-9 && (q.x - x).abs() < 1e-9 && p.y.abs() < 1e-9 && q.y.abs() < 1e-9);
+        let b = blend_edges(&b, &[e], Blend::Chamfer(0.0627334840228452)).unwrap();
+        let e = pick(&b, &|p, q| p.y.abs() < 1e-9 && q.y.abs() < 1e-9 && (p.x - q.x).abs() < 1e-9 && (p.x - x + 0.0627).abs() < 1e-3);
+        let f = blend_edges(&b, &[e], Blend::Fillet(0.14645104439179424)).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        assert!(vol(&f) < vol(&b) && vol(&f) > vol(&b) - 0.01, "{} vs {}", vol(&f), vol(&b));
     }
 
     #[test]
