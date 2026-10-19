@@ -3975,6 +3975,128 @@ impl Tool for SplitCurveTool {
     }
 }
 
+// --------------------------------------------------------- Deform curve ----
+
+/// Lays the selected curves, drawn over a flat reference face, onto a
+/// target face: click the reference, then the target.
+pub struct DeformCurveTool {
+    curves: Vec<(ObjectId, Vec<ductile_brep::profile::Segment>)>,
+    /// Reference plane frame and its face's extent in that frame.
+    from: Option<(Frame, ductile_geom::DVec2, ductile_geom::DVec2)>,
+    /// Target surface and its face's parameter range.
+    onto: Option<(ductile_geom::Surface, ductile_geom::DVec2, ductile_geom::DVec2)>,
+    pub how: ductile_brep::curves::Deform,
+    pub keep: bool,
+    result: Option<Vec<Vec<ductile_brep::profile::Segment>>>,
+}
+
+impl DeformCurveTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let curves: Vec<_> = doc
+            .selected_objects()
+            .into_iter()
+            .filter_map(|id| doc.object(id).filter(|o| o.body.kind == ductile_brep::BodyKind::Wire).map(|o| (id, o.body.edges.iter().map(|e| ductile_brep::profile::Segment::new(e.curve.clone(), e.t0, e.t1)).collect())))
+            .collect();
+        (!curves.is_empty()).then(|| Self { curves, from: None, onto: None, how: Default::default(), keep: false, result: None })
+    }
+
+    fn update(&mut self) {
+        self.result = match (&self.from, &self.onto) {
+            (Some((f, a, b)), Some((s, c, d))) => self.curves.iter().map(|(_, segs)| ductile_brep::curves::deform_chain(segs, f, *a, *b, s, *c, *d, &self.how)).collect(),
+            _ => None,
+        };
+    }
+}
+
+impl Tool for DeformCurveTool {
+    fn name(&self) -> &'static str {
+        "Deform curve"
+    }
+    fn hint(&self) -> String {
+        match (&self.from, &self.onto) {
+            (None, _) => "Deform curve: click the flat reference face the curves lie on".into(),
+            (Some(_), None) => "Deform curve: click the target face".into(),
+            _ => "Deform curve: adjust scale, offset and flips; Enter to finish".into(),
+        }
+    }
+    fn pointer(&mut self, doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if !p.clicked || self.onto.is_some() {
+            return ToolOutcome::Continue;
+        }
+        let Some(hit) = crate::picking::pick_face(doc, &p.ray) else { return ToolOutcome::Continue };
+        let Some(o) = doc.object(hit.object) else { return ToolOutcome::Continue };
+        let fm = &o.mesh.faces[hit.face.idx()];
+        let face = o.body.face(hit.face);
+        if self.from.is_none() {
+            let ductile_geom::Surface::Plane { frame } = &face.surface else { return ToolOutcome::Continue };
+            let n = if face.reversed { -frame.z } else { frame.z };
+            let f = Frame::new(frame.origin, n, frame.x);
+            let (lo, hi) = fm.positions.iter().fold((ductile_geom::DVec2::splat(f64::MAX), ductile_geom::DVec2::splat(f64::MIN)), |(a, b), q| {
+                let l = f.to_local(*q).truncate();
+                (a.min(l), b.max(l))
+            });
+            self.from = Some((f, lo, hi));
+        } else {
+            let (lo, hi) = fm.uvs.iter().fold((ductile_geom::DVec2::splat(f64::MAX), ductile_geom::DVec2::splat(f64::MIN)), |(a, b), q| (a.min(*q), b.max(*q)));
+            // Heights go out of the face, whichever way its surface runs.
+            if face.reversed {
+                self.how.flip = !self.how.flip;
+            }
+            self.onto = Some((face.surface.clone(), lo, hi));
+            self.update();
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let segs: Vec<_> = self.result.as_ref()?.iter().flatten().cloned().collect();
+        Some(ductile_brep::profile::wire_from_segments(&segs))
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let before = (self.how, self.keep);
+        egui::Grid::new("deform").num_columns(4).show(ui, |ui| {
+            for (label, v) in [("Scale", 0), ("Offset", 1)] {
+                ui.label(label);
+                for i in 0..3 {
+                    let x = if v == 0 { &mut self.how.scale[i] } else { &mut self.how.offset[i] };
+                    ui.add(egui::DragValue::new(x).speed(0.01).prefix(["U ", "V ", "N "][i]));
+                }
+                ui.end_row();
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.how.mirror, "Mirror");
+            ui.checkbox(&mut self.how.swap, "Swap UV");
+            ui.checkbox(&mut self.how.flip, "Flip normal");
+        });
+        ui.checkbox(&mut self.keep, "Keep the original curves");
+        let changed = before != (self.how, self.keep);
+        if changed {
+            self.update();
+        }
+        changed
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        if self.result.is_some() && !self.keep {
+            self.curves.iter().map(|c| c.0).collect()
+        } else {
+            vec![]
+        }
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let Some(res) = self.result.take() else { return false };
+        for ((id, _), segs) in self.curves.iter().zip(res) {
+            let b = ductile_brep::profile::wire_from_segments(&segs);
+            if self.keep {
+                let name = doc.object(*id).map(|o| o.name.clone()).unwrap_or_else(|| "Curve".into());
+                doc.add_body(&name, b);
+            } else {
+                doc.replace_body(*id, b);
+            }
+        }
+        true
+    }
+}
+
 // ---------------------------------------------------------------- Array ----
 
 /// Copies of the selected objects in a row (along a construction plane axis,
@@ -4362,6 +4484,29 @@ mod tests {
         doc.selection.insert(Pick::Object(copy));
         assert_eq!(doc.make_unique_selected(), 1);
         assert_eq!(doc.instance_count(id), 0);
+    }
+
+    #[test]
+    fn deforms_curves_from_one_face_onto_another() {
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 3.0, 2.0)));
+        let at = ductile_geom::Frame { origin: DVec3::new(20.0, 0.0, 0.0), ..ductile_geom::Frame::WORLD };
+        doc.add_body("Big box", ductile_brep::primitives::make_box(&at, DVec3::new(8.0, 6.0, 1.0)));
+        let line = doc.add_body("Curve", ductile_brep::profile::wire_from_segments(&[ductile_brep::profile::Segment::line(DVec3::new(1.0, 0.0, 2.0), DVec3::new(1.0, 3.0, 2.0))]));
+        doc.selection.insert(Pick::Object(line));
+        let mut t = DeformCurveTool::new(&doc).unwrap();
+        click(&mut t, &doc, DVec3::new(2.0, 1.5, 2.0), true);
+        click(&mut t, &doc, DVec3::new(24.0, 3.0, 1.0), true);
+        assert!(t.preview(&doc).is_some());
+        assert!(t.commit(&mut doc));
+        let b = &doc.object(line).unwrap().body;
+        let e = &b.edges[0];
+        let (p, q) = (e.curve.point(e.t0), e.curve.point(e.t1));
+        assert!((p.z - 1.0).abs() < 1e-6 && (q.z - 1.0).abs() < 1e-6, "{p} {q}");
+        let len = p.distance(q);
+        assert!((len - 6.0).abs() < 1e-4 || (len - 8.0).abs() < 1e-4, "{len}");
+        assert!(p.x > 19.9 && q.x < 28.1);
     }
 
     #[test]

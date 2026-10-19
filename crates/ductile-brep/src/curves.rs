@@ -614,6 +614,75 @@ pub fn insert_knot_segment(s: &Segment, t: f64) -> Segment {
     Segment { curve: Curve3::Nurbs(n), t0: a, t1: b, reversed: s.reversed }
 }
 
+/// How [`deform_chain`] lays curves onto the target face, in the target's
+/// u, v and normal directions.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Deform {
+    pub scale: [f64; 3],
+    pub offset: [f64; 3],
+    /// Mirror the reference's u, swap u and v, flip the normal.
+    pub mirror: bool,
+    pub swap: bool,
+    pub flip: bool,
+}
+
+impl Default for Deform {
+    fn default() -> Self {
+        Self { scale: [1.0; 3], offset: [0.0; 3], mirror: false, swap: false, flip: false }
+    }
+}
+
+/// Curves lying on (or above) a flat reference rectangle — `from`'s xy
+/// plane between `from_lo` and `from_hi` — carried onto the patch of
+/// `onto` between parameters `to_lo` and `to_hi`: the rectangle's x and y
+/// map to u and v, height above it to distance along the surface normal.
+/// Each segment comes back as a cubic spline fitted through the mapped
+/// points.
+pub fn deform_chain(segs: &[Segment], from: &Frame, from_lo: ductile_geom::DVec2, from_hi: ductile_geom::DVec2, onto: &ductile_geom::Surface, to_lo: ductile_geom::DVec2, to_hi: ductile_geom::DVec2, how: &Deform) -> Option<Vec<Segment>> {
+    use ductile_geom::DVec2;
+    let span = (from_hi - from_lo).max(DVec2::splat(1e-12));
+    let size = span.length();
+    let map = |p: DVec3| {
+        let l = from.to_local(p);
+        let mut st = (l.truncate() - from_lo) / span;
+        if how.mirror {
+            st.x = 1.0 - st.x;
+        }
+        if how.swap {
+            st = DVec2::new(st.y, st.x);
+        }
+        let st = DVec2::new(st.x * how.scale[0] + how.offset[0], st.y * how.scale[1] + how.offset[1]);
+        let uv = to_lo + (to_hi - to_lo) * st;
+        let n = onto.normal(uv.x, uv.y) * if how.flip { -1.0 } else { 1.0 };
+        onto.point(uv.x, uv.y) + n * (l.z * how.scale[2] + how.offset[2])
+    };
+    let mut out = Vec::new();
+    for s in segs {
+        let (a, b) = if s.reversed { (s.t1, s.t0) } else { (s.t0, s.t1) };
+        let k = 96;
+        let pts: Vec<DVec3> = (0..=k).map(|i| map(s.curve.point(a + (b - a) * i as f64 / k as f64))).collect();
+        let mut fit = None;
+        for n in [8, 16, 32, 48] {
+            let c = fit_curve(&pts, n, 3)?;
+            // Check between the samples too.
+            let worst = (0..k)
+                .map(|i| {
+                    let p = map(s.curve.point(a + (b - a) * (i as f64 + 0.5) / k as f64));
+                    c.point(c.closest_param(p)).distance(p)
+                })
+                .fold(0.0, f64::max);
+            fit = Some(c);
+            if worst < 1e-5 * size.max(1.0) {
+                break;
+            }
+        }
+        let c = fit?;
+        let (t0, t1) = c.domain();
+        out.push(Segment::new(Curve3::Nurbs(c), t0, t1));
+    }
+    Some(out)
+}
+
 /// A chain of segments run the other way.
 pub fn reverse_chain(segs: &[Segment]) -> Vec<Segment> {
     segs.iter().rev().map(reverse_segment).collect()
@@ -1073,5 +1142,34 @@ mod split_tests {
             assert!((n.point(t).length() - 1.5).abs() < 1e-9);
         }
         assert!(k.start().distance(arc.start()) < 1e-9 && k.end().distance(arc.end()) < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod deform_tests {
+    use super::*;
+    use ductile_geom::{DVec2, Surface};
+
+    #[test]
+    fn deforms_a_line_onto_a_cylinder() {
+        // A line across a 2π × 1 reference rectangle wraps round a cylinder.
+        let from = Frame::WORLD;
+        let line = Segment::line(DVec3::new(0.0, 0.5, 0.0), DVec3::new(2.0 * std::f64::consts::PI, 0.5, 0.0));
+        let cyl = Surface::Cylinder { frame: Frame::WORLD, radius: 2.0 };
+        let (lo, hi) = (DVec2::new(0.0, 0.0), DVec2::new(std::f64::consts::PI, 4.0));
+        let segs = deform_chain(&[line], &from, DVec2::ZERO, DVec2::new(2.0 * std::f64::consts::PI, 1.0), &cyl, lo, hi, &Deform::default()).unwrap();
+        assert_eq!(segs.len(), 1);
+        let s = &segs[0];
+        for i in 0..=20 {
+            let p = s.curve.point(s.t0 + (s.t1 - s.t0) * i as f64 / 20.0);
+            assert!((p.truncate().length() - 2.0).abs() < 1e-4, "{p}");
+            assert!((p.z - 2.0).abs() < 1e-4, "{p}");
+        }
+        assert!(s.start().distance(DVec3::new(2.0, 0.0, 2.0)) < 1e-9);
+        assert!(s.end().distance(DVec3::new(-2.0, 0.0, 2.0)) < 1e-6);
+        // Lifted off the plane: lands outside the cylinder by that much.
+        let up = Segment::line(DVec3::new(1.0, 0.25, 0.5), DVec3::new(2.0, 0.25, 0.5));
+        let s = &deform_chain(&[up], &from, DVec2::ZERO, DVec2::new(2.0 * std::f64::consts::PI, 1.0), &cyl, lo, hi, &Deform::default()).unwrap()[0];
+        assert!((s.start().truncate().length() - 2.5).abs() < 1e-6, "{}", s.start());
     }
 }
