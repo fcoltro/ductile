@@ -43,6 +43,18 @@ pub enum ToolOutcome {
     Cancelled,
 }
 
+/// One of a command's inputs, shown as a row at the top of its dialog.
+pub struct Slot {
+    pub title: &'static str,
+    pub detail: &'static str,
+    /// What fills it ("2 edges"), or None while it is still wanted.
+    pub filled: Option<String>,
+}
+
+fn count(n: usize, one: &str, many: &str) -> Option<String> {
+    (n > 0).then(|| format!("{n} {}", if n == 1 { one } else { many }))
+}
+
 pub trait Tool {
     fn name(&self) -> &'static str;
     /// One-line instruction for the status bar.
@@ -104,14 +116,18 @@ pub trait Tool {
     fn inference(&self) -> Option<String> {
         None
     }
+    /// The command's inputs, listed at the top of its dialog.
+    fn slots(&self) -> Vec<Slot> {
+        vec![]
+    }
 }
 
+/// A labelled number field, the label above a full-width field as in the
+/// command dialogs.
 fn drag_value(ui: &mut egui::Ui, label: &str, v: &mut f64, speed: f64) -> bool {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        ui.add(egui::DragValue::new(v).speed(speed).max_decimals(4)).changed()
-    })
-    .inner
+    ui.label(egui::RichText::new(label).size(12.0));
+    let w = ui.available_width();
+    ui.add_sized([w, 22.0], egui::DragValue::new(v).speed(speed).max_decimals(4)).changed()
 }
 
 // ------------------------------------------------------------------ Box ----
@@ -746,6 +762,23 @@ impl Tool for TransformTool {
     }
     fn constrain_axis(&mut self, axis: usize) {
         self.axis = if self.axis == Some(axis) { None } else { Some(axis) };
+    }
+    fn slots(&self) -> Vec<Slot> {
+        let (title, n, one, many) = if !self.controls.is_empty() {
+            ("Select control points", self.controls.len(), "point", "points")
+        } else if !self.surface_controls.is_empty() {
+            ("Select control points", self.surface_controls.len(), "point", "points")
+        } else if !self.faces.is_empty() {
+            ("Select faces", self.faces.len(), "face", "faces")
+        } else {
+            ("Select objects", self.targets.len(), "object", "objects")
+        };
+        let detail = match self.kind {
+            TransformKind::Move => "to move",
+            TransformKind::Rotate => "to rotate",
+            TransformKind::Scale => "to scale",
+        };
+        vec![Slot { title, detail, filled: count(n, one, many) }]
     }
     fn readout(&self) -> Option<(DVec3, String)> {
         if self.start.is_none() && self.typed.is_none() {
@@ -1581,6 +1614,18 @@ impl Tool for ExtrudeTool {
         out.push(LineInstance::new(self.base - self.normal * 1e4, self.base + self.normal * 1e4, [0.55, 0.55, 0.6, 0.5], 1.0));
         out.push(LineInstance::new(self.base, tip, [1.0, 0.85, 0.3, 1.0], 2.0));
         out.push(LineInstance::point(tip, [1.0, 0.85, 0.3, 1.0], 7.0));
+    }
+    fn slots(&self) -> Vec<Slot> {
+        let what = if self.target.is_some() {
+            Some("1 face".to_string())
+        } else {
+            count(self.regions.len(), "region", "regions").or_else(|| count(self.open.len(), "curve", "curves"))
+        };
+        let mut out = vec![Slot { title: "Select region, face, or curve", detail: "to extrude", filled: what }];
+        if self.target.is_none() {
+            out.push(Slot { title: "Select target bodies", detail: "to cut or join into", filled: self.onto.as_ref().map(|_| "1 solid".into()) });
+        }
+        out
     }
     fn readout(&self) -> Option<(DVec3, String)> {
         (self.start_t.is_some() || self.typed.is_some()).then(|| (self.base + self.normal * self.value(), format!("{:.5}", self.value())))
@@ -2468,6 +2513,9 @@ impl Tool for FilletTool {
         out.push(LineInstance::new(self.base, tip, [1.0, 0.85, 0.3, 1.0], 2.0));
         out.push(LineInstance::point(tip, [1.0, 0.85, 0.3, 1.0], 7.0));
     }
+    fn slots(&self) -> Vec<Slot> {
+        vec![Slot { title: "Select edges", detail: if self.shape == BlendShape::Chamfer { "to chamfer" } else { "to fillet" }, filled: count(self.edges.len(), "edge", "edges") }]
+    }
     fn readout(&self) -> Option<(DVec3, String)> {
         (self.start_t.is_some() || self.typed.is_some()).then(|| (self.base + self.dir * self.value(), format!("{:.5}", self.value())))
     }
@@ -3354,6 +3402,12 @@ impl BooleanTool {
 impl Tool for BooleanTool {
     fn keys(&self) -> Vec<(&'static str, &'static str)> {
         vec![("Q", "Union"), ("W", "Difference"), ("Shift+E", "Intersect"), ("Shift+Q", "Slice"), ("Shift+R", "Region"), ("T", "Keep tools")]
+    }
+    fn slots(&self) -> Vec<Slot> {
+        vec![
+            Slot { title: "Select target body", detail: "to cut or join into", filled: Some("1 solid".into()) },
+            Slot { title: "Select tool bodies", detail: "to cut or join with", filled: count(self.tools.len() + self.sheets.len(), "body", "bodies") },
+        ]
     }
     fn name(&self) -> &'static str {
         match self.kind {

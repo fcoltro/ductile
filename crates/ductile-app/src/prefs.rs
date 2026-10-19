@@ -7,7 +7,8 @@ use std::path::PathBuf;
 /// How mouse buttons and modifiers drive the camera.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NavPreset {
-    /// Right or middle drag orbits, with Shift pans, with Ctrl zooms.
+    /// Middle drag orbits, right drag pans; Shift+middle pans and
+    /// Ctrl+middle zooms too.
     Plasticity,
     /// Middle drag orbits, Shift+middle pans, Ctrl+middle zooms.
     Blender,
@@ -15,10 +16,16 @@ pub enum NavPreset {
     Maya,
     /// Right drag orbits, Shift+right pans, Ctrl+right zooms.
     Rhino,
+    /// As Rhino.
+    Moi3d,
+    /// Alt+middle orbits, middle pans, Ctrl+Alt+middle zooms.
+    Max,
+    /// Shift+middle orbits, middle pans, Ctrl+middle zooms.
+    Fusion,
 }
 
 impl NavPreset {
-    pub const ALL: [NavPreset; 4] = [NavPreset::Plasticity, NavPreset::Blender, NavPreset::Maya, NavPreset::Rhino];
+    pub const ALL: [NavPreset; 7] = [NavPreset::Plasticity, NavPreset::Blender, NavPreset::Maya, NavPreset::Rhino, NavPreset::Moi3d, NavPreset::Max, NavPreset::Fusion];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -26,6 +33,9 @@ impl NavPreset {
             NavPreset::Blender => "Blender",
             NavPreset::Maya => "Maya",
             NavPreset::Rhino => "Rhino",
+            NavPreset::Moi3d => "Moi3D",
+            NavPreset::Max => "3ds Max",
+            NavPreset::Fusion => "Fusion 360",
         }
     }
 }
@@ -45,9 +55,12 @@ impl NavPreset {
             down.then(|| if m.shift { Nav::Pan } else if m.ctrl { Nav::Zoom } else { Nav::Orbit })
         };
         match self {
-            NavPreset::Plasticity => with_mods(middle || right),
+            NavPreset::Plasticity if right && !middle => Some(Nav::Pan),
+            NavPreset::Plasticity => with_mods(middle),
             NavPreset::Blender => with_mods(middle),
-            NavPreset::Rhino => with_mods(right),
+            NavPreset::Rhino | NavPreset::Moi3d => with_mods(right),
+            NavPreset::Max => middle.then(|| if m.alt && m.ctrl { Nav::Zoom } else if m.alt { Nav::Orbit } else { Nav::Pan }),
+            NavPreset::Fusion => middle.then(|| if m.shift { Nav::Orbit } else if m.ctrl { Nav::Zoom } else { Nav::Pan }),
             NavPreset::Maya if m.alt => {
                 if left {
                     Some(Nav::Orbit)
@@ -166,7 +179,10 @@ mod tests {
         let p = Prefs { auto_invoke: false, nav: NavPreset::Maya, autosave_minutes: 5, backup_dir: "/tmp/b".into(), backups: crate::backup::Policy { recent: 5, hourly: 0, daily: 3, weekly: 1 }, ..Prefs::default() };
         assert_eq!(Prefs::parse(&p.text()), p);
         let none = egui::Modifiers::NONE;
-        assert_eq!(NavPreset::Plasticity.drag(false, false, true, none), Some(Nav::Orbit));
+        assert_eq!(NavPreset::Plasticity.drag(false, true, false, none), Some(Nav::Orbit));
+        assert_eq!(NavPreset::Plasticity.drag(false, false, true, none), Some(Nav::Pan));
+        assert_eq!(NavPreset::Fusion.drag(false, true, false, egui::Modifiers::SHIFT), Some(Nav::Orbit));
+        assert_eq!(NavPreset::Max.drag(false, true, false, none), Some(Nav::Pan));
         assert_eq!(NavPreset::Blender.drag(false, false, true, none), None);
         assert_eq!(NavPreset::Maya.drag(true, false, false, egui::Modifiers::ALT), Some(Nav::Orbit));
         assert_eq!(NavPreset::Rhino.drag(false, false, true, egui::Modifiers::SHIFT), Some(Nav::Pan));

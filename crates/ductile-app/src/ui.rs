@@ -432,16 +432,19 @@ pub fn viewport_overlays(app: &mut DuctileApp, ctx: &egui::Context) {
                 });
                 if open {
                     ui.add_space(4.0);
+                    for slot in tool.slots() {
+                        slot_row(ui, &slot);
+                    }
                     tool.panel(ui);
                 }
                 ui.add_space(6.0);
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new(RichText::new("Esc  Cancel").color(theme::TEXT_DIM)).frame(false)).clicked() {
+                    if key_button(ui, "Esc", "Cancel").clicked() {
                         app.pending_cancel = true;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new(RichText::new("OK  Enter").color(theme::TEXT)).frame(false)).clicked() {
+                        if key_button(ui, "Enter", "OK").clicked() {
                             app.pending_finish = true;
                         }
                     });
@@ -458,9 +461,7 @@ pub fn viewport_overlays(app: &mut DuctileApp, ctx: &egui::Context) {
                     ui.vertical(|ui| {
                         for (k, what) in col {
                             ui.horizontal(|ui| {
-                                egui::Frame::new().fill(theme::FIELD).corner_radius(3.0).inner_margin(egui::Margin::symmetric(4, 1)).show(ui, |ui| {
-                                    ui.label(RichText::new(*k).size(11.0).color(theme::TEXT_DIM));
-                                });
+                                key_chip(ui, k);
                                 ui.label(RichText::new(*what).size(11.5).color(theme::TEXT_DIM));
                             });
                         }
@@ -480,6 +481,53 @@ pub fn viewport_overlays(app: &mut DuctileApp, ctx: &egui::Context) {
             });
         });
     }
+}
+
+/// A key in a small chip, as in the key hints.
+fn key_chip(ui: &mut egui::Ui, key: &str) {
+    egui::Frame::new().fill(theme::FIELD).corner_radius(3.0).inner_margin(egui::Margin::symmetric(4, 1)).show(ui, |ui| {
+        ui.label(RichText::new(key).size(11.0).color(theme::TEXT_DIM));
+    });
+}
+
+/// A footer button of the command dialog: label and its key chip.
+fn key_button(ui: &mut egui::Ui, key: &str, label: &str) -> egui::Response {
+    let r = ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        key_chip(ui, key);
+        ui.label(RichText::new(label).color(if label == "OK" { theme::TEXT } else { theme::TEXT_DIM }));
+    });
+    ui.interact(r.response.rect, ui.id().with(label), egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A command input at the top of its dialog: a green check once filled,
+/// what to pick, and what fills it.
+fn slot_row(ui: &mut egui::Ui, slot: &crate::tools::Slot) {
+    egui::Frame::new().fill(theme::PANEL_DARK).corner_radius(5.0).inner_margin(egui::Margin::symmetric(8, 5)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+            let p = ui.painter();
+            if slot.filled.is_some() {
+                p.circle_filled(r.center(), 8.0, theme::ACCENT);
+                let c = r.center();
+                p.line(vec![c + egui::vec2(-3.5, 0.0), c + egui::vec2(-1.0, 2.5), c + egui::vec2(3.5, -2.5)], egui::Stroke::new(1.6, Color32::WHITE));
+            } else {
+                p.circle_filled(r.center(), 8.0, theme::FIELD);
+            }
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(RichText::new(slot.title).size(12.0).color(theme::TEXT));
+                ui.label(RichText::new(slot.detail).size(11.0).color(theme::TEXT_DIM));
+            });
+            if let Some(f) = &slot.filled {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    ui.label(RichText::new(f).size(11.0).color(theme::TEXT_DIM));
+                });
+            }
+        });
+    });
+    ui.add_space(2.0);
 }
 
 /// The More menu (Shift+F): one fixed list, with what does not apply to
