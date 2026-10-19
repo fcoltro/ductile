@@ -641,6 +641,8 @@ pub fn right_panel(app: &mut DuctileApp, ui: &mut egui::Ui) {
                     app.pending.push(Command::ToggleEdges);
                 }
                 let mut xray = app.xray();
+                theme::switch_row(ui, "Show curves", &mut app.show_curves);
+                theme::switch_row(ui, "Show faces", &mut app.show_faces);
                 if theme::switch_row(ui, "X-ray", &mut xray) {
                     app.pending.push(Command::ToggleXray);
                 }

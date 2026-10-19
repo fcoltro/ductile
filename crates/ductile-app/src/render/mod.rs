@@ -105,6 +105,8 @@ pub struct ObjectStyle {
     /// 0 = normal, 1 = hovered, 2 = selected (whole object).
     pub state: u32,
     pub visible: bool,
+    /// Faces drawn (off: edges only).
+    pub faces: bool,
     /// A closed solid: its inside shows as a cap where a section cuts it.
     pub solid: bool,
     pub metalness: f32,
@@ -119,6 +121,7 @@ impl Default for ObjectStyle {
             select_color: [0.95, 0.70, 0.25, 1.0],
             state: 0,
             visible: true,
+            faces: true,
             solid: false,
             metalness: 0.0,
             roughness: 0.45,
@@ -136,6 +139,7 @@ struct GpuObject {
     bind_group: wgpu::BindGroup,
     edges: Option<(wgpu::Buffer, u32)>,
     visible: bool,
+    faces: bool,
 }
 
 struct GpuImage {
@@ -490,7 +494,7 @@ impl ViewportRenderer {
         let edges = self.objects.remove(&id).and_then(|o| o.edges);
         self.objects.insert(
             id,
-            GpuObject { vbuf, ibuf, index_count: idx.len() as u32, obj_buf, face_buf, face_count, bind_group, edges, visible: true },
+            GpuObject { vbuf, ibuf, index_count: idx.len() as u32, obj_buf, face_buf, face_count, bind_group, edges, visible: true, faces: true },
         );
         self.set_style(id, &ObjectStyle::default(), &[]);
     }
@@ -519,6 +523,7 @@ impl ViewportRenderer {
         }
         self.queue.write_buffer(&o.face_buf, 0, bytemuck::cast_slice(&fs));
         o.visible = style.visible;
+        o.faces = style.faces;
     }
 
     pub fn set_edges(&mut self, id: u64, lines: &[LineInstance]) {
@@ -696,7 +701,7 @@ impl ViewportRenderer {
             pass.draw(0..3, 0..1);
             pass.set_bind_group(0, &self.cam_bg, &[]);
             pass.set_pipeline(if self.xray { &self.mesh_xray_pipeline } else { &self.mesh_pipeline });
-            for o in self.objects.values().filter(|o| o.visible) {
+            for o in self.objects.values().filter(|o| o.visible && o.faces) {
                 pass.set_bind_group(1, &o.bind_group, &[]);
                 pass.set_vertex_buffer(0, o.vbuf.slice(..));
                 pass.set_index_buffer(o.ibuf.slice(..), wgpu::IndexFormat::Uint32);

@@ -54,6 +54,8 @@ pub struct DuctileApp {
     typed_echo: Option<char>,
     pub show_grid: bool,
     pub show_edges: bool,
+    pub show_curves: bool,
+    pub show_faces: bool,
     /// Curvature combs on the selected curves and edges.
     pub show_curvature: bool,
     /// Section analysis: a plane through a point, with its normal, and an
@@ -163,6 +165,8 @@ impl DuctileApp {
             typed_echo: None,
             show_grid: true,
             show_edges: true,
+            show_curves: true,
+            show_faces: true,
             show_curvature: false,
             comb_scale: 0.1,
             section: None,
@@ -315,6 +319,8 @@ impl DuctileApp {
             self.doc.hover.hash(&mut h);
             hidden.hash(&mut h);
             self.show_edges.hash(&mut h);
+            self.show_curves.hash(&mut h);
+            self.show_faces.hash(&mut h);
             (r.analysis == Analysis::Render).hash(&mut h);
             for o in &self.doc.objects {
                 o.visible.hash(&mut h);
@@ -331,7 +337,8 @@ impl DuctileApp {
         for o in &self.doc.objects {
             let mut st = ObjectStyle::default();
             st.color = [o.color[0], o.color[1], o.color[2], 1.0];
-            st.visible = o.visible && !hidden.contains(&o.id);
+            st.visible = o.visible && !hidden.contains(&o.id) && (self.show_curves || o.body.kind != ductile_brep::BodyKind::Wire);
+            st.faces = self.show_faces;
             st.solid = o.body.kind == ductile_brep::BodyKind::Solid;
             (st.metalness, st.roughness) = (o.metalness, o.roughness);
             if self.doc.selection.contains(&Pick::Object(o.id)) {
