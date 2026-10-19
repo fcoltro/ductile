@@ -439,6 +439,42 @@ pub fn swatch(p: &Painter, rect: Rect, a: crate::render::Analysis) {
     }
 }
 
+/// A small ball shaded in one of the looks of plain shaded mode.
+pub fn look_swatch(p: &Painter, rect: Rect, l: crate::render::Look) {
+    use crate::render::Look;
+    let c = rect.center();
+    let r = rect.width().min(rect.height()) * 0.5;
+    let light = c + egui::vec2(-0.35, -0.4) * r;
+    if l == Look::Chrome {
+        // Sky over a dark horizon over a warm floor.
+        p.circle_filled(c, r, Color32::from_rgb(70, 60, 52));
+        let rows = (r * 2.0) as i32;
+        for i in 0..rows {
+            let y = -r + (i as f32 + 0.5);
+            let half = (r * r - y * y).max(0.0).sqrt();
+            let t = y / r;
+            let col = if t < 0.05 { lerp_colour(Color32::from_rgb(245, 248, 255), Color32::from_rgb(130, 145, 165), (t + 1.0).clamp(0.0, 1.0)) } else { lerp_colour(Color32::from_rgb(25, 22, 20), Color32::from_rgb(85, 70, 58), t) };
+            p.line_segment([egui::pos2(c.x - half, c.y + y), egui::pos2(c.x + half, c.y + y)], Stroke::new(1.2, col));
+        }
+        return;
+    }
+    let (dark, bright) = match l {
+        Look::Clay => (Color32::from_gray(52), Color32::from_gray(225)),
+        Look::Ceramic => (Color32::from_gray(120), Color32::from_gray(250)),
+        Look::Graphite => (Color32::from_rgb(70, 80, 95), Color32::from_gray(120)),
+        Look::Wax => (Color32::from_rgb(90, 35, 25), Color32::from_rgb(240, 150, 120)),
+        Look::Chrome => unreachable!(),
+    };
+    let steps = 22;
+    for i in 0..steps {
+        let t = i as f32 / (steps - 1) as f32;
+        p.circle_filled(c.lerp(light, t * 0.9), r * (1.0 - t * 0.92), lerp_colour(dark, bright, t.powf(1.6)));
+    }
+    if l == Look::Ceramic {
+        p.circle_filled(light, r * 0.12, Color32::WHITE);
+    }
+}
+
 fn lerp_colour(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))

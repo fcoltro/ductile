@@ -39,6 +39,7 @@ pub struct Options {
     pub open: Option<std::path::PathBuf>,
     pub demo: bool,
     pub analysis: Option<Analysis>,
+    pub look: Option<crate::render::Look>,
     pub curvature: bool,
     pub section: bool,
     /// Camera override: target x, y, z, distance, yaw and pitch in degrees.
@@ -248,6 +249,9 @@ impl DuctileApp {
         }
         if let Some(a) = opts.analysis {
             app.toggle_analysis(a);
+        }
+        if let Some(l) = opts.look {
+            app.set_look(l);
         }
         app.show_curvature = opts.curvature;
         if opts.section {
@@ -1442,6 +1446,16 @@ impl DuctileApp {
 
     pub fn xray(&self) -> bool {
         self.renderer.as_ref().map(|r| r.xray).unwrap_or(false)
+    }
+
+    pub fn look(&self) -> crate::render::Look {
+        self.renderer.as_ref().map(|r| r.look).unwrap_or_default()
+    }
+
+    pub fn set_look(&mut self, l: crate::render::Look) {
+        if let Some(r) = self.renderer.as_mut() {
+            r.look = l;
+        }
     }
 
     pub fn analysis(&self) -> Analysis {

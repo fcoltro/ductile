@@ -15,6 +15,9 @@ struct Camera {
     section: vec4<f32>,
     // Draft analysis: pull direction, and the minimum angle in degrees.
     pull: vec4<f32>,
+    // x: the look of plain shaded mode (0 clay, 1 ceramic, 2 graphite,
+    // 3 chrome, 4 wax).
+    style: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> cam: Camera;
 
@@ -79,6 +82,67 @@ fn shade(base: vec3<f32>, n_in: vec3<f32>, world: vec3<f32>, front: bool) -> vec
     var c = base * (hemi + ndk * 0.62 + ndf * 0.18) + vec3<f32>(spec + rim);
     if (!front) {
         // Back faces of open sheets are tinted so orientation is readable.
+        c = c * vec3<f32>(0.75, 0.70, 0.95);
+    }
+    return c;
+}
+
+// The looks of plain shaded mode. Each lights the surface from the camera
+// as a matcap would, so the model reads the same from every side.
+fn look(base: vec3<f32>, n_in: vec3<f32>, world: vec3<f32>, front: bool) -> vec3<f32> {
+    let kind = u32(cam.style.x + 0.5);
+    if (kind == 0u) {
+        return shade(base, n_in, world, front);
+    }
+    var n = normalize(n_in);
+    if (!front) {
+        n = -n;
+    }
+    var v: vec3<f32>;
+    if (cam.viewport.z > 0.5) {
+        v = -cam.forward.xyz;
+    } else {
+        v = normalize(cam.eye.xyz - world);
+    }
+    let right = normalize(cross(cam.forward.xyz, vec3<f32>(0.0, 0.0, 1.0)) + vec3<f32>(1e-5, 0.0, 0.0));
+    let up = normalize(cross(right, cam.forward.xyz));
+    let key = normalize(-cam.forward.xyz * 0.8 + up * 0.6 - right * 0.4);
+    let ndk = dot(n, key);
+    let ndv = max(dot(n, v), 0.0);
+    let h = normalize(key + v);
+    let ndh = max(dot(n, h), 0.0);
+    // How far the normal leans toward the top of the screen, for a sky
+    // above and a floor below.
+    let r = reflect(-v, n);
+    let sky = dot(r, up);
+    var c: vec3<f32>;
+    if (kind == 1u) {
+        // Ceramic: pale glaze, soft wrap light, a tight bright highlight.
+        let tint = mix(vec3<f32>(0.93, 0.92, 0.90), base, 0.35);
+        let wrap = (ndk + 0.4) / 1.4;
+        c = tint * (0.32 + 0.62 * max(wrap, 0.0)) + vec3<f32>(pow(ndh, 90.0) * 0.75);
+        c += vec3<f32>(smoothstep(0.55, 0.75, sky) * 0.10);
+    } else if (kind == 2u) {
+        // Graphite: dark satin with a cool sheen at grazing angles.
+        let tint = base * 0.32;
+        c = tint * (0.4 + 0.7 * max(ndk, 0.0)) + vec3<f32>(pow(ndh, 18.0) * 0.22);
+        c += vec3<f32>(0.42, 0.50, 0.62) * pow(1.0 - ndv, 2.5) * 0.55;
+    } else if (kind == 3u) {
+        // Chrome: a bright sky over a dark horizon and a warm floor.
+        let horizon = smoothstep(-0.04, 0.04, sky);
+        let top = mix(vec3<f32>(0.55, 0.62, 0.72), vec3<f32>(0.95, 0.97, 1.0), smoothstep(0.0, 0.8, sky));
+        let ground = mix(vec3<f32>(0.10, 0.09, 0.08), vec3<f32>(0.32, 0.27, 0.22), smoothstep(-0.9, -0.05, sky));
+        let env = mix(ground, top, horizon);
+        c = env * mix(vec3<f32>(1.0), base * 1.4, 0.3) + vec3<f32>(pow(ndh, 200.0));
+    } else {
+        // Wax: warm light that wraps past the terminator, as if it glowed
+        // a little from inside.
+        let tint = mix(base, vec3<f32>(0.85, 0.42, 0.30), 0.55);
+        let wrap = max((ndk + 0.6) / 1.6, 0.0);
+        c = tint * (0.25 + 0.75 * wrap) + vec3<f32>(0.30, 0.10, 0.05) * pow(1.0 - ndv, 2.0) * 0.6;
+        c += vec3<f32>(pow(ndh, 30.0) * 0.2);
+    }
+    if (!front) {
         c = c * vec3<f32>(0.75, 0.70, 0.95);
     }
     return c;
@@ -226,9 +290,11 @@ fn fs_mesh(o: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
     } else if (obj.flags.x == 1u || fs == 1u) {
         base = obj.hover_color.rgb;
     }
-    var c = shade(base, o.nrm, o.world, front);
     let mode = u32(cam.forward.w + 0.5);
-    if (mode == 1u) {
+    var c = shade(base, o.nrm, o.world, front);
+    if (mode == 0u) {
+        c = look(base, o.nrm, o.world, front);
+    } else if (mode == 1u) {
         c = zebra(c, o.nrm, o.world, front);
     } else if (mode == 2u) {
         c = isophote(c, o.nrm, o.world, front);

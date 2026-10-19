@@ -22,6 +22,34 @@ struct CameraUniform {
     forward: [f32; 4],
     section: [f32; 4],
     pull: [f32; 4],
+    // x: the shaded look.
+    style: [f32; 4],
+}
+
+/// The lighting of plain shaded mode: our own procedural studies, in the
+/// spirit of matcaps.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Look {
+    #[default]
+    Clay,
+    Ceramic,
+    Graphite,
+    Chrome,
+    Wax,
+}
+
+impl Look {
+    pub const ALL: [Look; 5] = [Look::Clay, Look::Ceramic, Look::Graphite, Look::Chrome, Look::Wax];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Look::Clay => "Clay",
+            Look::Ceramic => "Ceramic",
+            Look::Graphite => "Graphite",
+            Look::Chrome => "Chrome",
+            Look::Wax => "Wax",
+        }
+    }
 }
 
 /// How faces are shaded for surface analysis.
@@ -192,6 +220,8 @@ pub struct ViewportRenderer {
     pub xray: bool,
     /// Surface analysis shading.
     pub analysis: Analysis,
+    /// The look of plain shaded mode.
+    pub look: Look,
     /// Pull direction and minimum angle (degrees) for draft analysis.
     pub pull: ([f32; 3], f32),
     /// Section analysis: the plane (normal, offset) beyond which the
@@ -438,6 +468,7 @@ impl ViewportRenderer {
             objects: HashMap::new(),
             xray: false,
             analysis: Analysis::None,
+            look: Look::Clay,
             pull: ([0.0, 0.0, 1.0], 1.0),
             section: None,
         }
@@ -667,6 +698,7 @@ impl ViewportRenderer {
             forward: fwd.as_vec3().extend(self.analysis as u32 as f32).into(),
             section: self.section.unwrap_or([0.0; 4]),
             pull: [self.pull.0[0], self.pull.0[1], self.pull.0[2], self.pull.1],
+            style: [self.look as u32 as f32, 0.0, 0.0, 0.0],
         };
         self.queue.write_buffer(&self.cam_buf, 0, bytemuck::bytes_of(&cu));
         let line_buf = (!lines.is_empty()).then(|| {

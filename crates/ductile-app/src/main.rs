@@ -33,7 +33,7 @@ mod units;
 
 fn main() -> eframe::Result {
     env_logger::init();
-    let mut opts = app::Options { screenshot: None, open: None, demo: false, analysis: None, curvature: false, section: false, camera: None, select: None };
+    let mut opts = app::Options { screenshot: None, open: None, demo: false, analysis: None, look: None, curvature: false, section: false, camera: None, select: None };
     let mut export_step: Option<std::path::PathBuf> = None;
     let mut export_lines: Option<std::path::PathBuf> = None;
     let mut args = std::env::args().skip(1);
@@ -46,6 +46,7 @@ fn main() -> eframe::Result {
             "--draft" => opts.analysis = Some(render::Analysis::Draft),
             "--direction" => opts.analysis = Some(render::Analysis::Direction),
             "--render" => opts.analysis = Some(render::Analysis::Render),
+            "--look" => opts.look = args.next().and_then(|n| render::Look::ALL.into_iter().find(|l| l.label().eq_ignore_ascii_case(&n))),
             "--curvature" => opts.curvature = true,
             "--section" => opts.section = true,
             "--select" => opts.select = args.next().and_then(|x| x.parse().ok()),

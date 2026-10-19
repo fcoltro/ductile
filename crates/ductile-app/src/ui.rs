@@ -634,7 +634,29 @@ pub fn right_panel(app: &mut DuctileApp, ui: &mut egui::Ui) {
                         }
                     }
                 });
-                ui.label(RichText::new(current.label()).size(11.0).color(theme::TEXT_DIM));
+                if current == Analysis::None {
+                    // Looks for plain shading, our own matcap-like studies.
+                    let look = app.look();
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        for l in crate::render::Look::ALL {
+                            let (rect, resp) = ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
+                            let ball = rect.shrink(3.0);
+                            crate::icons::look_swatch(ui.painter(), ball, l);
+                            if look == l {
+                                ui.painter().circle_stroke(ball.center(), 12.5, egui::Stroke::new(1.5, theme::ACCENT));
+                            } else if resp.hovered() {
+                                ui.painter().circle_stroke(ball.center(), 12.5, egui::Stroke::new(1.0, theme::TEXT_DIM));
+                            }
+                            if resp.on_hover_text(l.label()).clicked() {
+                                app.set_look(l);
+                            }
+                        }
+                    });
+                    ui.label(RichText::new(format!("Shaded · {}", look.label())).size(11.0).color(theme::TEXT_DIM));
+                } else {
+                    ui.label(RichText::new(current.label()).size(11.0).color(theme::TEXT_DIM));
+                }
                 ui.add_space(4.0);
                 let mut edges = app.show_edges;
                 if theme::switch_row(ui, "Show edges", &mut edges) {

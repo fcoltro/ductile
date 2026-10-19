@@ -211,6 +211,9 @@ code from them.
   (`crates/ductile-io/tests/occ_import.rs`). Assemblies are flattened:
   every placed instance of a part becomes its own object, named after the
   part.
+- Shaded looks: plain shading comes in five lighting studies of our own
+  (Clay, Ceramic, Graphite, Chrome, Wax), picked under the shader balls
+  or with `--look NAME`; they light from the camera as matcaps do.
 - Zebra stripes (Alt+R, or the Zebra button) to judge surface continuity:
   stripes stay unbroken across tangent (G1) joins and keep their direction
   across curvature-continuous (G2) ones. Headless: `--zebra`.
