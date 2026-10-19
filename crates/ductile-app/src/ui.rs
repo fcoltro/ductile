@@ -1056,47 +1056,91 @@ pub fn palette(app: &mut DuctileApp, ctx: &egui::Context) {
     }
     let mut open = true;
     let mut chosen = None;
+    // Opens at the mouse, as Plasticity's command search.
+    let at = app.palette_at.unwrap_or(egui::pos2(ctx.content_rect().center().x - 210.0, 80.0));
+    let favourites = app.prefs.favourites.clone();
+    let mut prefs_changed = false;
     egui::Window::new("Command palette")
         .title_bar(false)
-        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 80.0))
+        .fixed_pos(at)
+        .constrain(true)
         .fixed_size(egui::vec2(420.0, 360.0))
         .show(ctx, |ui| {
-            let r = ui.add(egui::TextEdit::singleline(&mut app.palette_query).hint_text("Type a command…").desired_width(f32::INFINITY));
-            r.request_focus();
+            let r = ui.add(egui::TextEdit::singleline(&mut app.palette_query).hint_text("Search commands").desired_width(f32::INFINITY));
+            if app.assigning.is_none() {
+                r.request_focus();
+            }
             let q = app.palette_query.to_lowercase();
-            let matches: Vec<Command> = Command::ALL
+            let mut matches: Vec<Command> = Command::ALL
                 .iter()
                 .copied()
                 .filter(|c| *c != Command::Palette && (q.is_empty() || fuzzy(&c.label().to_lowercase(), &q)))
                 .collect();
+            // Favourites first, then A to Z.
+            matches.sort_by_key(|c| (!favourites.contains(c), c.label().to_lowercase()));
             if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 chosen = matches.first().copied();
             }
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 open = false;
             }
+            // A solid scroll bar with its own room, clear of the row menus.
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
             egui::ScrollArea::vertical().show(ui, |ui| {
+                let mut heading = None;
                 for c in matches {
-                    let b = egui::Button::new(c.label()).shortcut_text(c.shortcut_text()).frame(false);
-                    let r = ui.add_sized([ui.available_width(), 22.0], b).on_hover_text("Right-click to change the shortcut");
-                    if r.clicked() {
-                        chosen = Some(c);
+                    let fav = favourites.contains(&c);
+                    let h = if fav { "FAVOURITES" } else { "ALL COMMANDS" };
+                    if !favourites.is_empty() && heading != Some(h) {
+                        heading = Some(h);
+                        ui.label(RichText::new(h).size(11.0).color(theme::TEXT_DIM));
                     }
-                    r.context_menu(|ui| {
-                        if ui.button("Assign shortcut…").clicked() {
-                            app.assigning = Some(c);
-                            app.status = format!("Press the new shortcut for {} (Esc keeps the old one)", c.label());
-                            open = false;
-                            ui.close();
-                        }
-                        if ui.button("Reset to default").clicked() {
-                            crate::keymap::keymap_mut().reset(c);
-                            ui.close();
+                    ui.horizontal(|ui| {
+                        // The row's own menu, as the … on each search result.
+                        let menu = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let dots = glyph_button(ui, 20.0, false, "Shortcut and favourite", |p, r, col| crate::icons::dots(p, r, col));
+                            egui::Popup::menu(&dots).show(|ui| {
+                                if ui.button("Documentation").clicked() {
+                                    app.show_help = true;
+                                    ui.close();
+                                }
+                                if ui.button("Assign shortcut…").clicked() {
+                                    app.assigning = Some(c);
+                                    app.status = format!("Press the new shortcut for {} (Esc keeps the old one)", c.label());
+                                    open = false;
+                                    ui.close();
+                                }
+                                if ui.add_enabled(!c.shortcut_text().is_empty(), egui::Button::new("Unset shortcut")).clicked() {
+                                    crate::keymap::keymap_mut().unset(c);
+                                    ui.close();
+                                }
+                                if ui.button("Reset to default").clicked() {
+                                    crate::keymap::keymap_mut().reset(c);
+                                    ui.close();
+                                }
+                                if ui.button(if fav { "Remove from favourites" } else { "Add to favourites" }).clicked() {
+                                    if fav {
+                                        app.prefs.favourites.retain(|x| *x != c);
+                                    } else {
+                                        app.prefs.favourites.push(c);
+                                    }
+                                    prefs_changed = true;
+                                    ui.close();
+                                }
+                            });
+                            let b = egui::Button::new(c.label()).shortcut_text(c.shortcut_text()).frame(false);
+                            ui.add_sized([ui.available_width(), 22.0], b)
+                        });
+                        if menu.inner.clicked() {
+                            chosen = Some(c);
                         }
                     });
                 }
             });
         });
+    if prefs_changed {
+        app.prefs.save();
+    }
     if let Some(c) = chosen {
         app.pending.push(c);
         open = false;
@@ -1163,7 +1207,7 @@ pub fn help_window(app: &mut DuctileApp, ctx: &egui::Context) {
     let mut open = true;
     egui::Window::new("Ductile help").open(&mut open).default_width(420.0).show(ctx, |ui| {
         ui.label(RichText::new("Navigation").strong());
-        ui.label("Orbit: right or middle mouse drag\nPan: Shift + right/middle drag\nZoom: mouse wheel (zooms toward the cursor)\nFrame selection: / · Command palette: F · Construction plane from selection: Space");
+        ui.label("Orbit: middle mouse drag\nPan: right drag or Shift + middle drag\nZoom: mouse wheel (zooms toward the cursor)\nOther presets (Blender, Maya, Rhino…) are in Preferences (Ctrl+,)\nFrame selection: / · Command search: F · Construction plane from selection: Space");
         ui.add_space(6.0);
         ui.label(RichText::new("Selection").strong());
         ui.label("1 vertices · 2 edges · 3 faces · 4 solids\nClick to select, Shift+click to toggle, Ctrl+click to remove, drag for box select");
@@ -1180,7 +1224,7 @@ pub fn help_window(app: &mut DuctileApp, ctx: &egui::Context) {
         });
         ui.add_space(6.0);
         ui.label("While a command runs: type a number to enter a value, X/Y/Z to constrain, Enter to confirm, Esc to cancel.");
-        ui.label("Shortcuts follow Plasticity's. Right-click a command in the palette (F) to change its shortcut.");
+        ui.label("Shortcuts follow Plasticity's. In command search (F), each command's … menu assigns, unsets or resets its shortcut and pins it to favourites.");
     });
     app.show_help = open;
 }

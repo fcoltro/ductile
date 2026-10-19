@@ -64,6 +64,8 @@ pub struct DuctileApp {
     /// The last measurement, shown while the selection it measured stays.
     pub measurement: Option<(crate::measure::Measurement, std::collections::BTreeSet<Pick>)>,
     pub palette_open: bool,
+    /// Where command search opened (the mouse position).
+    pub palette_at: Option<egui::Pos2>,
     /// Where the Shift+F menu of suggested commands is open.
     pub suggest_at: Option<egui::Pos2>,
     /// Whether this run set the running marker (not headless screenshots).
@@ -155,6 +157,7 @@ impl DuctileApp {
             section: None,
             measurement: None,
             palette_open: false,
+            palette_at: None,
             suggest_at: None,
             session_marked: false,
             pointer_pos: None,

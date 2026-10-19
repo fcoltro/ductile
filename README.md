@@ -293,8 +293,9 @@ faces or a whole solid), Q runs a boolean, C cuts, E extrudes, L lofts, P
 makes a pipe, G / R / S move, rotate and scale, 1–4 pick vertices, edges,
 faces or solids (Ctrl+1–4 turn the current selection into those), A selects all, Shift+R repeats the last command, Ctrl+T reselects the last operation's inputs (again to walk back), / frames
 the selection and Space sets the construction plane from it. Every
-command, with or without a key, is in the palette; right-click one there
-to give it a new shortcut. Inside a command, Tab (or any digit) opens a
+command, with or without a key, is in command search (F, opened at the
+mouse); each row's … menu assigns, unsets or resets its shortcut and adds
+it to the favourites pinned at the top. Inside a command, Tab (or any digit) opens a
 typed value that takes arithmetic and units (`10+2.5`, `3*4mm`, `1in`,
 `45deg`); Escape drops it back to the pointer. Extrude, like Plasticity's,
 takes Q to join, W to cut, Shift+E to intersect and B for a new body. Changes are kept in

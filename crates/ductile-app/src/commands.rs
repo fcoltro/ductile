@@ -1238,6 +1238,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         ToggleSnap => app.snap_enabled = !app.snap_enabled,
         Palette => {
             app.palette_open = true;
+            app.palette_at = app.pointer_pos.map(|p| p - egui::vec2(40.0, 20.0));
             app.palette_query.clear();
         }
         Help => app.show_help = !app.show_help,

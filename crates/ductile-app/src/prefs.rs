@@ -101,11 +101,13 @@ pub struct Prefs {
     pub backups: crate::backup::Policy,
     /// Where backups go; empty means a folder next to the file.
     pub backup_dir: String,
+    /// Commands pinned to the top of command search.
+    pub favourites: Vec<crate::commands::Command>,
 }
 
 impl Default for Prefs {
     fn default() -> Self {
-        Prefs { auto_invoke: true, drill_down: true, nav: NavPreset::Plasticity, zoom_to_cursor: true, autosave_minutes: 2, load_last_session: false, backups: Default::default(), backup_dir: String::new() }
+        Prefs { auto_invoke: true, drill_down: true, nav: NavPreset::Plasticity, zoom_to_cursor: true, autosave_minutes: 2, load_last_session: false, backups: Default::default(), backup_dir: String::new(), favourites: Vec::new() }
     }
 }
 
@@ -132,6 +134,7 @@ impl Prefs {
                 "backups_daily" => p.backups.daily = v.parse().unwrap_or(p.backups.daily),
                 "backups_weekly" => p.backups.weekly = v.parse().unwrap_or(p.backups.weekly),
                 "backup_dir" => p.backup_dir = v.to_string(),
+                "favourites" => p.favourites = v.split(',').filter_map(|s| crate::commands::Command::from_id(s.trim())).collect(),
                 "nav" => p.nav = NavPreset::ALL.into_iter().find(|n| n.label().eq_ignore_ascii_case(v)).unwrap_or(p.nav),
                 _ => {}
             }
@@ -141,7 +144,7 @@ impl Prefs {
 
     pub fn text(&self) -> String {
         format!(
-            "auto_invoke = {}\ndrill_down = {}\nnav = {}\nzoom_to_cursor = {}\nautosave_minutes = {}\nload_last_session = {}\nbackups_recent = {}\nbackups_hourly = {}\nbackups_daily = {}\nbackups_weekly = {}\nbackup_dir = {}\n",
+            "auto_invoke = {}\ndrill_down = {}\nnav = {}\nzoom_to_cursor = {}\nautosave_minutes = {}\nload_last_session = {}\nbackups_recent = {}\nbackups_hourly = {}\nbackups_daily = {}\nbackups_weekly = {}\nbackup_dir = {}\nfavourites = {}\n",
             self.auto_invoke,
             self.drill_down,
             self.nav.label(),
@@ -152,7 +155,8 @@ impl Prefs {
             self.backups.hourly,
             self.backups.daily,
             self.backups.weekly,
-            self.backup_dir
+            self.backup_dir,
+            self.favourites.iter().map(|c| c.id()).collect::<Vec<_>>().join(", ")
         )
     }
 
@@ -176,7 +180,7 @@ mod tests {
 
     #[test]
     fn round_trips_and_maps_drags() {
-        let p = Prefs { auto_invoke: false, nav: NavPreset::Maya, autosave_minutes: 5, backup_dir: "/tmp/b".into(), backups: crate::backup::Policy { recent: 5, hourly: 0, daily: 3, weekly: 1 }, ..Prefs::default() };
+        let p = Prefs { auto_invoke: false, nav: NavPreset::Maya, autosave_minutes: 5, backup_dir: "/tmp/b".into(), favourites: vec![crate::commands::Command::Fillet, crate::commands::Command::Extrude], backups: crate::backup::Policy { recent: 5, hourly: 0, daily: 3, weekly: 1 }, ..Prefs::default() };
         assert_eq!(Prefs::parse(&p.text()), p);
         let none = egui::Modifiers::NONE;
         assert_eq!(NavPreset::Plasticity.drag(false, true, false, none), Some(Nav::Orbit));

@@ -221,6 +221,12 @@ impl Keymap {
         taken
     }
 
+    /// Leaves `cmd` with no key.
+    pub fn unset(&mut self, cmd: Command) {
+        self.binds.retain(|(c, _)| *c != cmd);
+        self.save();
+    }
+
     /// Puts `cmd` back on its default keys.
     pub fn reset(&mut self, cmd: Command) {
         let defaults: Vec<Chord> = Keymap::defaults().chords(cmd);
