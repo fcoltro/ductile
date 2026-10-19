@@ -170,6 +170,9 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     if rolled.is_ok() {
         return rolled;
     }
+    if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+        eprintln!("rolled retry: {:?}", rolled.as_ref().err());
+    }
     // Straight tools stop at the tangent plane of a curved end face, which
     // pokes into a hole the edge runs into; stop at the face itself
     // instead (second, as meeting the face exactly is harder on booleans).
@@ -178,6 +181,9 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     CURVED_CAPS.set(false);
     if capped.is_ok() {
         return capped;
+    }
+    if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+        eprintln!("capped retry: {:?}", capped.as_ref().err());
     }
     // A cut stopped at a planar end face lies flat on that face, tangent
     // to any round beside it, which the boolean may not take. Beyond a
@@ -188,6 +194,9 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     UNCAPPED.set(false);
     if uncapped.is_ok() {
         return uncapped;
+    }
+    if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+        eprintln!("uncapped retry: {:?}", uncapped.as_ref().err());
     }
     // An edge running on tangentially into others (into an earlier
     // fillet's arc, say) may have no sensible end on its own: blend the
