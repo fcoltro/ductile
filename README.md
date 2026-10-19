@@ -113,7 +113,10 @@ code from them.
   them. Constrained surface makes a smooth sheet through points you
   click. Patch on a loop of selected edges meets
   the faces beyond them tangentially (G1), faired for even curvature: a
-  tube's rim gets a smooth dome. In vertex mode (1) the control nets of
+  tube's rim gets a smooth dome. Holes of three or more than four sides
+  are filled with one piece per corner, tangent to each other across
+  their seams as well as to the faces around (a corner where three
+  fillets meet fills like a sphere). In vertex mode (1) the control nets of
   untrimmed spline surfaces show and their points move with G, rotate and
   scale; neighbouring faces stay joined. Thicken (Alt+K) turns surfaces into
   solids of a given thickness on either side. Bridge surface spans two

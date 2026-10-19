@@ -6,6 +6,7 @@ use crate::ops::{extrude::side_surface, loft::directed_nurbs, revolve::{radial, 
 use crate::profile::{loops_plane, Loop3, Segment};
 use crate::topo::{Body, BodyKind, Coedge, VertexId};
 use ductile_geom::{Curve3, DMat3, DMat4, DQuat, DVec2, DVec3, DVec4, Frame, NurbsCurve, NurbsSurface, Surface};
+use std::f64::consts::TAU;
 
 /// Builds a body face by face from boundary curves, sharing vertices and
 /// edges that coincide geometrically, so neighbouring faces are sewn.
@@ -138,7 +139,7 @@ pub fn revolve_sheet(chains: &[Loop3], origin: DVec3, axis: DVec3, angle: f64) -
     if angle < 1e-9 || chains.iter().all(|c| c.segments.is_empty()) {
         return None;
     }
-    let angle = angle.min(std::f64::consts::TAU);
+    let angle = angle.min(TAU);
     let tol = tolerance(chains);
     let rot = DMat4::from_translation(origin) * DMat4::from_quat(DQuat::from_axis_angle(a, angle)) * DMat4::from_translation(-origin);
     // Arc swept by a point, None on the axis.
@@ -433,6 +434,22 @@ pub fn constrained_surface(pts: &[DVec3], smooth: f64) -> Option<Body> {
 /// Splits a closed chain into four curves running around it, at its four
 /// sharpest corners; smooth or short chains are split by length.
 fn four_sides(boundary: &Loop3) -> Option<[NurbsCurve; 4]> {
+    let mut pieces = corner_pieces(boundary, 4);
+    // Split the longest pieces in half until there are four.
+    while pieces.len() < 4 {
+        let (i, _) = pieces.iter().enumerate().max_by(|x, y| x.1.length().total_cmp(&y.1.length()))?;
+        let c = pieces.remove(i);
+        let (a, b) = c.domain();
+        let (l, r) = c.split(half_length_param(&c, a, b));
+        pieces.insert(i, r);
+        pieces.insert(i, l);
+    }
+    Some([pieces[0].clone(), pieces[1].clone(), pieces[2].clone(), pieces[3].clone()])
+}
+
+/// The boundary's sides: the runs between its sharp corners (at most
+/// `most`, the sharpest), each one curve, in order.
+fn corner_pieces(boundary: &Loop3, most: usize) -> Vec<NurbsCurve> {
     let segs: Vec<NurbsCurve> = boundary.segments.iter().map(directed_nurbs).collect();
     let n = segs.len();
     // Corner sharpness at the start of each segment.
@@ -442,9 +459,9 @@ fn four_sides(boundary: &Loop3) -> Option<[NurbsCurve; 4]> {
         a.angle_between(b)
     };
     let mut corners: Vec<usize> = (0..n).filter(|i| n > 1 && turn(*i) > 0.1).collect();
-    if corners.len() > 4 {
+    if corners.len() > most {
         corners.sort_by(|x, y| turn(*y).total_cmp(&turn(*x)));
-        corners.truncate(4);
+        corners.truncate(most);
         corners.sort();
     }
     // Pieces between corners, each one curve.
@@ -464,17 +481,7 @@ fn four_sides(boundary: &Loop3) -> Option<[NurbsCurve; 4]> {
             })
             .collect()
     };
-    // Split the longest pieces in half until there are four.
-    let mut pieces = pieces;
-    while pieces.len() < 4 {
-        let (i, _) = pieces.iter().enumerate().max_by(|x, y| x.1.length().total_cmp(&y.1.length()))?;
-        let c = pieces.remove(i);
-        let (a, b) = c.domain();
-        let (l, r) = c.split(half_length_param(&c, a, b));
-        pieces.insert(i, r);
-        pieces.insert(i, l);
-    }
-    Some([pieces[0].clone(), pieces[1].clone(), pieces[2].clone(), pieces[3].clone()])
+    pieces
 }
 
 /// The parameter halving the curve's length.
@@ -592,8 +599,24 @@ pub fn patch_g1(boundary: &Loop3, neighbours: &[Neighbour]) -> Option<Body> {
     if neighbours.iter().all(Option::is_none) || neighbours.len() != boundary.segments.len() {
         return patch(boundary, &[]);
     }
+    let corners = corner_pieces(boundary, usize::MAX).len();
+    if corners == 3 || corners > 4 {
+        if let Some(b) = patch_n_g1(boundary, neighbours) {
+            return Some(b);
+        }
+    }
     let [bottom, right, top, left] = four_sides(boundary)?;
-    let segs = &boundary.segments;
+    let cross = boundary_cross(&boundary.segments, neighbours);
+    let s = fit_g1([&bottom, &right, &top.reversed(), &left.reversed()], &cross)?;
+    let mut sw = Sewer::new(BodyKind::Sheet, tolerance(std::slice::from_ref(boundary)));
+    sw.patch(s);
+    Some(sw.body)
+}
+
+/// At a point of the boundary, the normal of the face beyond the segment
+/// through it and the direction square to the segment in that face's
+/// tangent plane pointing into the patch; None on a free side.
+fn boundary_cross<'a>(segs: &'a [Segment], neighbours: &'a [Neighbour]) -> impl Fn(DVec3) -> Option<(DVec3, DVec3)> + 'a {
     // Per segment, the sign that turns n x t away from its neighbour.
     let signs: Vec<f64> = segs
         .iter()
@@ -606,7 +629,7 @@ pub fn patch_g1(boundary: &Loop3, neighbours: &[Neighbour]) -> Option<Body> {
             if d.dot(*inside - m) > 0.0 { -1.0 } else { 1.0 }
         })
         .collect();
-    let cross = |p: DVec3| -> Option<(DVec3, DVec3)> {
+    move |p: DVec3| -> Option<(DVec3, DVec3)> {
         // The boundary segment through p.
         let (i, t) = segs
             .iter()
@@ -618,11 +641,7 @@ pub fn patch_g1(boundary: &Loop3, neighbours: &[Neighbour]) -> Option<Body> {
         let n = surf.normal(uv.x, uv.y);
         let d = n.cross(segs[i].tangent_at(t)).try_normalize()?;
         Some((n, d * signs[i]))
-    };
-    let s = fit_g1([&bottom, &right, &top.reversed(), &left.reversed()], &cross)?;
-    let mut sw = Sewer::new(BodyKind::Sheet, tolerance(std::slice::from_ref(boundary)));
-    sw.patch(s);
-    Some(sw.body)
+    }
 }
 
 /// Least-squares patch through four boundary curves (bottom and top in
@@ -810,6 +829,317 @@ fn fit_g1(sides: [&NurbsCurve; 4], cross: &dyn Fn(DVec3) -> Option<(DVec3, DVec3
         }
     }
     Some(NurbsSurface::new(p, q, ku, kv, nu, nv, ctrl))
+}
+
+/// Fills a boundary of three or more than four sides tangentially, as
+/// [`patch_g1`] does four: from each side's middle a spoke runs to a
+/// shared centre, cutting the fill into one quadrilateral per corner. The
+/// quadrilaterals are fitted together by least squares: their boundary
+/// rows fixed, their derivatives across the boundary in the neighbours'
+/// tangent planes, smooth (C1) across the spokes, their first rows round
+/// the centre in one plane, and the rest faired.
+pub fn patch_n_g1(boundary: &Loop3, neighbours: &[Neighbour]) -> Option<Body> {
+    use crate::ops::corner::Lsq;
+    use ductile_geom::nurbs::basis::{basis_funs, ders_basis_funs, find_span};
+    if neighbours.len() != boundary.segments.len() {
+        return None;
+    }
+    let sides = corner_pieces(boundary, usize::MAX);
+    let ns = sides.len();
+    if !(3..=8).contains(&ns) {
+        return None;
+    }
+    let cross = boundary_cross(&boundary.segments, neighbours);
+    // Quadrilateral k sits at corner k (the start of side k): u runs along
+    // the first half of side k to its middle, v back along the second half
+    // of side k - 1 to that one's middle; the far corner is the centre.
+    let halves: Vec<(NurbsCurve, NurbsCurve)> = sides
+        .iter()
+        .map(|c| {
+            let (a, b) = c.domain();
+            c.split(half_length_param(c, a, b))
+        })
+        .collect();
+    // Every edge refitted on one knot vector, by arc length, so the
+    // pieces share their knots and meet the spokes at matching speeds.
+    let mut cs = Vec::with_capacity(2 * ns);
+    for k in 0..ns {
+        cs.push(fit_uniform(&halves[k].0, 10)?);
+        cs.push(fit_uniform(&halves[(k + ns - 1) % ns].1.reversed(), 10)?);
+    }
+    let (deg, knots, n) = (cs[0].degree, cs[0].knots.clone(), cs[0].ctrl.len());
+    let centre = cs.iter().flat_map(|c| c.ctrl.iter().map(|h| h.truncate() / h.w)).sum::<DVec3>() / (cs.len() * n) as f64;
+    let cp = |c: &NurbsCurve, i: usize| c.ctrl[i].truncate() / c.ctrl[i].w - centre;
+    #[derive(Clone, Copy, PartialEq)]
+    enum S {
+        F(DVec3),
+        V(usize),
+    }
+    let mut n_var = 0;
+    let mut var = || {
+        n_var += 1;
+        S::V(n_var - 1)
+    };
+    let mid_c = var();
+    // Spoke k runs from the middle of side k to the centre.
+    let spokes: Vec<Vec<S>> = (0..ns).map(|k| (0..n).map(|t| if t == 0 { S::F(cp(&cs[2 * k], n - 1)) } else if t == n - 1 { mid_c } else { var() }).collect()).collect();
+    let grids: Vec<Vec<Vec<S>>> = (0..ns)
+        .map(|k| {
+            (0..n)
+                .map(|i| {
+                    (0..n)
+                        .map(|j| {
+                            if j == 0 {
+                                S::F(cp(&cs[2 * k], i))
+                            } else if i == 0 {
+                                S::F(cp(&cs[2 * k + 1], j))
+                            } else if i == n - 1 {
+                                spokes[k][j]
+                            } else if j == n - 1 {
+                                spokes[(k + ns - 1) % ns][i]
+                            } else {
+                                var()
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect();
+    let mids: Vec<DVec3> = (0..ns).map(|k| cp(&cs[2 * k], n - 1)).collect();
+    let hub = mids.iter().copied().sum::<DVec3>() / ns as f64;
+    // A row sum_k a_k . X_k = rhs over grid points X_k.
+    let add = |lsq: &mut Lsq, terms: &[(S, DVec3)], rhs: f64, w: f64| {
+        let mut coef = Vec::new();
+        let mut r = rhs;
+        for &(slot, a) in terms {
+            match slot {
+                S::F(x) => r -= a.dot(x),
+                S::V(k) => {
+                    for c in 0..3 {
+                        if a[c] != 0.0 {
+                            coef.push((3 * k + c, a[c]));
+                        }
+                    }
+                }
+            }
+        }
+        if !coef.is_empty() {
+            lsq.row(&coef, r, w);
+        }
+    };
+    let unit = [DVec3::X, DVec3::Y, DVec3::Z];
+    let build = |prev: Option<&Vec<NurbsSurface>>, hub_normal: Option<DVec3>, seam_normals: Option<&Vec<Vec<(f64, DVec3)>>>| -> Vec<f64> {
+        let mut lsq = Lsq::new(3 * n_var);
+        // Across the boundary: per quadrilateral its sides v = 0 (along
+        // u, edge curve 2k) and u = 0 (along v, edge curve 2k + 1).
+        let f = deg as f64 / (knots[deg + 1] - knots[1]);
+        for (k, g) in grids.iter().enumerate() {
+            for along_u in [true, false] {
+                let curve = &cs[if along_u { 2 * k } else { 2 * k + 1 }];
+                let at_grid = |m: usize, row: usize| if along_u { g[m][row] } else { g[row][m] };
+                let samples = 4 * n;
+                for smp in 0..samples {
+                    let t = knots[deg] + (knots[n] - knots[deg]) * (smp as f64 + 0.5) / samples as f64;
+                    let at = curve.point(t);
+                    let Some((nrm, d)) = cross(at) else { continue };
+                    // How far across: the arc leaving along d to the
+                    // piece's opposite side, a spoke (from the last fit, or
+                    // guessed straight from the side's middle to the hub).
+                    let u = (t - knots[deg]) / (knots[n] - knots[deg]);
+                    let opposite = match prev {
+                        Some(ss) => if along_u { ss[k].point(u, 1.0) } else { ss[k].point(1.0, u) },
+                        None => mids[if along_u { (k + ns - 1) % ns } else { k }].lerp(hub, u) + centre,
+                    };
+                    let chord = opposite - at;
+                    let theta = (2.0 * d.angle_between(chord)).min(3.0);
+                    let reach = if theta > 1e-6 { chord.length() * (theta / 2.0) / (theta / 2.0).sin() } else { chord.length() };
+                    let span = find_span(n - 1, deg, t, &knots);
+                    let b = basis_funs(span, t, deg, &knots);
+                    let terms = |dir: DVec3| -> Vec<(S, DVec3)> {
+                        b.iter().enumerate().flat_map(|(m, bm)| [(at_grid(span - deg + m, 1), dir * (f * bm)), (at_grid(span - deg + m, 0), dir * (-f * bm))]).collect()
+                    };
+                    add(&mut lsq, &terms(nrm), 0.0, 300.0);
+                    for (c, e) in unit.iter().enumerate() {
+                        add(&mut lsq, &terms(*e), reach * d[c], 1.0);
+                    }
+                }
+            }
+        }
+        // Smooth across each spoke: its points midway between the rows on
+        // either side (C1, as the knots match). Firm on the first pass;
+        // after that only a preference, the spoke normals taking over.
+        let c1 = if seam_normals.is_some() { 1.0 } else { 100.0 };
+        for k in 0..ns {
+            let (g0, g1, sp) = (&grids[k], &grids[(k + 1) % ns], &spokes[k]);
+            for t in 1..n - 1 {
+                for e in unit {
+                    add(&mut lsq, &[(g0[n - 2][t], e), (g1[t][n - 2], e), (sp[t], e * -2.0)], 0.0, c1);
+                }
+            }
+        }
+        // Tangent across each spoke: the derivatives across it on both
+        // sides in the plane square to the normal found there.
+        if let Some(normals) = seam_normals {
+            let fe = deg as f64 / (knots[n - 1 + deg] - knots[n - 1]);
+            for (k, along) in normals.iter().enumerate() {
+                let (g0, g1) = (&grids[k], &grids[(k + 1) % ns]);
+                for &(t, nrm) in along {
+                    let span = find_span(n - 1, deg, t, &knots);
+                    let b = basis_funs(span, t, deg, &knots);
+                    let mut terms = Vec::new();
+                    for (m, bm) in b.iter().enumerate() {
+                        let j = span - deg + m;
+                        terms.push((g0[n - 1][j], nrm * (fe * bm)));
+                        terms.push((g0[n - 2][j], nrm * (-fe * bm)));
+                    }
+                    add(&mut lsq, &terms, 0.0, 300.0);
+                    let mut terms = Vec::new();
+                    for (m, bm) in b.iter().enumerate() {
+                        let i = span - deg + m;
+                        terms.push((g1[i][n - 1], nrm * (fe * bm)));
+                        terms.push((g1[i][n - 2], nrm * (-fe * bm)));
+                    }
+                    add(&mut lsq, &terms, 0.0, 300.0);
+                }
+            }
+        }
+        // One tangent plane at the centre.
+        if let Some(nc) = hub_normal {
+            for k in 0..ns {
+                for x in [spokes[k][n - 2], grids[k][n - 2][n - 2]] {
+                    add(&mut lsq, &[(x, nc), (mid_c, -nc)], 0.0, 300.0);
+                }
+            }
+        }
+        // Fairness per quadrilateral, as in `fit_g1`.
+        let m = 3 * n;
+        let (d0, d1) = (knots[deg], knots[n]);
+        for g in &grids {
+            for a in 0..m {
+                let u = d0 + (d1 - d0) * (a as f64 + 0.5) / m as f64;
+                let su = find_span(n - 1, deg, u, &knots);
+                let bu = ders_basis_funs(su, u, deg, 3.min(deg), &knots);
+                for c in 0..m {
+                    let v = d0 + (d1 - d0) * (c as f64 + 0.5) / m as f64;
+                    let sv = find_span(n - 1, deg, v, &knots);
+                    let bv = ders_basis_funs(sv, v, deg, 3.min(deg), &knots);
+                    let term = |r: usize, s: usize, e: DVec3| -> Vec<(S, DVec3)> {
+                        let mut out = Vec::new();
+                        for i in 0..=deg {
+                            for j in 0..=deg {
+                                let w = bu[r][i] * bv[s][j];
+                                if w != 0.0 {
+                                    out.push((g[su - deg + i][sv - deg + j], e * w));
+                                }
+                            }
+                        }
+                        out
+                    };
+                    let w0 = 1.0 / m as f64;
+                    for e in unit {
+                        for (r, s, w) in [(3, 0, 1.0), (2, 1, 3.0), (1, 2, 3.0), (0, 3, 1.0)] {
+                            add(&mut lsq, &term(r, s, e), 0.0, w0 * f64::sqrt(w));
+                        }
+                        for (r, s, w) in [(2, 0, 1.0), (1, 1, 2.0), (0, 2, 1.0)] {
+                            add(&mut lsq, &term(r, s, e), 0.0, w0 * f64::sqrt(w) * 0.05);
+                        }
+                    }
+                }
+            }
+        }
+        lsq.solve()
+    };
+    let point = |x: &[f64], slot: S| match slot {
+        S::F(p) => p,
+        S::V(k) => DVec3::new(x[3 * k], x[3 * k + 1], x[3 * k + 2]),
+    };
+    let surfaces = |x: &[f64]| -> Vec<NurbsSurface> {
+        grids
+            .iter()
+            .map(|g| {
+                let ctrl: Vec<DVec4> = g.iter().flat_map(|col| col.iter().map(|s| (point(x, *s) + centre).extend(1.0))).collect();
+                NurbsSurface::new(deg, deg, knots.clone(), knots.clone(), n, n, ctrl)
+            })
+            .collect()
+    };
+    let normal = |s: &NurbsSurface, u: f64, v: f64| {
+        let d = s.derivs(u, v, 1);
+        d[1][0].cross(d[0][1]).normalize_or_zero()
+    };
+    // A first fit, smooth across the spokes; then the normals along each
+    // spoke and at the centre, averaged over its two sides, are imposed,
+    // and refound, a few times over.
+    let mut x = build(None, None, None);
+    for _ in 0..3 {
+        let ss = surfaces(&x);
+        let nc = ss.iter().map(|s| normal(s, 1.0, 1.0)).sum::<DVec3>().try_normalize()?;
+        let samples = 3 * n;
+        let seams: Vec<Vec<(f64, DVec3)>> = (0..ns)
+            .map(|k| {
+                (1..samples)
+                    .filter_map(|i| {
+                        let t = i as f64 / samples as f64;
+                        let nrm = (normal(&ss[k], 1.0, t) + normal(&ss[(k + 1) % ns], t, 1.0)).try_normalize()?;
+                        Some((t, nrm))
+                    })
+                    .collect()
+            })
+            .collect();
+        x = build(Some(&ss), Some(nc), Some(&seams));
+    }
+    let mut sw = Sewer::new(BodyKind::Sheet, tolerance(std::slice::from_ref(boundary)));
+    for s in surfaces(&x) {
+        sw.patch(s);
+    }
+    Some(sw.body)
+}
+
+/// A cubic with `m` control points on uniform knots over [0, 1] fitted to
+/// `c` by least squares, parameterized by arc length, its ends kept.
+fn fit_uniform(c: &NurbsCurve, m: usize) -> Option<NurbsCurve> {
+    use ductile_geom::nurbs::basis::{basis_funs, find_span, uniform_clamped_knots};
+    let (a, b) = c.domain();
+    // Arc length along the curve, finely sampled.
+    let fine = 400;
+    let pts: Vec<DVec3> = (0..=fine).map(|i| c.point(a + (b - a) * i as f64 / fine as f64)).collect();
+    let mut acc = vec![0.0];
+    for w in pts.windows(2) {
+        acc.push(acc.last().unwrap() + w[0].distance(w[1]));
+    }
+    let total = *acc.last().unwrap();
+    if total < 1e-12 {
+        return None;
+    }
+    let at_length = |s: f64| {
+        let i = acc.partition_point(|x| *x < s).clamp(1, fine);
+        let f = (s - acc[i - 1]) / (acc[i] - acc[i - 1]).max(1e-300);
+        c.point(a + (b - a) * (i as f64 - 1.0 + f) / fine as f64)
+    };
+    let knots = uniform_clamped_knots(m, 3);
+    let samples = 8 * m;
+    let mut ata = vec![vec![0.0; m]; m];
+    let mut atb = vec![DVec3::ZERO; m];
+    for k in 0..=samples {
+        let t = k as f64 / samples as f64;
+        let p = at_length(t * total);
+        let span = find_span(m - 1, 3, t, &knots);
+        let bs = basis_funs(span, t, 3, &knots);
+        for (i, bi) in bs.iter().enumerate() {
+            atb[span - 3 + i] += p * *bi;
+            for (j, bj) in bs.iter().enumerate() {
+                ata[span - 3 + i][span - 3 + j] += bi * bj;
+            }
+        }
+    }
+    // Pin the ends.
+    for (i, p) in [(0, pts[0]), (m - 1, pts[fine])] {
+        ata[i] = vec![0.0; m];
+        ata[i][i] = 1.0;
+        atb[i] = p;
+    }
+    let ctrl = ductile_geom::nurbs::curve::solve_dense(ata, atb);
+    Some(NurbsCurve::from_points(3, knots, &ctrl))
 }
 
 /// The NURBS surface of face `f` when the face is the whole surface,
@@ -1191,6 +1521,78 @@ mod tests {
         assert!(ang_c > 1.0, "{ang_c}");
         assert!(ang_g < 0.05, "{ang_g}");
         assert!(dev_g < 1.5e-3 && dev_g < dev_c / 5.0, "{dev_g} vs {dev_c}");
+    }
+
+    /// Fills the spherical polygon through `pts` (great-circle sides, on
+    /// the unit sphere) tangent to the sphere; returns the worst distance
+    /// off the sphere, the worst angle (degrees) to the sphere along the
+    /// boundary, and the worst angle between neighbouring pieces' normals
+    /// across the inner seams.
+    fn sphere_fill(pts: &[DVec3]) -> (usize, f64, f64, f64) {
+        let n = pts.len();
+        let segs: Vec<Segment> = (0..n)
+            .map(|k| {
+                let (a, b) = (pts[k].normalize(), pts[(k + 1) % n].normalize());
+                let frame = Frame::new(DVec3::ZERO, a.cross(b).normalize(), a);
+                Segment::new(Curve3::Circle { frame, radius: 1.0 }, 0.0, a.angle_between(b))
+            })
+            .collect();
+        let lp = chain(segs);
+        let c = pts.iter().map(|p| p.normalize()).sum::<DVec3>().normalize();
+        let sphere = Surface::Sphere { frame: Frame::WORLD, radius: 1.0 };
+        let nb: Vec<Neighbour> = lp
+            .segments
+            .iter()
+            .map(|sg| {
+                let m = sg.curve.point(0.5 * (sg.t0 + sg.t1));
+                Some((sphere.clone(), (m + (m - c) * 0.3).normalize()))
+            })
+            .collect();
+        let b = patch_g1(&lp, &nb).unwrap();
+        let surfs: Vec<&NurbsSurface> = b.faces.iter().map(|f| match &f.surface { Surface::Nurbs(s) => s, _ => panic!() }).collect();
+        let normal = |s: &NurbsSurface, u: f64, v: f64| {
+            let d = s.derivs(u, v, 1);
+            d[1][0].cross(d[0][1]).normalize()
+        };
+        let (mut dev, mut edge, mut seam): (f64, f64, f64) = (0.0, 0.0, 0.0);
+        for s in &surfs {
+            for i in 0..=20 {
+                for j in 0..=20 {
+                    let (u, v) = (i as f64 / 20.0, j as f64 / 20.0);
+                    let p = s.point(u, v);
+                    dev = dev.max((p.length() - 1.0).abs());
+                    if i == 0 || j == 0 {
+                        edge = edge.max(normal(s, u, v).dot(p.normalize()).abs().min(1.0).acos());
+                    }
+                }
+            }
+        }
+        for k in 0..surfs.len() {
+            let (a, b) = (surfs[k], surfs[(k + 1) % surfs.len()]);
+            for i in 0..20 {
+                let t = i as f64 / 20.0;
+                assert!(a.point(1.0, t).distance(b.point(t, 1.0)) < 1e-9);
+                seam = seam.max(normal(a, 1.0, t).dot(normal(b, t, 1.0)).min(1.0).acos());
+            }
+        }
+        (surfs.len(), dev, edge.to_degrees(), seam.to_degrees())
+    }
+
+    #[test]
+    fn fills_three_and_five_sided_holes_tangentially() {
+        // An octant of the sphere: three quarter circles.
+        let (pieces, dev, edge, seam) = sphere_fill(&[DVec3::X, DVec3::Y, DVec3::Z]);
+        assert_eq!(pieces, 3);
+        assert!(dev < 0.008, "octant off the sphere by {dev}");
+        assert!(edge < 0.01, "octant meets the sphere at {edge} degrees");
+        assert!(seam < 0.3, "octant seams kink by {seam} degrees");
+        // A pentagon round the pole.
+        let pts: Vec<DVec3> = (0..5).map(|k| { let a = k as f64 * TAU / 5.0; DVec3::new(a.cos(), a.sin(), 0.8) }).collect();
+        let (pieces, dev, edge, seam) = sphere_fill(&pts);
+        assert_eq!(pieces, 5);
+        assert!(dev < 0.005, "pentagon off the sphere by {dev}");
+        assert!(edge < 0.01, "pentagon meets the sphere at {edge} degrees");
+        assert!(seam < 0.1, "pentagon seams kink by {seam} degrees");
     }
 
     #[test]
