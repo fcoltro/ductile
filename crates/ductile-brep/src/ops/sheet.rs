@@ -5,7 +5,7 @@
 use crate::ops::{extrude::side_surface, loft::directed_nurbs, revolve::{radial, surface_of}};
 use crate::profile::{loops_plane, Loop3, Segment};
 use crate::topo::{Body, BodyKind, Coedge, VertexId};
-use ductile_geom::{Curve3, DMat4, DQuat, DVec3, Frame, NurbsCurve, NurbsSurface, Surface};
+use ductile_geom::{Curve3, DMat4, DQuat, DVec2, DVec3, DVec4, Frame, NurbsCurve, NurbsSurface, Surface};
 
 /// Builds a body face by face from boundary curves, sharing vertices and
 /// edges that coincide geometrically, so neighbouring faces are sewn.
@@ -236,11 +236,161 @@ pub fn patch(boundary: &Loop3, holes: &[Loop3]) -> Option<Body> {
         sw.face(Surface::Plane { frame }, false, &boundary.segments, &hole_segs);
         return Some(sw.body);
     }
+    // Not four-sided (or with holes): one smooth surface, trimmed by them.
+    if (!holes.is_empty() || corner_count(boundary) > 4) && fitted_patch(&mut sw, boundary, holes) {
+        return Some(sw.body);
+    }
     let sides = four_sides(boundary)?;
     let [bottom, right, top, left] = sides;
     // Coons wants the top and left running in +u and +v.
     sw.patch(NurbsSurface::coons(&bottom, &right, &top.reversed(), &left.reversed()));
     Some(sw.body)
+}
+
+/// How many sharp corners the closed chain has.
+fn corner_count(boundary: &Loop3) -> usize {
+    let segs: Vec<NurbsCurve> = boundary.segments.iter().map(directed_nurbs).collect();
+    let n = segs.len();
+    (0..n)
+        .filter(|&i| {
+            let a = segs[(i + n - 1) % n].tangent(segs[(i + n - 1) % n].domain().1).normalize_or_zero();
+            let b = segs[i].tangent(segs[i].domain().0).normalize_or_zero();
+            n > 1 && a.angle_between(b) > 0.1
+        })
+        .count()
+}
+
+/// A smooth surface spanning the boundary, trimmed by it and the holes:
+/// a height field over the boundary's mean plane, a thin plate fitted to
+/// the boundary's heights. False when the boundary folds over as seen
+/// along its normal, or the fit cannot follow it closely enough.
+/// True when no two non-adjacent edges of the closed polygon cross.
+fn is_simple(poly: &[DVec2]) -> bool {
+    let n = poly.len();
+    for i in 0..n {
+        for j in i + 2..n {
+            if i == 0 && j == n - 1 {
+                continue;
+            }
+            let (a, b, c, d) = (poly[i], poly[(i + 1) % n], poly[j], poly[(j + 1) % n]);
+            if ductile_geom::poly2::segment_intersection(a, b, c, d).is_some() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn fitted_patch(sw: &mut Sewer, boundary: &Loop3, holes: &[Loop3]) -> bool {
+    use ductile_geom::nurbs::basis::{basis_funs, find_span, uniform_clamped_knots};
+    let n = boundary.normal();
+    if n.length() < 1e-12 {
+        return false;
+    }
+    let n = n.normalize();
+    let size = ductile_geom::BBox3::from_points(boundary.polygon(1e-2)).diagonal().max(1e-9);
+    // Sample densely: a straight side's polygon is only its two ends.
+    let step = size / 60.0;
+    let pts: Vec<DVec3> = std::iter::once(boundary)
+        .chain(holes)
+        .flat_map(|l| {
+            let poly = l.polygon(size * 2e-4);
+            let n = poly.len();
+            (0..n)
+                .flat_map(|i| {
+                    let (a, b) = (poly[i], poly[(i + 1) % n]);
+                    let k = ((a.distance(b) / step).ceil() as usize).max(1);
+                    (0..k).map(move |j| a.lerp(b, j as f64 / k as f64))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let c = pts.iter().copied().sum::<DVec3>() / pts.len() as f64;
+    let frame = Frame::new(c, n, ductile_geom::any_perpendicular(n));
+    let local: Vec<DVec3> = pts.iter().map(|p| frame.to_local(*p)).collect();
+    // The boundary must not fold over in the plane.
+    let outline: Vec<DVec2> = boundary.polygon(size * 2e-4).iter().map(|p| frame.to_local(*p).truncate()).collect();
+    if !is_simple(&outline) {
+        return false;
+    }
+    let (lo, hi) = local.iter().fold((DVec2::splat(f64::MAX), DVec2::splat(f64::MIN)), |(a, b), p| (a.min(p.truncate()), b.max(p.truncate())));
+    let pad = (hi - lo) * 0.03 + DVec2::splat(1e-9);
+    let (lo, hi) = (lo - pad, hi + pad);
+    const M: usize = 14;
+    const P: usize = 3;
+    let knots = uniform_clamped_knots(M, P);
+    let basis = |t: f64| -> (usize, Vec<f64>) {
+        let span = find_span(M - 1, P, t, &knots);
+        (span - P, basis_funs(span, t, P, &knots))
+    };
+    let norm = |p: DVec2| (p - lo) / (hi - lo);
+    // Normal equations: data rows plus a small bending energy.
+    let k = M * M;
+    let mut a = vec![vec![0.0; k]; k];
+    let mut rhs = vec![0.0; k];
+    for p in &local {
+        let q = norm(p.truncate());
+        let ((iu, bu), (iv, bv)) = (basis(q.x), basis(q.y));
+        let mut idx = Vec::with_capacity((P + 1) * (P + 1));
+        for (a1, wu) in bu.iter().enumerate() {
+            for (b1, wv) in bv.iter().enumerate() {
+                idx.push(((iu + a1) * M + iv + b1, wu * wv));
+            }
+        }
+        for &(i, wi) in &idx {
+            rhs[i] += wi * p.z;
+            for &(j, wj) in &idx {
+                a[i][j] += wi * wj;
+            }
+        }
+    }
+    let lambda = 1e-5 * local.len() as f64;
+    let mut add = |terms: &[(usize, f64)]| {
+        for &(i, wi) in terms {
+            for &(j, wj) in terms {
+                a[i][j] += lambda * wi * wj;
+            }
+        }
+    };
+    for i in 0..M {
+        for j in 0..M {
+            let at = |x: usize, y: usize| x * M + y;
+            if i + 2 < M {
+                add(&[(at(i, j), 1.0), (at(i + 1, j), -2.0), (at(i + 2, j), 1.0)]);
+            }
+            if j + 2 < M {
+                add(&[(at(i, j), 1.0), (at(i, j + 1), -2.0), (at(i, j + 2), 1.0)]);
+            }
+            if i + 1 < M && j + 1 < M {
+                let s = std::f64::consts::SQRT_2;
+                add(&[(at(i, j), s), (at(i + 1, j), -s), (at(i, j + 1), -s), (at(i + 1, j + 1), s)]);
+            }
+        }
+    }
+    let h = ductile_geom::nurbs::curve::solve_dense(a, rhs);
+    if h.iter().any(|x| !x.is_finite()) {
+        return false;
+    }
+    // Control points over the Greville abscissae keep x and y exact.
+    let grev: Vec<f64> = (0..M).map(|i| knots[i + 1..=i + P].iter().sum::<f64>() / P as f64).collect();
+    let ctrl: Vec<DVec4> = (0..M * M)
+        .map(|ij| {
+            let (i, j) = (ij / M, ij % M);
+            let uv = lo + (hi - lo) * DVec2::new(grev[i], grev[j]);
+            frame.to_world(DVec3::new(uv.x, uv.y, h[ij])).extend(1.0)
+        })
+        .collect();
+    let surf = NurbsSurface::new(P, P, knots.clone(), knots.clone(), M, M, ctrl);
+    let worst = pts.iter().map(|p| {
+        let q = norm(frame.to_local(*p).truncate());
+        surf.point(q.x, q.y).distance(*p)
+    }).fold(0.0, f64::max);
+    if worst > 1e-3 * size {
+        return false;
+    }
+    let hole_segs: Vec<Vec<Segment>> = holes.iter().map(|h| if h.normal().dot(n) > 0.0 { h.reversed() } else { h.clone() }.segments).collect();
+    sw.face(Surface::Nurbs(surf), false, &boundary.segments, &hole_segs);
+    true
 }
 
 /// Splits a closed chain into four curves running around it, at its four
@@ -780,6 +930,45 @@ mod tests {
         let b = patch(&tri, &[]).unwrap();
         assert_eq!(b.edges.len(), 4);
         assert!(area(&b) > 0.0);
+    }
+
+    #[test]
+    fn n_sided_patches() {
+        // A gently warped pentagon: one smooth trimmed surface.
+        let h = |x: f64, y: f64| 0.2 * x * y - 0.1 * x * x;
+        let q: Vec<DVec3> = (0..5)
+            .map(|i| {
+                let a = i as f64 * 2.0 * PI / 5.0;
+                let (x, y) = (2.0 * a.cos(), 2.0 * a.sin());
+                DVec3::new(x, y, h(x, y))
+            })
+            .collect();
+        let pent = chain((0..5).map(|i| Segment::line(q[i], q[(i + 1) % 5])).collect());
+        let b = patch(&pent, &[]).unwrap();
+        assert_eq!(b.faces.len(), 1);
+        assert_eq!(b.edges.len(), 5);
+        assert!(matches!(b.faces[0].surface, Surface::Nurbs(_)));
+        // Planar area of a radius-2 pentagon is 9.511; the warp adds a little.
+        let a = area(&b);
+        assert!(a > 9.5 && a < 10.5, "{a}");
+        // The surface passes through the corners.
+        let Surface::Nurbs(s) = &b.faces[0].surface else { panic!() };
+        let mesh = tessellate(&b, &TessOptions { chord_tol: 1e-3, angle_tol: 0.1 });
+        for c in &q {
+            let d = mesh.faces[0].positions.iter().map(|p| (*p - *c).length()).fold(f64::MAX, f64::min);
+            assert!(d < 1e-3, "{c}: {d}");
+        }
+        assert!(s.ctrl.len() > 16);
+        // A warped square with a round hole.
+        let p: Vec<DVec3> = [(-2.0, -2.0), (2.0, -2.0), (2.0, 2.0), (-2.0, 2.0)].iter().map(|&(x, y)| DVec3::new(x, y, h(x, y))).collect();
+        let sq = chain((0..4).map(|i| Segment::line(p[i], p[(i + 1) % 4])).collect());
+        let hole = chain(vec![Segment::new(Curve3::Circle { frame: Frame::new(DVec3::new(0.0, 0.0, 0.0), DVec3::Z, DVec3::X), radius: 0.5 }, 0.0, 2.0 * PI)]);
+        let b = patch(&sq, &[hole]).unwrap();
+        assert_eq!(b.faces.len(), 1);
+        assert_eq!(b.faces[0].loops.len(), 2);
+        let a = area(&b);
+        // The warped square is 17.20, less the hole (0.79).
+        assert!((a - 16.41).abs() < 0.1, "{a}");
     }
 
     fn volume(b: &Body) -> f64 {
