@@ -4410,6 +4410,75 @@ impl Tool for OffsetEdgeTool {
     }
 }
 
+// --------------------------------------------------- Constrained surface ----
+
+/// A smooth sheet through clicked points: click three or more, Backspace
+/// drops the last, Enter makes the sheet.
+pub struct ConstrainedSurfaceTool {
+    points: Vec<DVec3>,
+    cursor: Option<DVec3>,
+    /// Bending weight: higher is smoother and looser.
+    pub smooth: f64,
+}
+
+impl ConstrainedSurfaceTool {
+    pub fn new() -> Self {
+        Self { points: Vec::new(), cursor: None, smooth: 1e-5 }
+    }
+
+    fn surface(&self) -> Option<Body> {
+        ductile_brep::ops::sheet::constrained_surface(&self.points, self.smooth)
+    }
+}
+
+impl Tool for ConstrainedSurfaceTool {
+    fn name(&self) -> &'static str {
+        "Constrained surface"
+    }
+    fn hint(&self) -> String {
+        format!("Constrained surface: click points it passes through ({} so far), Backspace drops the last, Enter to finish", self.points.len())
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        self.cursor = p.point.or(p.plane_point);
+        if p.clicked {
+            if let Some(q) = self.cursor {
+                self.points.push(q);
+            }
+        }
+        ToolOutcome::Continue
+    }
+    fn command_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
+        if key == egui::Key::Backspace && !m.any() {
+            return self.points.pop().is_some();
+        }
+        false
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        self.surface()
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        for p in &self.points {
+            out.push(LineInstance::point(*p, [1.0, 0.85, 0.2, 1.0], 8.0));
+        }
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut k = -self.smooth.log10();
+        let changed = ui.add(egui::Slider::new(&mut k, 2.0..=8.0).text("Tightness")).changed();
+        if changed {
+            self.smooth = 10f64.powf(-k);
+        }
+        ui.label(format!("{} points", self.points.len()));
+        changed
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let Some(b) = self.surface() else { return false };
+        let id = doc.add_body("Surface", b);
+        doc.selection.clear();
+        doc.selection.insert(Pick::Object(id));
+        true
+    }
+}
+
 // ---------------------------------------------------------------- Array ----
 
 /// Copies of the selected objects in a row (along a construction plane axis,
@@ -4868,6 +4937,20 @@ mod tests {
         t.typed_value(Some(0.4));
         assert!(t.commit(&mut doc));
         assert_eq!(doc.object(id).unwrap().body.faces.len(), 8);
+    }
+
+    #[test]
+    fn constrained_surface_from_clicks() {
+        let mut doc = Document::default();
+        let mut t = ConstrainedSurfaceTool::new();
+        for (x, y, z) in [(0.0, 0.0, 0.0), (2.0, 0.0, 0.5), (2.0, 2.0, 0.0), (0.0, 2.0, 0.5), (1.0, 1.0, 0.8)] {
+            click(&mut t, &doc, DVec3::new(x, y, z), true);
+        }
+        assert!(t.command_key(egui::Key::Backspace, egui::Modifiers::NONE));
+        click(&mut t, &doc, DVec3::new(1.0, 1.0, 0.6), true);
+        assert!(t.commit(&mut doc));
+        assert_eq!(doc.objects.len(), 1);
+        assert_eq!(doc.objects[0].body.kind, ductile_brep::BodyKind::Sheet);
     }
 
     #[test]

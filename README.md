@@ -106,7 +106,8 @@ code from them.
   flat (inner curves become holes) or a Coons patch through any four-sided
   (or split into four) boundary. Curved boundaries with five or more
   sides, or with inner curves, get one smooth fitted surface trimmed by
-  them. Patch on a loop of selected edges meets
+  them. Constrained surface makes a smooth sheet through points you
+  click. Patch on a loop of selected edges meets
   the faces beyond them tangentially (G1), faired for even curvature: a
   tube's rim gets a smooth dome. In vertex mode (1) the control nets of
   untrimmed spline surfaces show and their points move with G, rotate and

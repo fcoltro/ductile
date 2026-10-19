@@ -5,7 +5,7 @@
 use crate::ops::{extrude::side_surface, loft::directed_nurbs, revolve::{radial, surface_of}};
 use crate::profile::{loops_plane, Loop3, Segment};
 use crate::topo::{Body, BodyKind, Coedge, VertexId};
-use ductile_geom::{Curve3, DMat4, DQuat, DVec2, DVec3, DVec4, Frame, NurbsCurve, NurbsSurface, Surface};
+use ductile_geom::{Curve3, DMat3, DMat4, DQuat, DVec2, DVec3, DVec4, Frame, NurbsCurve, NurbsSurface, Surface};
 
 /// Builds a body face by face from boundary curves, sharing vertices and
 /// edges that coincide geometrically, so neighbouring faces are sewn.
@@ -282,7 +282,6 @@ fn is_simple(poly: &[DVec2]) -> bool {
 }
 
 fn fitted_patch(sw: &mut Sewer, boundary: &Loop3, holes: &[Loop3]) -> bool {
-    use ductile_geom::nurbs::basis::{basis_funs, find_span, uniform_clamped_knots};
     let n = boundary.normal();
     if n.length() < 1e-12 {
         return false;
@@ -307,25 +306,40 @@ fn fitted_patch(sw: &mut Sewer, boundary: &Loop3, holes: &[Loop3]) -> bool {
         .collect();
     let c = pts.iter().copied().sum::<DVec3>() / pts.len() as f64;
     let frame = Frame::new(c, n, ductile_geom::any_perpendicular(n));
-    let local: Vec<DVec3> = pts.iter().map(|p| frame.to_local(*p)).collect();
     // The boundary must not fold over in the plane.
     let outline: Vec<DVec2> = boundary.polygon(size * 2e-4).iter().map(|p| frame.to_local(*p).truncate()).collect();
     if !is_simple(&outline) {
         return false;
     }
+    let Some(surf) = fit_height_surface(&pts, &frame, 14, 1e-5, 0.03) else { return false };
+    let worst = pts.iter().map(|p| { let uv = ductile_geom::surface::project_nurbs(&surf, *p, None); surf.point(uv.x, uv.y) }.distance(*p)).fold(0.0, f64::max);
+    if worst > 1e-3 * size {
+        return false;
+    }
+    let hole_segs: Vec<Vec<Segment>> = holes.iter().map(|h| if h.normal().dot(n) > 0.0 { h.reversed() } else { h.clone() }.segments).collect();
+    sw.face(Surface::Nurbs(surf), false, &boundary.segments, &hole_segs);
+    true
+}
+
+/// A smooth height field over `frame`'s xy plane through (close to) the
+/// points: an `m`×`m` cubic B-spline surface fitted by least squares with a
+/// thin-plate bending energy weighted `bend` per point, spanning the
+/// points' extent padded by `pad` of it on every side.
+pub fn fit_height_surface(pts: &[DVec3], frame: &Frame, m: usize, bend: f64, pad: f64) -> Option<NurbsSurface> {
+    use ductile_geom::nurbs::basis::{basis_funs, find_span, uniform_clamped_knots};
+    let local: Vec<DVec3> = pts.iter().map(|p| frame.to_local(*p)).collect();
     let (lo, hi) = local.iter().fold((DVec2::splat(f64::MAX), DVec2::splat(f64::MIN)), |(a, b), p| (a.min(p.truncate()), b.max(p.truncate())));
-    let pad = (hi - lo) * 0.03 + DVec2::splat(1e-9);
+    let pad = (hi - lo) * pad + DVec2::splat(1e-9);
     let (lo, hi) = (lo - pad, hi + pad);
-    const M: usize = 14;
     const P: usize = 3;
-    let knots = uniform_clamped_knots(M, P);
+    let knots = uniform_clamped_knots(m, P);
     let basis = |t: f64| -> (usize, Vec<f64>) {
-        let span = find_span(M - 1, P, t, &knots);
+        let span = find_span(m - 1, P, t, &knots);
         (span - P, basis_funs(span, t, P, &knots))
     };
     let norm = |p: DVec2| (p - lo) / (hi - lo);
     // Normal equations: data rows plus a small bending energy.
-    let k = M * M;
+    let k = m * m;
     let mut a = vec![vec![0.0; k]; k];
     let mut rhs = vec![0.0; k];
     for p in &local {
@@ -334,7 +348,7 @@ fn fitted_patch(sw: &mut Sewer, boundary: &Loop3, holes: &[Loop3]) -> bool {
         let mut idx = Vec::with_capacity((P + 1) * (P + 1));
         for (a1, wu) in bu.iter().enumerate() {
             for (b1, wv) in bv.iter().enumerate() {
-                idx.push(((iu + a1) * M + iv + b1, wu * wv));
+                idx.push(((iu + a1) * m + iv + b1, wu * wv));
             }
         }
         for &(i, wi) in &idx {
@@ -344,7 +358,7 @@ fn fitted_patch(sw: &mut Sewer, boundary: &Loop3, holes: &[Loop3]) -> bool {
             }
         }
     }
-    let lambda = 1e-5 * local.len() as f64;
+    let lambda = bend * local.len() as f64;
     let mut add = |terms: &[(usize, f64)]| {
         for &(i, wi) in terms {
             for &(j, wj) in terms {
@@ -352,16 +366,16 @@ fn fitted_patch(sw: &mut Sewer, boundary: &Loop3, holes: &[Loop3]) -> bool {
             }
         }
     };
-    for i in 0..M {
-        for j in 0..M {
-            let at = |x: usize, y: usize| x * M + y;
-            if i + 2 < M {
+    for i in 0..m {
+        for j in 0..m {
+            let at = |x: usize, y: usize| x * m + y;
+            if i + 2 < m {
                 add(&[(at(i, j), 1.0), (at(i + 1, j), -2.0), (at(i + 2, j), 1.0)]);
             }
-            if j + 2 < M {
+            if j + 2 < m {
                 add(&[(at(i, j), 1.0), (at(i, j + 1), -2.0), (at(i, j + 2), 1.0)]);
             }
-            if i + 1 < M && j + 1 < M {
+            if i + 1 < m && j + 1 < m {
                 let s = std::f64::consts::SQRT_2;
                 add(&[(at(i, j), s), (at(i + 1, j), -s), (at(i, j + 1), -s), (at(i + 1, j + 1), s)]);
             }
@@ -369,28 +383,51 @@ fn fitted_patch(sw: &mut Sewer, boundary: &Loop3, holes: &[Loop3]) -> bool {
     }
     let h = ductile_geom::nurbs::curve::solve_dense(a, rhs);
     if h.iter().any(|x| !x.is_finite()) {
-        return false;
+        return None;
     }
     // Control points over the Greville abscissae keep x and y exact.
-    let grev: Vec<f64> = (0..M).map(|i| knots[i + 1..=i + P].iter().sum::<f64>() / P as f64).collect();
-    let ctrl: Vec<DVec4> = (0..M * M)
+    let grev: Vec<f64> = (0..m).map(|i| knots[i + 1..=i + P].iter().sum::<f64>() / P as f64).collect();
+    let ctrl: Vec<DVec4> = (0..m * m)
         .map(|ij| {
-            let (i, j) = (ij / M, ij % M);
+            let (i, j) = (ij / m, ij % m);
             let uv = lo + (hi - lo) * DVec2::new(grev[i], grev[j]);
             frame.to_world(DVec3::new(uv.x, uv.y, h[ij])).extend(1.0)
         })
         .collect();
-    let surf = NurbsSurface::new(P, P, knots.clone(), knots.clone(), M, M, ctrl);
-    let worst = pts.iter().map(|p| {
-        let q = norm(frame.to_local(*p).truncate());
-        surf.point(q.x, q.y).distance(*p)
-    }).fold(0.0, f64::max);
-    if worst > 1e-3 * size {
-        return false;
+    let surf = NurbsSurface::new(P, P, knots.clone(), knots.clone(), m, m, ctrl);
+    Some(surf)
+}
+
+/// Constrained surface: a smooth untrimmed sheet passing (as closely as
+/// `smooth` allows) through the points, spread over their best-fit plane
+/// with a margin round them.
+pub fn constrained_surface(pts: &[DVec3], smooth: f64) -> Option<Body> {
+    if pts.len() < 3 {
+        return None;
     }
-    let hole_segs: Vec<Vec<Segment>> = holes.iter().map(|h| if h.normal().dot(n) > 0.0 { h.reversed() } else { h.clone() }.segments).collect();
-    sw.face(Surface::Nurbs(surf), false, &boundary.segments, &hole_segs);
-    true
+    let c = pts.iter().copied().sum::<DVec3>() / pts.len() as f64;
+    let mut cov = DMat3::ZERO;
+    for p in pts {
+        let d = *p - c;
+        cov += DMat3::from_cols(d * d.x, d * d.y, d * d.z);
+    }
+    // The normal is the direction of least spread: inverse iteration.
+    let scale = cov.col(0).length() + cov.col(1).length() + cov.col(2).length();
+    if scale < 1e-24 {
+        return None;
+    }
+    let inv = (cov + DMat3::IDENTITY * (1e-9 * scale)).inverse();
+    let mut n = DVec3::new(0.31, 0.47, 0.83);
+    for _ in 0..50 {
+        n = (inv * n).normalize();
+    }
+    let frame = Frame::new(c, n, ductile_geom::any_perpendicular(n));
+    let m = ((pts.len() as f64).sqrt().ceil() as usize + 3).clamp(4, 12);
+    let surf = fit_height_surface(pts, &frame, m, smooth.max(1e-9), 0.15)?;
+    let size = ductile_geom::BBox3::from_points(pts.iter().copied()).diagonal().max(1e-9);
+    let mut sw = Sewer::new(BodyKind::Sheet, 1e-7 * size);
+    sw.patch(surf);
+    Some(sw.body)
 }
 
 /// Splits a closed chain into four curves running around it, at its four
@@ -969,6 +1006,22 @@ mod tests {
         let a = area(&b);
         // The warped square is 17.20, less the hole (0.79).
         assert!((a - 16.41).abs() < 0.1, "{a}");
+    }
+
+    #[test]
+    fn constrained_surface_passes_near_its_points() {
+        let pts: Vec<DVec3> = (0..9).map(|i| {
+            let (x, y) = ((i % 3) as f64, (i / 3) as f64);
+            DVec3::new(x, y, 0.2 * (x - 1.0) * (y - 1.0) + if i == 4 { 0.3 } else { 0.0 })
+        }).collect();
+        let b = constrained_surface(&pts, 1e-6).unwrap();
+        assert_eq!(b.faces.len(), 1);
+        let Surface::Nurbs(s) = &b.faces[0].surface else { panic!() };
+        for p in &pts {
+            let uv = ductile_geom::surface::project_nurbs(s, *p, None);
+            assert!(s.point(uv.x, uv.y).distance(*p) < 1e-3, "{p}");
+        }
+        assert!(constrained_surface(&pts[..2], 1e-6).is_none());
     }
 
     fn volume(b: &Body) -> f64 {
