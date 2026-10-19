@@ -30,6 +30,7 @@ pub enum Command {
     Duplicate,
     Instance,
     DeleteRedundant,
+    RemoveFillets,
     SelectPrevious,
     UnwrapFace,
     MakeUnique,
@@ -172,6 +173,7 @@ impl Command {
         Command::Duplicate,
         Command::Instance,
         Command::DeleteRedundant,
+        Command::RemoveFillets,
         Command::SelectPrevious,
         Command::UnwrapFace,
         Command::MakeUnique,
@@ -315,6 +317,7 @@ impl Command {
             Duplicate => "Duplicate",
             Instance => "Instance (linked copy)",
             DeleteRedundant => "Delete redundant topology",
+            RemoveFillets => "Remove fillets from solid",
             SelectPrevious => "Select previous (inputs of the last operation)",
             UnwrapFace => "Unwrap face (lay flat)",
             MakeUnique => "Make instance unique",
@@ -664,6 +667,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             let n = app.doc.select_previous();
             app.status = if n == 0 { "Nothing earlier to select".into() } else { format!("Selected {n} previous item(s)") };
         }
+        RemoveFillets => match crate::tools::RemoveFilletsTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Remove fillets: select solids".into(),
+        },
         DeleteRedundant => {
             let ids: Vec<crate::document::ObjectId> = app.doc.selected_objects().into_iter().filter(|id| app.doc.object(*id).is_some_and(|o| o.body.kind != ductile_brep::BodyKind::Wire && o.body.mesh.is_none())).collect();
             if ids.is_empty() {

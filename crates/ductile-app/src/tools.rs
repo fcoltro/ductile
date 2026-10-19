@@ -4213,6 +4213,107 @@ impl Tool for SlideCvTool {
     }
 }
 
+// ------------------------------------------------------- Remove fillets ----
+
+/// Finds the fillets of the selected solids up to a radius and grows the
+/// faces around them back to sharp edges.
+pub struct RemoveFilletsTool {
+    targets: Vec<(ObjectId, std::sync::Arc<Body>)>,
+    pub max_radius: f64,
+    /// None: any; Some(true): rounds only; Some(false): inside fillets only.
+    pub convex: Option<bool>,
+    result: Vec<(ObjectId, Body, usize)>,
+}
+
+impl RemoveFilletsTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let targets: Vec<_> = doc.selected_solids().into_iter().filter_map(|id| doc.object(id).map(|o| (id, o.body.clone()))).collect();
+        if targets.is_empty() {
+            return None;
+        }
+        let size = targets.iter().map(|t| t.1.bbox().diagonal()).fold(0.0, f64::max);
+        let mut t = Self { targets, max_radius: (0.05 * size).max(1e-3), convex: None, result: vec![] };
+        t.update();
+        Some(t)
+    }
+
+    fn update(&mut self) {
+        self.result = self
+            .targets
+            .iter()
+            .map(|(id, b)| {
+                let (r, n) = ductile_brep::ops::delete::remove_fillets(b, self.max_radius, self.convex);
+                (*id, r, n)
+            })
+            .collect();
+    }
+
+    fn count(&self) -> usize {
+        self.result.iter().map(|r| r.2).sum()
+    }
+}
+
+impl Tool for RemoveFilletsTool {
+    fn name(&self) -> &'static str {
+        "Remove fillets"
+    }
+    fn hint(&self) -> String {
+        format!("Remove fillets: {} found up to radius {:.3}; Enter to remove them", self.count(), self.max_radius)
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, _p: &PointerInfo) -> ToolOutcome {
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let ok: Vec<&Body> = self.result.iter().filter(|r| r.2 > 0).map(|r| &r.1).collect();
+        match ok[..] {
+            [] => None,
+            [b] => Some(b.clone()),
+            _ => {
+                // Several solids: their edges as one wire, enough to show the change.
+                let segs: Vec<_> = ok.iter().flat_map(|b| b.edges.iter().map(|e| ductile_brep::profile::Segment::new(e.curve.clone(), e.t0, e.t1))).collect();
+                Some(ductile_brep::profile::wire_from_segments(&segs))
+            }
+        }
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let before = (self.max_radius, self.convex);
+        ui.horizontal(|ui| {
+            ui.label("Max radius");
+            ui.add(egui::DragValue::new(&mut self.max_radius).speed(0.005).range(1e-6..=1e6));
+        });
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut self.convex, None, "Any");
+            ui.radio_value(&mut self.convex, Some(true), "Convex");
+            ui.radio_value(&mut self.convex, Some(false), "Concave");
+        });
+        let changed = before != (self.max_radius, self.convex);
+        if changed {
+            self.update();
+        }
+        ui.label(format!("{} fillet(s) to remove", self.count()));
+        changed
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        if let Some(v) = v.filter(|v| *v > 0.0) {
+            self.max_radius = v;
+            self.update();
+        }
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        self.result.iter().filter(|r| r.2 > 0).map(|r| r.0).collect()
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let mut any = false;
+        for (id, b, n) in std::mem::take(&mut self.result) {
+            if n > 0 {
+                doc.replace_body(id, b);
+                any = true;
+            }
+        }
+        any
+    }
+}
+
 // ---------------------------------------------------------------- Array ----
 
 /// Copies of the selected objects in a row (along a construction plane axis,

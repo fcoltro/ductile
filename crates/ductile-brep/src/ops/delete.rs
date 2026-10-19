@@ -69,6 +69,71 @@ pub fn delete_faces(b: &Body, faces: &[FaceId]) -> Body {
     }
 }
 
+/// The round blend faces of a solid up to `max_radius`: cylinder and torus
+/// tube faces meeting at least two neighbours tangentially. `convex`
+/// keeps only rounds (Some(true)) or only fillets in inside corners
+/// (Some(false)).
+pub fn find_fillets(b: &Body, max_radius: f64, convex: Option<bool>) -> Vec<FaceId> {
+    b.face_ids()
+        .filter(|&f| {
+            let face = b.face(f);
+            let r = match &face.surface {
+                Surface::Cylinder { radius, .. } => *radius,
+                Surface::Torus { minor, .. } => *minor,
+                _ => return false,
+            };
+            if r > max_radius {
+                return false;
+            }
+            // Outward normals point away from the axis (or tube) on a round.
+            if convex.is_some_and(|c| c == face.reversed) {
+                return false;
+            }
+            let mut tangent = HashSet::new();
+            for l in b.face_loops(f) {
+                for c in &l.coedges {
+                    let e = b.edge(c.edge);
+                    let Some((g, _)) = b.edge_faces(c.edge).into_iter().find(|u| u.0 != f) else { continue };
+                    let q = e.curve.point(0.5 * (e.t0 + e.t1));
+                    let n = |h: FaceId| {
+                        let uv = b.face(h).surface.project(q, None);
+                        b.face_normal(h, uv.x, uv.y)
+                    };
+                    if n(f).dot(n(g)) > 1.0 - 1e-4 {
+                        tangent.insert(g);
+                    }
+                }
+            }
+            tangent.len() >= 2
+        })
+        .collect()
+}
+
+/// Removes the fillets [`find_fillets`] finds, growing the faces around
+/// back to sharp edges; those that cannot be removed while keeping the
+/// solid closed stay. Returns the body and how many went.
+pub fn remove_fillets(b: &Body, max_radius: f64, convex: Option<bool>) -> (Body, usize) {
+    let mut body = b.clone();
+    let mut removed = 0;
+    // Faces are renumbered by each removal, so look again after each one.
+    let mut skip: Vec<DVec3> = Vec::new();
+    loop {
+        let key = |bd: &Body, f: FaceId| {
+            let mids: Vec<DVec3> = bd.face_loops(f).flat_map(|l| l.coedges.iter().map(|c| bd.edge(c.edge).mid())).collect();
+            mids.iter().copied().sum::<DVec3>() / mids.len().max(1) as f64
+        };
+        let Some(f) = find_fillets(&body, max_radius, convex).into_iter().find(|f| !skip.iter().any(|p| p.distance(key(&body, *f)) < 1e-9)) else { break };
+        let next = delete_faces(&body, &[f]);
+        if next.kind == BodyKind::Solid {
+            body = next;
+            removed += 1;
+        } else {
+            skip.push(key(&body, f));
+        }
+    }
+    (body, removed)
+}
+
 /// The faces `faces` of `b` copied out as an open sheet.
 pub fn extract_faces(b: &Body, faces: &[FaceId]) -> Body {
     let mut one = b.clone();
@@ -401,6 +466,24 @@ mod tests {
             assert_eq!(sharp.kind, BodyKind::Solid, "z {z}");
             assert!((vol(&sharp) - full).abs() < 1e-4, "z {z}: {} vs {full}", vol(&sharp));
         }
+    }
+
+    #[test]
+    fn removes_fillets_by_radius() {
+        use crate::ops::fillet::{blend_edges, Blend};
+        let bx = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let top: Vec<EdgeId> = bx.edge_ids().filter(|e| bx.edge(*e).mid().z > 1.9).collect();
+        let rounded = blend_edges(&bx, &top[..1], Blend::Fillet(0.3)).unwrap();
+        let rounded = blend_edges(&rounded, &rounded.edge_ids().filter(|e| { let m = rounded.edge(*e).mid(); m.z < 0.1 && m.x < 0.1 }).collect::<Vec<_>>(), Blend::Fillet(0.6)).unwrap();
+        assert_eq!(find_fillets(&rounded, 1.0, None).len(), 2);
+        assert_eq!(find_fillets(&rounded, 0.5, None).len(), 1);
+        assert_eq!(find_fillets(&rounded, 1.0, Some(false)).len(), 0);
+        let (sharp, n) = remove_fillets(&rounded, 0.5, None);
+        assert_eq!(n, 1);
+        assert_eq!(sharp.faces.len(), 7);
+        let (sharp, n) = remove_fillets(&rounded, 1.0, Some(true));
+        assert_eq!(n, 2);
+        assert!((vol(&sharp) - 24.0).abs() < 1e-6, "{}", vol(&sharp));
     }
 
     #[test]
