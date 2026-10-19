@@ -838,10 +838,14 @@ fn edge_key(w: &Body, e: EdgeId) -> (u32, u32) {
 
 fn find_edge(w: &Body, index: &HashMap<(u32, u32), Vec<EdgeId>>, va: VertexId, vb: VertexId, mid: DVec3, tol: f64) -> Option<EdgeId> {
     let key = (va.0.min(vb.0), va.0.max(vb.0));
+    // Where a surface grazes an edge, the traced curve between two of its
+    // vertices hugs the edge without lying on it; a sliver that thin (a
+    // couple of percent of the span) is the same edge.
+    let near = (tol * 100.0).max(0.02 * w.vertex(va).distance(w.vertex(vb)));
     index.get(&key)?.iter().copied().find(|&e| {
         let ed = w.edge(e);
         let t = ed.curve.closest_param_in(mid, ed.t0, ed.t1);
-        ed.curve.point(t).distance(mid) < tol * 100.0
+        ed.curve.point(t).distance(mid) < near
     })
 }
 
