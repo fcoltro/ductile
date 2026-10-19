@@ -181,6 +181,8 @@ code from them.
 - Measure (palette or View menu): with two things selected, the shortest
   distance between them drawn as a dimension (the angle too for two
   planes); with one, its length, radius, area or volume.
+  Measuring one edge between two faces also reports how they meet: not
+  G0 (a gap), G0 (an angle), G1 (tangent, with the curvature jump) or G2.
 - Section analysis (the Section button): cuts the scene away beyond a
   plane along the construction plane's normal, through the scene's centre;
   solids show their cut inside as a cap. Drag the offset, or Flip to keep

@@ -177,10 +177,15 @@ pub fn measure(doc: &Document) -> Option<Measurement> {
         [a] => {
             let text = match *a {
                 Pick::Edge(o, e) => {
-                    let ed = doc.object(o)?.body.edge(e);
-                    match &ed.curve {
+                    let body = &doc.object(o)?.body;
+                    let ed = body.edge(e);
+                    let size = match &ed.curve {
                         Curve3::Circle { radius, .. } => format!("Radius {} · diameter {} · length {}", fmt(*radius), fmt(2.0 * radius), fmt(ed.length())),
                         _ => format!("Length {}", fmt(ed.length())),
+                    };
+                    match continuity(body, e) {
+                        Some(c) => format!("{size} · {c}"),
+                        None => size,
                     }
                 }
                 Pick::Face(o, f) => {
@@ -246,5 +251,82 @@ mod tests {
         let rim = bc.edge_ids().find(|e| matches!(bc.edge(*e).curve, Curve3::Circle { .. })).unwrap();
         doc.selection.insert(Pick::Edge(c, rim));
         assert!(measure(&doc).unwrap().text.starts_with("Radius 1 · diameter 2"));
+    }
+}
+
+/// How smoothly the two faces of edge `e` meet: the worst position gap,
+/// angle between normals and difference in curvature across the edge,
+/// summed up as G0, G1 or G2.
+pub fn continuity(b: &Body, e: EdgeId) -> Option<String> {
+    let faces = b.edge_faces(e);
+    if faces.len() != 2 || faces[0].0 == faces[1].0 {
+        return None;
+    }
+    let ed = b.edge(e);
+    let size = b.bbox().diagonal().max(1e-9);
+    let (mut gap, mut angle, mut dk, mut kmax) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    for i in 1..20 {
+        let t = ed.t0 + (ed.t1 - ed.t0) * i as f64 / 20.0;
+        let p = ed.curve.point(t);
+        let tan = ed.curve.tangent(t).normalize_or_zero();
+        let mut side = vec![];
+        for (f, _) in &faces {
+            let s = &b.face(*f).surface;
+            let uv = s.project(p, None);
+            let d = s.derivs(uv.x, uv.y);
+            let n = b.face_normal(*f, uv.x, uv.y);
+            // Normal curvature across the edge (square to it in the face).
+            let w = n.cross(tan);
+            let (e1, f1, g1) = (d.du.dot(d.du), d.du.dot(d.dv), d.dv.dot(d.dv));
+            let det = e1 * g1 - f1 * f1;
+            let k = if det.abs() > 1e-300 {
+                let (r1, r2) = (d.du.dot(w), d.dv.dot(w));
+                let (a, c) = ((r1 * g1 - r2 * f1) / det, (e1 * r2 - f1 * r1) / det);
+                let num = d.duu.dot(n) * a * a + 2.0 * d.duv.dot(n) * a * c + d.dvv.dot(n) * c * c;
+                let den = e1 * a * a + 2.0 * f1 * a * c + g1 * c * c;
+                if den > 1e-300 { num / den } else { 0.0 }
+            } else {
+                0.0
+            };
+            side.push((d.p, n, k));
+        }
+        gap = gap.max(side[0].0.distance(side[1].0));
+        angle = angle.max(side[0].1.dot(side[1].1).clamp(-1.0, 1.0).acos());
+        dk = dk.max((side[0].2 - side[1].2).abs());
+        kmax = kmax.max(side[0].2.abs()).max(side[1].2.abs());
+    }
+    Some(if gap > 1e-5 * size {
+        format!("not G0: gap up to {}", fmt(gap))
+    } else if angle.to_degrees() > 0.1 {
+        format!("G0: faces meet at up to {}°", fmt(angle.to_degrees()))
+    } else if dk > 0.02 * kmax.max(1e-9) && dk > 1e-6 / size {
+        format!("G1 (tangent): curvature jumps by up to {}%", fmt(100.0 * dk / kmax.max(1e-12)))
+    } else {
+        "G2 (curvature continuous)".to_string()
+    })
+}
+
+#[cfg(test)]
+mod continuity_tests {
+    use super::*;
+    use ductile_brep::ops::fillet::{blend_edges, Blend};
+
+    #[test]
+    fn tells_sharp_tangent_and_curvature_continuous_edges_apart() {
+        let bx = ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::splat(4.0));
+        let sharp = bx.edge_ids().next().unwrap();
+        assert!(continuity(&bx, sharp).unwrap().starts_with("G0"));
+        let top = bx.edge_ids().find(|e| bx.edge(*e).start().z > 3.9 && bx.edge(*e).end().z > 3.9).unwrap();
+        for (blend, want) in [(Blend::Fillet(1.0), "G1"), (Blend::Smooth(1.0), "G2")] {
+            let b = blend_edges(&bx, &[top], blend).unwrap();
+            // The blend's boundaries with the flat faces.
+            let cyl = b.face_ids().find(|f| !b.face(*f).surface.is_planar()).unwrap();
+            let edges: Vec<EdgeId> = b.face_edges(cyl).into_iter().filter(|e| b.edge(*e).length() > 3.0).collect();
+            assert!(!edges.is_empty());
+            for e in edges {
+                let c = continuity(&b, e).unwrap();
+                assert!(c.starts_with(want), "{blend:?}: {c}");
+            }
+        }
     }
 }
