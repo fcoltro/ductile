@@ -278,6 +278,9 @@ code from them.
   Plasticity: End, Middle, 1/4, 3/4, Center, Intersection, Perpendicular
   and Tangent to the last point, the X / Y / Z lines through it, then
   curves, edges and faces. Snaps hidden behind a solid are ignored.
+  While sketching, the tag also names the plane drawn on ("End,XY"); a
+  rectangle shows its width and height and locks square near the
+  diagonal ("square,XY", with a magenta guide).
 
 In progress: more of Plasticity's curve and surface tools.
 
