@@ -125,6 +125,15 @@ fn main() {
                         let kind = |c: &ductile_geom::Curve3| format!("{c:?}").split([' ', '(', '{']).next().unwrap_or("").to_string();
                         let faces: Vec<String> = b.edge_faces(*e).iter().map(|(f, _)| format!("f{} {}", f.0, format!("{:?}", b.face(*f).surface).split([' ', '(', '{']).next().unwrap_or(""))).collect();
                         println!("    e{} {} {:.3} -> {:.3} faces {:?}", e.0, kind(&ed.curve), ed.start(), ed.end(), faces);
+                        if std::env::var_os("PRINT_CURVES").is_some() {
+                            if let ductile_geom::Curve3::Nurbs(n) = &ed.curve {
+                                println!("      t {:.4}..{:.4} knots {:.4?}", ed.t0, ed.t1, n.knots);
+                                for k in 0..=40 {
+                                    let t = ed.t0 + (ed.t1 - ed.t0) * k as f64 / 40.0;
+                                    println!("      {t:.4} {:.5}", ed.curve.point(t));
+                                }
+                            }
+                        }
                     }
                 }
             }

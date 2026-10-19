@@ -248,6 +248,20 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
         let (sa, sb) = (&body.face(fa).surface, &body.face(fb).surface);
         let q = ed.curve.point(t);
         let tan = (ed.curve.tangent(t) * if l.fwd { 1.0 } else { -1.0 }).normalize();
+        // A fitted edge can end in a tiny hook whose tangent points back;
+        // take the direction from a little way in instead.
+        let tan = {
+            let inner = t + (0.5 * (ed.t0 + ed.t1) - t) * 0.05;
+            let ti = (ed.curve.tangent(inner) * if l.fwd { 1.0 } else { -1.0 }).normalize();
+            if tan.dot(ti) < 0.0 {
+                // Along the chord from there to here, which keeps to the
+                // edge's run even through the hook.
+                let fwd = if (t - inner) * (ed.t1 - ed.t0) * if l.fwd { 1.0 } else { -1.0 } > 0.0 { 1.0 } else { -1.0 };
+                ((q - ed.curve.point(inner)) * fwd).try_normalize().unwrap_or(ti)
+            } else {
+                tan
+            }
+        };
         let uva = sa.project(q, hints.0);
         let uvb = sb.project(q, hints.1);
         let na = body.face_normal(fa, uva.x, uva.y);
@@ -492,13 +506,53 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
         }
         *last = Section { p1, p2, curve };
     }
+    // Lead-in sections can bunch up on one rail where the cap is met at a
+    // shallow angle; lofting through near-repeated contact points puts a
+    // hook in that rail. Drop interior sections that barely move a rail.
+    for row in rows.iter_mut() {
+        if row.len() < 5 {
+            continue;
+        }
+        let mut steps: Vec<f64> = row.windows(2).map(|w| w[0].p1.distance(w[1].p1).max(w[0].p2.distance(w[1].p2))).collect();
+        steps.sort_by(|a, b| a.total_cmp(b));
+        let typical = steps[steps.len() / 2];
+        let mut kept: Vec<Section> = vec![row[0].clone()];
+        for (n, s) in row.iter().enumerate().skip(1) {
+            let last = kept.last().unwrap();
+            let moved = s.p1.distance(last.p1).min(s.p2.distance(last.p2));
+            if n == row.len() - 1 || moved > 0.15 * typical {
+                kept.push(s.clone());
+            }
+        }
+        // The section before the last may now sit right against it.
+        if kept.len() >= 4 {
+            let n = kept.len();
+            let moved = kept[n - 1].p1.distance(kept[n - 2].p1).min(kept[n - 1].p2.distance(kept[n - 2].p2));
+            if moved < 0.15 * typical {
+                kept.remove(n - 2);
+            }
+        }
+        if kept.len() >= 2 {
+            *row = kept;
+        }
+    }
     let convex = convex.unwrap_or(true);
     let surfaces: Vec<NurbsSurface> = rows
         .iter()
         .map(|row| {
             let curves: Vec<NurbsCurve> = row.iter().map(|s| s.curve.clone()).collect();
-            let m = row.len() - 1;
-            let params: Vec<f64> = (0..=m).map(|s| s as f64 / m as f64).collect();
+            // Sections by how far the contact points move between them, so
+            // a closer last section (a lead-in to a cap) does not make the
+            // surface overshoot and fold back at its end.
+            let gaps: Vec<f64> = row.windows(2).map(|w| w[0].p1.distance(w[1].p1).max(w[0].p2.distance(w[1].p2)).max(1e-12)).collect();
+            let total: f64 = gaps.iter().sum();
+            let mut acc = 0.0;
+            let mut params = vec![0.0];
+            for g in &gaps {
+                acc += g / total;
+                params.push(acc);
+            }
+            *params.last_mut().unwrap() = 1.0;
             NurbsSurface::loft_with_params(&curves, 3, &params)
         })
         .collect();
