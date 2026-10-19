@@ -2243,9 +2243,15 @@ pub struct FilletTool {
     /// Radius varying linearly along each edge, to `end_radius` at its end.
     pub variable: bool,
     pub end_radius: f64,
+    /// Limit points: blend only between these fractions along the edge
+    /// (a single straight edge between flat faces).
+    pub limited: bool,
+    pub limits: (f64, f64),
     typed: Option<f64>,
-    bg: Background<(f64, BlendShape, bool, f64), (Option<Body>, Option<String>)>,
+    bg: Background<FilletKey, (Option<Body>, Option<String>)>,
 }
+
+type FilletKey = (f64, BlendShape, bool, f64, Option<(f64, f64)>);
 
 impl FilletTool {
     /// Starts on the selected edges of the first object that has any.
@@ -2268,24 +2274,34 @@ impl FilletTool {
             .sum();
         let dir = (-n).try_normalize().unwrap_or(DVec3::Z);
         let shape = if chamfer { BlendShape::Chamfer } else { BlendShape::Round };
-        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, shape, variable: false, end_radius: 1.0, typed: None, bg: Background::default() })
+        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, shape, variable: false, end_radius: 1.0, limited: false, limits: (0.25, 0.75), typed: None, bg: Background::default() })
     }
 
     fn value(&self) -> f64 {
         self.typed.unwrap_or(self.radius)
     }
 
-    fn key(&self) -> (f64, BlendShape, bool, f64) {
-        (self.value(), self.shape, self.variable, self.end_radius)
+    fn key(&self) -> FilletKey {
+        (self.value(), self.shape, self.variable, self.end_radius, (self.limited && self.edges.len() == 1).then_some(self.limits))
     }
 
     /// The blend computation for the current values, owning its inputs.
     fn job(&self) -> Box<dyn FnOnce() -> (Option<Body>, Option<String>) + Send> {
-        use ductile_brep::ops::fillet::{blend_edges, blend_edges_variable, Blend};
-        let (body, edges, (r, shape, variable, end_radius)) = (self.body.clone(), self.edges.clone(), self.key());
+        use ductile_brep::ops::fillet::{blend_edge_between, blend_edges, blend_edges_variable, Blend};
+        let (body, edges, (r, shape, variable, end_radius, limits)) = (self.body.clone(), self.edges.clone(), self.key());
         Box::new(move || {
             if r <= 1e-9 {
                 (None, None)
+            } else if let Some((s0, s1)) = limits {
+                let blend = match shape {
+                    BlendShape::Round => Blend::Fillet(r),
+                    BlendShape::Smooth => Blend::Smooth(r),
+                    BlendShape::Chamfer => Blend::Chamfer(r),
+                };
+                match blend_edge_between(&body, edges[0], blend, s0, s1) {
+                    Ok(b) => (Some(b), None),
+                    Err(e) => (None, Some(e.to_string())),
+                }
             } else if variable && shape != BlendShape::Chamfer {
                 match blend_edges_variable(&body, &edges, r, end_radius.max(1e-6), shape == BlendShape::Smooth) {
                     Ok(b) => (Some(b), None),
@@ -2363,7 +2379,23 @@ impl Tool for FilletTool {
                 }
             }
         }
+        if self.edges.len() == 1 {
+            ch |= ui.checkbox(&mut self.limited, "Limit points (L)").changed();
+            if self.limited {
+                ui.horizontal(|ui| {
+                    ch |= ui.add(egui::DragValue::new(&mut self.limits.0).speed(0.005).range(0.0..=1.0).prefix("From ")).changed();
+                    ch |= ui.add(egui::DragValue::new(&mut self.limits.1).speed(0.005).range(0.0..=1.0).prefix("To ")).changed();
+                });
+            }
+        }
         ch
+    }
+    fn command_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
+        if key == egui::Key::L && !m.ctrl && !m.alt && self.edges.len() == 1 {
+            self.limited = !self.limited;
+            return true;
+        }
+        false
     }
     fn hidden_objects(&self) -> Vec<ObjectId> {
         if self.bg.latest().and_then(|r| r.0).is_some() {

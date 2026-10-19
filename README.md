@@ -157,6 +157,9 @@ code from them.
   Straight edges between planes can also take a radius varying linearly
   along the edge (Variable radius in the Fillet panel): the round blend is
   then an exact cone, the smooth one its G2 counterpart.
+  Limit points (L, one straight edge between planes) blend only part of
+  the edge, between two fractions along it, ending square where the sharp
+  edge carries on.
 - Shell (Alt+S): hollow a solid into walls of a given thickness, opening
   the selected faces, or leaving an inner void when none are selected.
   Offset (O) grows or shrinks a whole solid, on selected faces

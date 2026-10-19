@@ -527,6 +527,59 @@ fn line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, blend: Blend, size: f64) -> R
     cap_line_tool(b, e, info, tool, size)
 }
 
+/// Fillet (or chamfer) along part of a straight edge between two planes:
+/// from `s0` to `s1`, fractions of the way from the edge's start to its
+/// end (limit points). The blend ends square across the edge, in a flat
+/// face where the sharp edge carries on.
+pub fn blend_edge_between(body: &Body, e: EdgeId, blend: Blend, s0: f64, s1: f64) -> Result<Body, FilletError> {
+    let info = edge_info(body, e)?;
+    if !is_line_between_planes(body, e, &info) {
+        return Err(unsupported(line!(), file!()));
+    }
+    let (a, b) = (s0.min(s1).clamp(0.0, 1.0), s0.max(s1).clamp(0.0, 1.0));
+    if b - a < 1e-6 {
+        return Err(unsupported(line!(), file!()));
+    }
+    if (a, b) == (0.0, 1.0) {
+        return blend_edges(body, &[e], blend);
+    }
+    // Fractions run along the edge's own direction; `info` runs along
+    // face 1's loop.
+    let along = body.edge(e).start().distance(info.p0) < body.edge(e).start().distance(info.p1);
+    let (a, b) = if along { (a, b) } else { (1.0 - b, 1.0 - a) };
+    let EdgeInfo { p0, p1, t, n1, n2, convex, .. } = info;
+    let len = p0.distance(p1);
+    let size = body.bbox().diagonal().max(1e-9);
+    let start = p0 + t * (len * a);
+    let (q1, q2, mid) = match blend {
+        Blend::Fillet(r) | Blend::Smooth(r) => {
+            let sgn = if convex { -1.0 } else { 1.0 };
+            let m = DMat3::from_cols(n1, n2, t).transpose();
+            let o = m.inverse() * DVec3::new(sgn * r, sgn * r, 0.0);
+            let (q1, q2) = (start + o - n1 * o.dot(n1), start + o - n2 * o.dot(n2));
+            let mid = if matches!(blend, Blend::Smooth(_)) {
+                let ctrl = super::roll::section_ctrl(blend, start + o, q1, q2);
+                Segment::new(Curve3::Nurbs(ductile_geom::NurbsCurve::new(5, [vec![0.0; 6], vec![1.0; 6]].concat(), ctrl)), 0.0, 1.0)
+            } else {
+                arc(start + o, q1, q2, t)
+            };
+            (q1, q2, mid)
+        }
+        Blend::Chamfer(d) => {
+            let (q1, q2) = (start + n1.cross(t) * d, start + t.cross(n2) * d);
+            (q1, q2, Segment::line(q1, q2))
+        }
+    };
+    if (q1 - start).length().max((q2 - start).length()) > size {
+        return Err(FilletError::TooLarge);
+    }
+    let lp = Loop3 { segments: vec![Segment::line(start, q1), mid, Segment::line(q2, start)] };
+    let region = Region { plane: Frame::new(start, t, q1 - start), outer: lp, holes: vec![] };
+    let tool = extrude_region(&region, t * (len * (b - a))).ok_or_else(|| unsupported(line!(), file!()))?;
+    let op = if convex { BoolOp::Difference } else { BoolOp::Union };
+    Ok(boolean(body, &tool, op)?)
+}
+
 /// Stops a tool along the straight edge `e` at the planar faces capping
 /// the edge's ends (where they face away along it).
 fn cap_line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, mut tool: Body, size: f64) -> Result<Body, FilletError> {
@@ -894,6 +947,20 @@ mod tests {
 
     fn vol(b: &Body) -> f64 {
         tessellate(b, &TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume()
+    }
+
+    #[test]
+    fn fillets_between_limit_points() {
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let e = b.edge_ids().find(|e| { let m = b.edge(*e).mid(); m.z > 1.9 && m.y < 0.1 }).unwrap();
+        for blend in [Blend::Fillet(0.5), Blend::Chamfer(0.5)] {
+            let f = blend_edge_between(&b, e, blend, 0.25, 0.75).unwrap();
+            assert_eq!(open_edges(&f), 0);
+            let cut = if matches!(blend, Blend::Fillet(_)) { 0.25 * (1.0 - PI / 4.0) } else { 0.125 } * 2.0;
+            assert!((vol(&f) - (24.0 - cut)).abs() < 1e-3, "{blend:?} {}", vol(&f));
+            // Two square ends where the sharp edge carries on.
+            assert_eq!(f.faces.len(), 6 + 3, "{blend:?}");
+        }
     }
 
     #[test]
