@@ -4441,6 +4441,106 @@ impl Tool for OffsetEdgeTool {
     }
 }
 
+// ------------------------------------------------- Dependent offset face ----
+
+/// Dependent offset face: the selected planar faces of a solid move up to
+/// a face clicked next (of the same or another object): straight out along
+/// their normals when it is parallel, onto its plane otherwise.
+pub struct OffsetFaceToTool {
+    target: (ObjectId, std::sync::Arc<Body>),
+    faces: Vec<FaceId>,
+    hover: Option<(ObjectId, FaceId)>,
+    result: Option<Body>,
+}
+
+impl OffsetFaceToTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let picks = doc.selected_faces();
+        let (o, _) = *picks.first()?;
+        let body = doc.object(o)?.body.clone();
+        if body.kind != ductile_brep::BodyKind::Solid {
+            return None;
+        }
+        let faces: Vec<FaceId> = picks.iter().filter(|(x, f)| *x == o && matches!(body.face(*f).surface, ductile_geom::Surface::Plane { .. })).map(|(_, f)| *f).collect();
+        if faces.is_empty() {
+            return None;
+        }
+        Some(Self { target: (o, body), faces, hover: None, result: None })
+    }
+
+    /// The body with the faces moved up to `onto`'s plane.
+    fn up_to(&self, doc: &Document, onto: (ObjectId, FaceId)) -> Option<Body> {
+        use ductile_geom::Surface;
+        if onto.0 == self.target.0 && self.faces.contains(&onto.1) {
+            return None;
+        }
+        let Surface::Plane { frame: to } = &doc.object(onto.0)?.body.face(onto.1).surface else { return None };
+        let b = &*self.target.1;
+        let mut dist = std::collections::HashMap::new();
+        let mut planes = std::collections::HashMap::new();
+        for &f in &self.faces {
+            let face = b.face(f);
+            let Surface::Plane { frame } = &face.surface else { continue };
+            let n = if face.reversed { -frame.z } else { frame.z };
+            dist.insert(f, (to.origin - frame.origin).dot(n));
+            let same = to.z.dot(frame.z) >= 0.0;
+            let fr = if same { *to } else { ductile_geom::Frame { y: -to.y, z: -to.z, ..*to } };
+            planes.insert(f, Surface::Plane { frame: fr });
+            if to.z.cross(frame.z).length() > 1e-9 {
+                dist.clear();
+            }
+        }
+        if dist.len() == self.faces.len() {
+            if let Ok(r) = ductile_brep::ops::offset::offset_body(b, &|f| dist.get(&f).copied().unwrap_or(0.0)) {
+                return Some(r);
+            }
+        }
+        ductile_brep::ops::draft::replace_planes(b, &planes)
+    }
+}
+
+impl Tool for OffsetFaceToTool {
+    fn name(&self) -> &'static str {
+        "Offset face to"
+    }
+    fn hint(&self) -> String {
+        match (self.hover, &self.result) {
+            (Some(_), None) => "Offset face to: the faces cannot reach that face (pick a flat one)".into(),
+            _ => "Offset face to: click the face to offset up to".into(),
+        }
+    }
+    fn pointer(&mut self, doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        let hit = crate::picking::pick_face(doc, &p.ray).map(|h| (h.object, h.face));
+        if hit != self.hover {
+            self.hover = hit;
+            self.result = hit.and_then(|h| self.up_to(doc, h));
+        }
+        if p.clicked && self.result.is_some() {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        ui.label(format!("{} face(s) to move", self.faces.len()));
+        false
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        self.result.clone()
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        if self.result.is_some() { vec![self.target.0] } else { vec![] }
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        match self.result.take() {
+            Some(b) => {
+                doc.replace_body(self.target.0, b);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 // --------------------------------------------------- Constrained surface ----
 
 /// A smooth sheet through clicked points: click three or more, Backspace
@@ -5437,6 +5537,20 @@ mod tests {
         let vols: Vec<f64> = doc.objects.iter().map(|o| volume(&o.body)).collect();
         assert_eq!(vols.len(), 2);
         assert!((vols[0] - 7.0).abs() < 1e-6 && (vols[1] - 1.0).abs() < 1e-6, "{vols:?}");
+    }
+
+    #[test]
+    fn offsets_faces_up_to_another() {
+        let mut doc = Document::default();
+        let a = doc.add_body("A", ductile_brep::primitives::make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0)));
+        let _ = doc.add_body("B", ductile_brep::primitives::make_box(&Frame { origin: DVec3::new(6.0, 0.0, 0.0), ..Frame::WORLD }, DVec3::new(1.0, 1.0, 3.0)));
+        let b = doc.object(a).unwrap().body.clone();
+        let top = b.face_ids().find(|f| b.face_normal(*f, 0.5, 0.5).z > 0.9).unwrap();
+        doc.selection.insert(Pick::Face(a, top));
+        let mut t = OffsetFaceToTool::new(&doc).unwrap();
+        assert!(click(&mut t, &doc, DVec3::new(6.5, 0.5, 3.0), true));
+        assert!(t.commit(&mut doc));
+        assert!((volume(&doc.object(a).unwrap().body) - 36.0).abs() < 1e-6);
     }
 
     #[test]

@@ -33,6 +33,7 @@ pub enum Command {
     CompleteEdge,
     RemoveFillets,
     OffsetEdge,
+    OffsetFaceTo,
     ConstrainedSurface,
     SelectPrevious,
     UnwrapFace,
@@ -180,6 +181,7 @@ impl Command {
         Command::CompleteEdge,
         Command::RemoveFillets,
         Command::OffsetEdge,
+        Command::OffsetFaceTo,
         Command::ConstrainedSurface,
         Command::SelectPrevious,
         Command::UnwrapFace,
@@ -328,6 +330,7 @@ impl Command {
             CompleteEdge => "Complete edge",
             RemoveFillets => "Remove fillets from solid",
             OffsetEdge => "Offset edge (imprint)",
+            OffsetFaceTo => "Offset face up to a face",
             ConstrainedSurface => "Constrained surface (through points)",
             SelectPrevious => "Select previous (inputs of the last operation)",
             UnwrapFace => "Unwrap face (lay flat)",
@@ -680,6 +683,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             app.status = if n == 0 { "Nothing earlier to select".into() } else { format!("Selected {n} previous item(s)") };
         }
         ConstrainedSurface => app.start_tool(std::boxed::Box::new(crate::tools::ConstrainedSurfaceTool::new())),
+        OffsetFaceTo => match crate::tools::OffsetFaceToTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Offset face to: select flat faces of a solid".into(),
+        },
         OffsetEdge => match crate::tools::OffsetEdgeTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Offset edge: select edges of a solid".into(),

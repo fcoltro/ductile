@@ -30,7 +30,9 @@ code from them.
   them away again. Offset edge imprints new edges at a distance from the
   selected edges, inside the flat faces beside them. Complete edge runs
   straight edges that stop partway on across the flat face beyond them, to
-  the next edge, finishing a partial split. Draft tilts
+  the next edge, finishing a partial split. Offset face up to a face
+  moves the selected flat faces until they reach the face clicked next
+  (out along their normals, or onto its plane when it is tilted). Draft tilts
   selected planar faces about the line where they meet a neutral plane
   through their base, by a dragged or typed angle. Intersection curves
   adds the curves where selected solids cross; Project (I)
