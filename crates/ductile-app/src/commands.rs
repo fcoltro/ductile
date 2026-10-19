@@ -84,6 +84,7 @@ pub enum Command {
     Trim,
     Isoparam,
     Untrim,
+    FullRound,
     Unjoin,
     FindBoundaryEdges,
     ReverseSheet,
@@ -212,6 +213,7 @@ impl Command {
         Command::Trim,
         Command::Isoparam,
         Command::Untrim,
+        Command::FullRound,
         Command::Unjoin,
         Command::FindBoundaryEdges,
         Command::ReverseSheet,
@@ -341,6 +343,7 @@ impl Command {
             Trim => "Trim curves",
             Isoparam => "Isoparam (split a face along its surface's u or v)",
             Untrim => "Untrim (the whole surface under a face)",
+            FullRound => "Full round fillet (rib tops)",
             Unjoin => "Unjoin (faces, bodies or curves into pieces)",
             FindBoundaryEdges => "Find boundary edges",
             ReverseSheet => "Reverse sheet",
@@ -723,6 +726,12 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             },
         },
         Isoparam => app.start_tool(std::boxed::Box::new(crate::tools::IsoparamTool::new())),
+        FullRound => {
+            app.status = match crate::tools::full_round_selected(&mut app.doc) {
+                Ok(n) => format!("Rounded {n} face(s)"),
+                Err(e) => e,
+            }
+        }
         Untrim => {
             app.status = match crate::tools::untrim_selected(&mut app.doc) {
                 Ok(n) => format!("Untrimmed {n} face(s) into new sheets"),

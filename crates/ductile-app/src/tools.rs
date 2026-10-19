@@ -4825,6 +4825,17 @@ mod tests {
     }
 
     #[test]
+    fn full_round_rounds_two_rib_tops() {
+        let mut doc = Document::default();
+        let a = doc.add_body("Rib", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(6.0, 2.0, 3.0)));
+        let b = doc.object(a).unwrap().body.clone();
+        let top = b.face_ids().find(|f| b.face_normal(*f, 0.5, 0.5).z > 0.9).unwrap();
+        doc.selection = [Pick::Face(a, top)].into_iter().collect();
+        assert_eq!(full_round_selected(&mut doc), Ok(1));
+        assert!(doc.object(a).unwrap().body.faces.iter().any(|f| matches!(f.surface, ductile_geom::Surface::Cylinder { .. })));
+    }
+
+    #[test]
     fn isoparam_untrim_unjoin_and_boundary_edges() {
         let mut doc = Document::default();
         let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 2.0, 1.0)));
@@ -4998,6 +5009,51 @@ pub fn untrim_selected(doc: &mut Document) -> Result<usize, String> {
     for s in sheets {
         let id = doc.add_body("Untrimmed", s);
         doc.selection.insert(Pick::Object(id));
+    }
+    doc.mode = SelectMode::Object;
+    Ok(n)
+}
+
+/// Full round: each selected rib top replaced by a half cylinder tangent to
+/// the rib's sides.
+pub fn full_round_selected(doc: &mut Document) -> Result<usize, String> {
+    let faces = doc.selected_faces();
+    if faces.is_empty() {
+        return Err("Select the top faces of ribs to round (face mode: 3)".into());
+    }
+    // Faces are found again by a point on them after each round changes the body.
+    let marks: Vec<(ObjectId, DVec3)> = faces
+        .iter()
+        .filter_map(|(o, f)| {
+            let m = &doc.object(*o)?.mesh.faces.get(f.idx())?.positions;
+            (!m.is_empty()).then(|| (*o, m.iter().copied().sum::<DVec3>() / m.len() as f64))
+        })
+        .collect();
+    let mut bodies: std::collections::BTreeMap<ObjectId, Body> = Default::default();
+    let mut n = 0;
+    let mut err = None;
+    for (o, p) in marks {
+        let body = bodies.entry(o).or_insert_with(|| (*doc.object(o).unwrap().body).clone());
+        let Some(f) = body.face_ids().filter(|f| body.face(*f).surface.is_planar()).min_by(|a, b| {
+            let d = |f: &FaceId| { let s = &body.face(*f).surface; let uv = s.project(p, None); s.point(uv.x, uv.y).distance(p) };
+            d(a).total_cmp(&d(b))
+        }) else { continue };
+        match ductile_brep::ops::fillet::full_round(body, f) {
+            Ok(b) => {
+                *body = b;
+                n += 1;
+            }
+            Err(e) => err = Some(e.to_string()),
+        }
+    }
+    if n == 0 {
+        return Err(format!("Could not round those faces: {}", err.unwrap_or_default()));
+    }
+    doc.checkpoint("Full round");
+    doc.selection.clear();
+    for (o, b) in bodies {
+        doc.replace_body(o, b);
+        doc.selection.insert(Pick::Object(o));
     }
     doc.mode = SelectMode::Object;
     Ok(n)

@@ -1396,3 +1396,86 @@ mod arc_tests {
         }
     }
 }
+
+/// Full round: replaces `face` (the top of a rib, between two parallel
+/// planar side faces) with a half cylinder tangent to both sides, its
+/// radius half the rib's width.
+pub fn full_round(body: &Body, face: FaceId) -> Result<Body, FilletError> {
+    if !body.face(face).surface.is_planar() {
+        return Err(unsupported(line!(), file!()));
+    }
+    let pts: Vec<DVec3> = body.face_edges(face).iter().flat_map(|e| {
+        let ed = body.edge(*e);
+        (0..=8).map(move |i| ed.curve.point(ed.t0 + (ed.t1 - ed.t0) * i as f64 / 8.0))
+    }).collect();
+    if pts.is_empty() {
+        return Err(unsupported(line!(), file!()));
+    }
+    let c = pts.iter().copied().sum::<DVec3>() / pts.len() as f64;
+    let n = outward(body, face, c);
+    // The two sides: planar neighbours facing apart, square to the face.
+    let mut sides: Vec<(FaceId, DVec3, DVec3)> = Vec::new();
+    for e in body.face_edges(face) {
+        for (g, _) in body.edge_faces(e) {
+            if g == face || sides.iter().any(|s| s.0 == g) || !body.face(g).surface.is_planar() {
+                continue;
+            }
+            let ed = body.edge(e);
+            let p = ed.curve.point(0.5 * (ed.t0 + ed.t1));
+            let m = outward(body, g, p);
+            if m.dot(n).abs() < 0.3 {
+                sides.push((g, m, p));
+            }
+        }
+    }
+    let pair = sides.iter().enumerate().flat_map(|(i, a)| sides[i + 1..].iter().map(move |b| (*a, *b))).find(|(a, b)| a.1.dot(b.1) < -0.999);
+    let Some(((_, ma, pa), (_, _, pb))) = pair else { return Err(unsupported(line!(), file!())) };
+    let s = ma.normalize();
+    let w = (pa - pb).dot(s).abs();
+    if w < 1e-9 {
+        return Err(FilletError::TooLarge);
+    }
+    let t = n.cross(s).normalize();
+    let up = s.cross(t).normalize() * n.dot(s.cross(t)).signum();
+    let r = 0.5 * w;
+    // The section in the plane square to the rib, at the face's start.
+    let t0 = pts.iter().map(|p| (*p - c).dot(t)).fold(f64::INFINITY, f64::min);
+    let t1 = pts.iter().map(|p| (*p - c).dot(t)).fold(f64::NEG_INFINITY, f64::max);
+    let top = pts.iter().map(|p| (*p - c).dot(up)).fold(f64::NEG_INFINITY, f64::max);
+    let low = pts.iter().map(|p| (*p - c).dot(up)).fold(f64::INFINITY, f64::min);
+    let mid_s = (pa - c).dot(s) - r;
+    let o = c + t * t0 + s * mid_s;
+    let centre = o + up * (low - r);
+    let (l, rgt) = (centre - s * r, centre + s * r);
+    let crown = centre + up * r;
+    let lift = up * (top - (low - r) + r);
+    let outer = Loop3 {
+        segments: vec![
+            Segment::line(l, l + lift),
+            Segment::line(l + lift, rgt + lift),
+            Segment::line(rgt + lift, rgt),
+            arc(centre, rgt, crown, t),
+            arc(centre, crown, l, t),
+        ],
+    };
+    let region = Region { plane: Frame::new(o, t, s), outer, holes: vec![] };
+    let tool = extrude_region(&region, t * (t1 - t0)).ok_or_else(|| unsupported(line!(), file!()))?;
+    Ok(boolean(body, &tool, BoolOp::Difference)?)
+}
+
+#[cfg(test)]
+mod full_round_tests {
+    use super::*;
+
+    #[test]
+    fn rounds_the_top_of_a_rib() {
+        // A rib 2 wide, 3 tall, 6 long standing on a base plate.
+        let rib = make_box(&Frame { origin: DVec3::new(0.0, 0.0, 0.0), ..Frame::WORLD }, DVec3::new(6.0, 2.0, 3.0));
+        let top = rib.face_ids().find(|f| rib.face_edges(*f).iter().all(|e| rib.edge(*e).start().z > 2.99 && rib.edge(*e).end().z > 2.99)).unwrap();
+        let out = full_round(&rib, top).unwrap();
+        let v = crate::tessellate(&out, &crate::TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume();
+        let want = 6.0 * 2.0 * 3.0 - 6.0 * (2.0 * 1.0 - std::f64::consts::PI * 0.5);
+        assert!((v - want).abs() < 4e-3, "{v} {want}");
+        assert!(out.faces.iter().any(|f| matches!(f.surface, Surface::Cylinder { .. })));
+    }
+}
