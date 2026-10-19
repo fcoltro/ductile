@@ -112,6 +112,10 @@ pub struct Document {
     revision: u64,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
+    /// What was selected when each recent operation began, newest last.
+    previous: Vec<BTreeSet<Pick>>,
+    /// How far Select previous has walked back.
+    previous_at: usize,
     pub dirty: bool,
     pub path: Option<std::path::PathBuf>,
 }
@@ -133,6 +137,8 @@ impl Default for Document {
             revision: 1,
             undo: vec![],
             redo: vec![],
+            previous: vec![],
+            previous_at: 0,
             dirty: false,
             path: None,
         }
@@ -174,6 +180,13 @@ impl Document {
 
     /// Records the current state for undo. Call before mutating.
     pub fn checkpoint(&mut self, label: &str) {
+        if !self.selection.is_empty() && self.previous.last() != Some(&self.selection) {
+            self.previous.push(self.selection.clone());
+            if self.previous.len() > 50 {
+                self.previous.remove(0);
+            }
+        }
+        self.previous_at = 0;
         self.undo.push(Snapshot { objects: self.objects.clone(), groups: self.groups.clone(), dimensions: self.dimensions.clone(), label: label.to_string() });
         if self.undo.len() > 200 {
             self.undo.remove(0);
@@ -198,6 +211,23 @@ impl Document {
         self.undo.push(Snapshot { objects: std::mem::replace(&mut self.objects, s.objects), groups, dimensions, label: s.label.clone() });
         self.validate_selection();
         Some(s.label)
+    }
+
+    /// Selects the inputs of the last operation again; called again, walks
+    /// further back. Picks of objects that are gone are dropped. Returns
+    /// how many picks were restored.
+    pub fn select_previous(&mut self) -> usize {
+        let ids: BTreeSet<ObjectId> = self.objects.iter().map(|o| o.id).collect();
+        while self.previous_at < self.previous.len() {
+            self.previous_at += 1;
+            let set = &self.previous[self.previous.len() - self.previous_at];
+            let kept: BTreeSet<Pick> = set.iter().copied().filter(|p| ids.contains(&p.object())).collect();
+            if !kept.is_empty() && kept != self.selection {
+                self.selection = kept;
+                return self.selection.len();
+            }
+        }
+        0
     }
 
     pub fn can_undo(&self) -> bool {

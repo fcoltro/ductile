@@ -30,6 +30,7 @@ pub enum Command {
     Duplicate,
     Instance,
     DeleteRedundant,
+    SelectPrevious,
     UnwrapFace,
     MakeUnique,
     SelectAll,
@@ -171,6 +172,7 @@ impl Command {
         Command::Duplicate,
         Command::Instance,
         Command::DeleteRedundant,
+        Command::SelectPrevious,
         Command::UnwrapFace,
         Command::MakeUnique,
         Command::SelectAll,
@@ -313,6 +315,7 @@ impl Command {
             Duplicate => "Duplicate",
             Instance => "Instance (linked copy)",
             DeleteRedundant => "Delete redundant topology",
+            SelectPrevious => "Select previous (inputs of the last operation)",
             UnwrapFace => "Unwrap face (lay flat)",
             MakeUnique => "Make instance unique",
             SelectAll => "Select all",
@@ -656,6 +659,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                     app.status = format!("Laid {n} face(s) flat");
                 }
             }
+        }
+        SelectPrevious => {
+            let n = app.doc.select_previous();
+            app.status = if n == 0 { "Nothing earlier to select".into() } else { format!("Selected {n} previous item(s)") };
         }
         DeleteRedundant => {
             let ids: Vec<crate::document::ObjectId> = app.doc.selected_objects().into_iter().filter(|id| app.doc.object(*id).is_some_and(|o| o.body.kind != ductile_brep::BodyKind::Wire && o.body.mesh.is_none())).collect();

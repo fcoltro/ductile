@@ -4643,6 +4643,24 @@ mod tests {
     }
 
     #[test]
+    fn select_previous_walks_back_through_inputs() {
+        let mut doc = Document::default();
+        let a = doc.add_body("A", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::ONE));
+        let b = doc.add_body("B", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::ONE));
+        doc.selection.insert(Pick::Object(a));
+        doc.checkpoint("one");
+        doc.selection.clear();
+        doc.selection.insert(Pick::Object(b));
+        doc.checkpoint("two");
+        doc.selection.clear();
+        assert_eq!(doc.select_previous(), 1);
+        assert!(doc.selection.contains(&Pick::Object(b)));
+        assert_eq!(doc.select_previous(), 1);
+        assert!(doc.selection.contains(&Pick::Object(a)));
+        assert_eq!(doc.select_previous(), 0);
+    }
+
+    #[test]
     fn knife_splits_the_face_drawn_on() {
         set_current_cplane(CPlane::default());
         let mut doc = Document::default();
