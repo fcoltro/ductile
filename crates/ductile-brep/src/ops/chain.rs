@@ -215,7 +215,12 @@ pub fn roll_chain(body: &Body, chain: &[Link], closed: bool, blend: Blend) -> Re
         eb: EdgeId,
     }
     let end_at = |j: usize, (fa, fb): (FaceId, FaceId)| -> Result<End, FilletError> {
-        let xs = others(verts[j]);
+        // A seam leaving the end runs inside one side's face; it follows
+        // that face's contact curve and plays no part in the cap.
+        let xs: Vec<EdgeId> = others(verts[j]).into_iter().filter(|x| {
+            let fs = body.edge_faces(*x);
+            !(fs.len() == 2 && fs[0].0 == fs[1].0)
+        }).collect();
         if xs.len() != 2 {
             return Err(super::fillet::unsupported(line!(), file!()));
         }
