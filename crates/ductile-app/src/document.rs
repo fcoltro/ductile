@@ -169,6 +169,52 @@ pub fn mesh_body(body: &Body) -> BodyMesh {
 }
 
 impl Document {
+    /// The current selection turned into another kind of element
+    /// (Plasticity's Ctrl+1..4): solids give all their vertices, edges or
+    /// faces; faces give their edges and corners; edges their ends and the
+    /// faces on either side; vertices the edges and faces that touch them.
+    pub fn converted_selection(&self, to: SelectMode) -> BTreeSet<Pick> {
+        let mut out = BTreeSet::new();
+        for p in &self.selection {
+            let o = p.object();
+            let Some(ob) = self.object(o) else { continue };
+            let b = &ob.body;
+            if to == SelectMode::Object {
+                out.insert(Pick::Object(o));
+                continue;
+            }
+            // The edges this pick stands for.
+            let edges: Vec<EdgeId> = match *p {
+                Pick::Object(_) => b.edge_ids().collect(),
+                Pick::Face(_, f) | Pick::SurfaceControl(_, f, _) => b.face_edges(f),
+                Pick::Edge(_, e) | Pick::Control(_, e, _) => vec![e],
+                Pick::Vertex(_, v) => b.edge_ids().filter(|e| b.edge(*e).v0 == v || b.edge(*e).v1 == v).collect(),
+            };
+            match to {
+                SelectMode::Vertex => {
+                    if let Pick::Vertex(..) = p {
+                        out.insert(*p);
+                        continue;
+                    }
+                    for e in edges {
+                        out.insert(Pick::Vertex(o, b.edge(e).v0));
+                        out.insert(Pick::Vertex(o, b.edge(e).v1));
+                    }
+                }
+                SelectMode::Edge => out.extend(edges.into_iter().map(|e| Pick::Edge(o, e))),
+                SelectMode::Face => match *p {
+                    Pick::Object(_) => out.extend(b.face_ids().map(|f| Pick::Face(o, f))),
+                    Pick::Face(_, f) | Pick::SurfaceControl(_, f, _) => {
+                        out.insert(Pick::Face(o, f));
+                    }
+                    _ => out.extend(edges.into_iter().flat_map(|e| b.edge_faces(e)).map(|(f, _)| Pick::Face(o, f))),
+                },
+                SelectMode::Object => unreachable!(),
+            }
+        }
+        out
+    }
+
     pub fn object(&self, id: ObjectId) -> Option<&Object> {
         self.objects.iter().find(|o| o.id == id)
     }
@@ -496,6 +542,24 @@ mod tests {
     use super::*;
     use ductile_brep::primitives::make_box;
     use ductile_geom::{DVec3, Frame};
+
+    #[test]
+    fn converts_selection_between_element_kinds() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", make_box(&Frame::WORLD, DVec3::ONE));
+        let f = doc.object(id).unwrap().body.face_ids().next().unwrap();
+        doc.selection.insert(Pick::Face(id, f));
+        let edges = doc.converted_selection(SelectMode::Edge);
+        assert_eq!(edges.len(), 4);
+        assert_eq!(doc.converted_selection(SelectMode::Vertex).len(), 4);
+        doc.selection = edges;
+        // The four edges of one face touch it and its four neighbours.
+        assert_eq!(doc.converted_selection(SelectMode::Face).len(), 5);
+        assert_eq!(doc.converted_selection(SelectMode::Object).len(), 1);
+        doc.selection = [Pick::Object(id)].into();
+        assert_eq!(doc.converted_selection(SelectMode::Edge).len(), 12);
+        assert_eq!(doc.converted_selection(SelectMode::Vertex).len(), 8);
+    }
 
     #[test]
     fn groups_nest_hide_lock_and_dissolve() {
