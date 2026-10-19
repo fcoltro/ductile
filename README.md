@@ -195,7 +195,9 @@ code from them.
   open) of untrimmed spline patches: one exact bicubic patch per regular
   quad, curvature continuous with its neighbours, and a tangent N-sided
   fill round each vertex where three, five or more quads meet. Triangles
-  and other polygons are subdivided first. The mesh is hidden.
+  and other polygons are subdivided first. Open meshes carry on smoothly
+  past their edges (a ghost ring reflected outside), so boundary vertices
+  where three or more faces meet work too. The mesh is hidden.
 - STEP import (File > Import STEP, or `ductile part.step`): planes,
   cylinders, cones, spheres, tori, B-spline and rational surfaces, surfaces
   of extrusion and revolution, in any length unit. Parts written by

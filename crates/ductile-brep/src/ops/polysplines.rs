@@ -12,6 +12,12 @@
 //! Meshes with triangles or other polygons, or with extraordinary vertices
 //! too close together, are subdivided first (Catmull-Clark) until each
 //! one stands apart.
+//!
+//! An open mesh is first given a ring of ghost faces round its boundary,
+//! each ghost point the reflection of the point inside it, so the surface
+//! carries straight on past the edge; only the mesh's own faces are kept.
+//! Boundary vertices with three or more faces then become ordinary
+//! extraordinary vertices inside the ghost ring.
 
 use crate::topo::{Body, BodyKind};
 use ductile_geom::{DVec3, NurbsCurve, NurbsSurface};
@@ -29,9 +35,8 @@ pub struct PolyMesh {
 pub enum PolySplineError {
     /// An edge with more than two faces, or faces facing opposite ways.
     NotManifold,
-    /// Mesh boundaries are supported only where their vertices are
-    /// regular (two faces along the boundary, one at a corner) and away
-    /// from extraordinary vertices.
+    /// A boundary vertex where the open edges cross (more than one gap
+    /// in its fan of faces).
     Boundary,
     /// Extraordinary vertices still too close after subdividing.
     Crowded,
@@ -43,7 +48,7 @@ impl std::fmt::Display for PolySplineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             PolySplineError::NotManifold => "the mesh is not manifold (an edge has more than two faces, or faces disagree on which way is out)",
-            PolySplineError::Boundary => "an open edge of the mesh meets an extraordinary vertex; close the mesh or add a supporting loop there",
+            PolySplineError::Boundary => "open edges of the mesh cross at a vertex",
             PolySplineError::Crowded => "extraordinary vertices sit too close together, even after subdividing",
             PolySplineError::Fit => "a fill round an extraordinary vertex could not be fitted",
         })
@@ -188,15 +193,16 @@ fn ready(m: &PolyMesh, topo: &Topo) -> Result<bool, PolySplineError> {
         }
     }
     for v in (0..m.points.len()).filter(|v| ev[*v]) {
+        // Next to the ghost ring's outer edge: subdividing moves it away.
         if !topo.interior(m, v) {
-            return Err(PolySplineError::Boundary);
+            return Ok(false);
         }
         for &f in &topo.vertex_faces[v] {
             let p = &m.faces[f];
             let i = p.iter().position(|x| *x == v).unwrap();
             // The two edges of the ring face away from v.
             for (a, b) in [(p[(i + 1) % 4], p[(i + 2) % 4]), (p[(i + 2) % 4], p[(i + 3) % 4])] {
-                let Some(&g) = topo.directed.get(&(b, a)) else { return Err(PolySplineError::Boundary) };
+                let Some(&g) = topo.directed.get(&(b, a)) else { return Ok(false) };
                 if m.faces[g].iter().any(|x| ev[*x]) {
                     return Ok(false);
                 }
@@ -204,6 +210,67 @@ fn ready(m: &PolyMesh, topo: &Topo) -> Result<bool, PolySplineError> {
         }
     }
     Ok(true)
+}
+
+/// An all-quadrilateral open mesh with a ring of ghost faces round its
+/// boundary, and which faces are the mesh's own. Each boundary vertex's
+/// ghost is its reflection of the mean of its neighbours inside; a corner
+/// (one face) gets one ghost per edge and a diagonal one, as a B-spline
+/// grid reflected across both edges.
+fn with_ghosts(m: &PolyMesh, topo: &Topo) -> Result<(PolyMesh, Vec<bool>), PolySplineError> {
+    let mut out = m.clone();
+    let mut keep = vec![true; m.faces.len()];
+    let mut boundary: Vec<(usize, usize)> = topo.directed.keys().filter(|(a, b)| topo.is_boundary_edge(*a, *b)).copied().collect();
+    boundary.sort();
+    let (mut next, mut prev) = (HashMap::new(), HashMap::new());
+    for &(a, b) in &boundary {
+        if next.insert(a, b).is_some() || prev.insert(b, a).is_some() {
+            return Err(PolySplineError::Boundary);
+        }
+    }
+    // A boundary vertex's ghost on its edge in (from prev) and out (to next).
+    let mut ghost: HashMap<(usize, bool), usize> = HashMap::new();
+    let mut add = |out: &mut PolyMesh, p: DVec3| {
+        out.points.push(p);
+        out.points.len() - 1
+    };
+    let mut corners = Vec::new();
+    for &(v, w) in &boundary {
+        let u = prev[&v];
+        let p = |i: usize| m.points[i];
+        let fs = &topo.vertex_faces[v];
+        if fs.len() == 1 {
+            let f = from(&m.faces[fs[0]], v);
+            let gi = add(&mut out, 2.0 * p(v) - p(w));
+            let go = add(&mut out, 2.0 * p(v) - p(u));
+            let gc = add(&mut out, 4.0 * p(v) - 2.0 * p(u) - 2.0 * p(w) + p(f[2]));
+            ghost.insert((v, true), gi);
+            ghost.insert((v, false), go);
+            corners.push(vec![v, gi, gc, go]);
+        } else {
+            let inside: BTreeSet<usize> = fs
+                .iter()
+                .flat_map(|f| {
+                    let q = from(&m.faces[*f], v);
+                    [q[1], q[3]]
+                })
+                .filter(|x| *x != u && *x != w)
+                .collect();
+            if inside.is_empty() {
+                return Err(PolySplineError::Boundary);
+            }
+            let mean = inside.iter().map(|i| p(*i)).sum::<DVec3>() / inside.len() as f64;
+            let g = add(&mut out, 2.0 * p(v) - mean);
+            ghost.insert((v, true), g);
+            ghost.insert((v, false), g);
+        }
+    }
+    for &(a, b) in &boundary {
+        out.faces.push(vec![b, a, ghost[&(a, false)], ghost[&(b, true)]]);
+    }
+    out.faces.extend(corners);
+    keep.resize(out.faces.len(), false);
+    Ok((out, keep))
 }
 
 /// `f`'s corners starting at `v`.
@@ -307,13 +374,29 @@ fn patch_edge(s: &NurbsSurface, i: usize) -> NurbsCurve {
 pub fn polysplines(mesh: &PolyMesh) -> Result<Body, PolySplineError> {
     let mut m = mesh.clone();
     let mut topo = Topo::new(&m)?;
+    let closed = topo.directed.keys().all(|(a, b)| topo.directed.contains_key(&(*b, *a)));
+    let mut keep = vec![true; m.faces.len()];
     let mut steps = 0;
+    let mut step = |m: &mut PolyMesh, topo: &mut Topo, keep: &mut Vec<bool>| -> Result<(), PolySplineError> {
+        // Each face splits into one quadrilateral per corner, in order.
+        *keep = m.faces.iter().zip(keep.iter()).flat_map(|(f, k)| std::iter::repeat_n(*k, f.len())).collect();
+        *m = catmull_clark(m)?;
+        *topo = Topo::new(m)?;
+        Ok(())
+    };
+    if !closed {
+        if m.faces.iter().any(|f| f.len() != 4) {
+            step(&mut m, &mut topo, &mut keep)?;
+            steps += 1;
+        }
+        (m, keep) = with_ghosts(&m, &topo)?;
+        topo = Topo::new(&m)?;
+    }
     while !ready(&m, &topo)? {
         if steps == 3 {
             return Err(PolySplineError::Crowded);
         }
-        m = catmull_clark(&m)?;
-        topo = Topo::new(&m)?;
+        step(&mut m, &mut topo, &mut keep)?;
         steps += 1;
     }
     let ev: Vec<bool> = (0..m.points.len()).map(|v| topo.extraordinary(&m, v)).collect();
@@ -325,20 +408,19 @@ pub fn polysplines(mesh: &PolyMesh) -> Result<Body, PolySplineError> {
         }
     }
     let size = m.points.iter().fold(1.0f64, |a, p| a.max(p.abs().max_element()));
-    let closed = topo.directed.keys().all(|(a, b)| topo.directed.contains_key(&(*b, *a)));
     let mut sw = crate::ops::sheet::Sewer::new(if closed { BodyKind::Solid } else { BodyKind::Sheet }, 1e-7 * size);
     let mut faces: Vec<usize> = patches.keys().copied().collect();
     faces.sort();
-    for f in faces {
+    for f in faces.into_iter().filter(|f| keep[*f]) {
         sw.patch(patches[&f].clone());
     }
     // Fills round extraordinary vertices.
-    for v in (0..m.points.len()).filter(|v| ev[*v]) {
+    for v in (0..m.points.len()).filter(|v| ev[*v] && topo.vertex_faces[*v].iter().any(|f| keep[*f])) {
         // The ring in order: face k runs v, e_k, d_k, e_(k+1).
-        let mut ring = vec![from(&m.faces[topo.vertex_faces[v][0]], v)];
+        let mut ring = vec![topo.vertex_faces[v][0]];
         loop {
-            let last = ring.last().unwrap();
-            let next = from(&m.faces[topo.directed[&(v, last[3])]], v);
+            let last = from(&m.faces[*ring.last().unwrap()], v);
+            let next = topo.directed[&(v, last[3])];
             if next == ring[0] {
                 break;
             }
@@ -347,6 +429,8 @@ pub fn polysplines(mesh: &PolyMesh) -> Result<Body, PolySplineError> {
             }
             ring.push(next);
         }
+        let kept: Vec<bool> = ring.iter().map(|f| keep[*f]).collect();
+        let ring: Vec<[usize; 4]> = ring.iter().map(|f| from(&m.faces[*f], v)).collect();
         let ns = ring.len();
         // The hole's edges: each the edge of the regular patch beyond it,
         // that patch, which of its edges it is, and whether the curve runs
@@ -383,7 +467,8 @@ pub fn polysplines(mesh: &PolyMesh) -> Result<Body, PolySplineError> {
             }
             Some((n, into))
         };
-        for s in crate::ops::sheet::fill_quads(&cs, &cross).ok_or(PolySplineError::Fit)? {
+        // One quadrilateral per ring face, in ring order.
+        for (s, _) in crate::ops::sheet::fill_quads(&cs, &cross).ok_or(PolySplineError::Fit)?.into_iter().zip(&kept).filter(|x| *x.1) {
             sw.patch(s);
         }
     }
@@ -463,6 +548,31 @@ mod tests {
             }
         }
         worst
+    }
+
+    #[test]
+    fn splines_an_open_mesh_with_an_irregular_boundary_vertex() {
+        // An L of three quadrilaterals on a saddle: at the inner corner
+        // three faces meet the boundary.
+        let z = |x: f64, y: f64| 0.3 * x * y - 0.1 * x * x;
+        let at = |i: usize, j: usize| DVec3::new(i as f64, j as f64, z(i as f64, j as f64));
+        let mut points = Vec::new();
+        for j in 0..3 {
+            for i in 0..3 {
+                points.push(at(i, j));
+            }
+        }
+        let id = |i: usize, j: usize| j * 3 + i;
+        let faces = vec![vec![id(0, 0), id(1, 0), id(1, 1), id(0, 1)], vec![id(1, 0), id(2, 0), id(2, 1), id(1, 1)], vec![id(0, 1), id(1, 1), id(1, 2), id(0, 2)]];
+        let b = polysplines(&PolyMesh { points, faces }).unwrap();
+        assert_eq!(b.kind, BodyKind::Sheet);
+        // One subdivision: twelve quadrilaterals, three of them the fill.
+        assert_eq!(b.faces.len(), 12);
+        let kink = worst_kink(&b);
+        assert!(kink < 0.15, "seams kink by {kink} degrees");
+        // The only open edges are the sheet's outline.
+        let lone = b.edge_ids().filter(|e| b.edge_faces(*e).len() == 1).count();
+        assert_eq!(lone, 16);
     }
 
     #[test]
