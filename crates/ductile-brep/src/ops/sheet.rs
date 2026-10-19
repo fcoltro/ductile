@@ -666,6 +666,20 @@ fn boundary_cross<'a>(segs: &'a [Segment], neighbours: &'a [Neighbour]) -> impl 
     }
 }
 
+/// The neighbour's normal curvature at a boundary point along a direction,
+/// about the normal [`boundary_cross`] gives there.
+fn boundary_curvature<'a>(segs: &'a [Segment], neighbours: &'a [Neighbour]) -> impl Fn(DVec3, DVec3) -> Option<f64> + 'a {
+    move |p: DVec3, dir: DVec3| -> Option<f64> {
+        let i = (0..segs.len()).min_by(|a, b| {
+            let d = |i: usize| segs[i].curve.point(segs[i].curve.closest_param_in(p, segs[i].t0.min(segs[i].t1), segs[i].t0.max(segs[i].t1))).distance(p);
+            d(*a).total_cmp(&d(*b))
+        })?;
+        let (surf, _) = neighbours[i].as_ref()?;
+        let uv = surf.project(p, None);
+        surf.normal_curvature(uv.x, uv.y, dir)
+    }
+}
+
 /// Least-squares patch through four boundary curves (bottom and top in
 /// +u, left and right in +v, as for Coons) whose derivative across each
 /// side lies in the plane with normal `n` and leans along `d`, where
@@ -887,8 +901,9 @@ pub fn patch_n_g1(boundary: &Loop3, neighbours: &[Neighbour]) -> Option<Body> {
         cs.push(fit_uniform(&halves[k].0, 10)?);
         cs.push(fit_uniform(&halves[(k + ns - 1) % ns].1.reversed(), 10)?);
     }
+    let curv = boundary_curvature(&boundary.segments, neighbours);
     let mut sw = Sewer::new(BodyKind::Sheet, tolerance(std::slice::from_ref(boundary)));
-    for s in fill_quads(&cs, &|i, t| cross(cs[i].point(t)))? {
+    for s in fill_quads(&cs, &|i, t| cross(cs[i].point(t)), Some(&|i, t, dir| curv(cs[i].point(t), dir)))? {
         sw.patch(s);
     }
     Some(sw.body)
@@ -899,7 +914,12 @@ pub fn patch_n_g1(boundary: &Loop3, neighbours: &[Neighbour]) -> Option<Body> {
 /// `cs[2k + 1]` from corner k back along side k - 1 to that one's middle;
 /// all non-rational cubics on the same knots. `cross(i, t)` gives the
 /// faces' tangent plane at parameter `t` of edge `i`, as for [`fit_g1`].
-pub(crate) fn fill_quads(cs: &[NurbsCurve], cross: &dyn Fn(usize, f64) -> Option<(DVec3, DVec3)>) -> Option<Vec<NurbsSurface>> {
+/// With `curv` (the neighbour's normal curvature at a point of a side,
+/// along a direction, about the normal `cross` gives), the fill also
+/// matches it across the sides: curvature continuous (G2) there.
+/// Weight of the C2 rows across spokes in a G2 fill (tuned on a cube cage).
+const C2W: f64 = 10.0;
+pub(crate) fn fill_quads(cs: &[NurbsCurve], cross: &dyn Fn(usize, f64) -> Option<(DVec3, DVec3)>, curv: Option<&dyn Fn(usize, f64, DVec3) -> Option<f64>>) -> Option<Vec<NurbsSurface>> {
     use crate::ops::corner::Lsq;
     use ductile_geom::nurbs::basis::{basis_funs, ders_basis_funs, find_span};
     let ns = cs.len() / 2;
@@ -970,6 +990,11 @@ pub(crate) fn fill_quads(cs: &[NurbsCurve], cross: &dyn Fn(usize, f64) -> Option
         // Across the boundary: per quadrilateral its sides v = 0 (along
         // u, edge curve 2k) and u = 0 (along v, edge curve 2k + 1).
         let f = deg as f64 / (knots[deg + 1] - knots[1]);
+        // Second derivative across a side: its rows' weights.
+        let d2 = {
+            let s0 = find_span(n - 1, deg, knots[deg], &knots);
+            ders_basis_funs(s0, knots[deg], deg, 2, &knots)[2].clone()
+        };
         for (k, g) in grids.iter().enumerate() {
             for along_u in [true, false] {
                 let edge = if along_u { 2 * k } else { 2 * k + 1 };
@@ -1000,6 +1025,14 @@ pub(crate) fn fill_quads(cs: &[NurbsCurve], cross: &dyn Fn(usize, f64) -> Option
                     for (c, e) in unit.iter().enumerate() {
                         add(&mut lsq, &terms(*e), reach * d[c], 1.0);
                     }
+                    // Curvature across: n · S'' = κ |S'|², S' from the last fit.
+                    if let (Some(ss), Some(curv)) = (prev, curv) {
+                        let dd = if along_u { ss[k].derivs(u, 0.0, 1)[0][1] } else { ss[k].derivs(0.0, u, 1)[1][0] };
+                        if let Some(kappa) = dd.try_normalize().and_then(|dir| curv(edge, t, dir)) {
+                            let terms: Vec<(S, DVec3)> = b.iter().enumerate().flat_map(|(m, bm)| (0..=deg).map(move |r| (m, bm, r))).map(|(m, bm, r)| (at_grid(span - deg + m, r), nrm * (bm * d2[r]))).collect();
+                            add(&mut lsq, &terms, kappa * dd.length_squared(), 100.0);
+                        }
+                    }
                 }
             }
         }
@@ -1012,6 +1045,12 @@ pub(crate) fn fill_quads(cs: &[NurbsCurve], cross: &dyn Fn(usize, f64) -> Option
             for t in 1..n - 1 {
                 for e in unit {
                     add(&mut lsq, &[(g0[n - 2][t], e), (g1[t][n - 2], e), (sp[t], e * -2.0)], 0.0, c1);
+                }
+                // And curvature continuous (C2) when fitting G2.
+                if curv.is_some() {
+                    for e in unit {
+                        add(&mut lsq, &[(g0[n - 3][t], e), (g0[n - 2][t], e * -2.0), (g1[t][n - 2], e * 2.0), (g1[t][n - 3], -e)], 0.0, C2W);
+                    }
                 }
             }
         }

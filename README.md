@@ -114,9 +114,9 @@ code from them.
   click. Patch on a loop of selected edges meets
   the faces beyond them tangentially (G1), faired for even curvature: a
   tube's rim gets a smooth dome. Holes of three or more than four sides
-  are filled with one piece per corner, tangent to each other across
-  their seams as well as to the faces around (a corner where three
-  fillets meet fills like a sphere). In vertex mode (1) the control nets of
+  are filled with one piece per corner, curvature continuous with each
+  other across their seams and with the faces around (G2; a corner where
+  three fillets meet fills like a sphere). In vertex mode (1) the control nets of
   untrimmed spline surfaces show and their points move with G, rotate and
   scale; neighbouring faces stay joined. Thicken (Alt+K) turns surfaces into
   solids of a given thickness on either side. Bridge surface spans two
@@ -193,8 +193,8 @@ code from them.
 - PolySplines (Edit menu or palette) turns a selected mesh, best a quad
   cage from a subdivision modeller, into a smooth solid (or sheet, when
   open) of untrimmed spline patches: one exact bicubic patch per regular
-  quad, curvature continuous with its neighbours, and a tangent N-sided
-  fill round each vertex where three, five or more quads meet. Triangles
+  quad, curvature continuous with its neighbours, and a curvature
+  continuous N-sided fill round each vertex where three, five or more quads meet. Triangles
   and other polygons are subdivided first. Open meshes carry on smoothly
   past their edges (a ghost ring reflected outside), so boundary vertices
   where three or more faces meet work too. Rectangles of regular quads

@@ -591,7 +591,19 @@ pub fn polysplines_with(mesh: &PolyMesh, merge: bool) -> Result<Body, PolySpline
             Some((n, into))
         };
         // One quadrilateral per ring face, in ring order.
-        for (s, _) in crate::ops::sheet::fill_quads(&cs, &cross).ok_or(PolySplineError::Fit)?.into_iter().zip(&kept).filter(|x| *x.1) {
+        // The neighbour's curvature across, for a curvature-continuous fill.
+        let curv = |e: usize, t: f64, dir: DVec3| -> Option<f64> {
+            let (_, s, i, flip) = &sides[e];
+            let w = if *flip { 1.0 - t } else { t };
+            let (u, v) = match i {
+                0 => (w, 0.0),
+                1 => (1.0, w),
+                2 => (1.0 - w, 1.0),
+                _ => (0.0, 1.0 - w),
+            };
+            s.normal_curvature(u, v, dir)
+        };
+        for (s, _) in crate::ops::sheet::fill_quads(&cs, &cross, Some(&curv)).ok_or(PolySplineError::Fit)?.into_iter().zip(&kept).filter(|x| *x.1) {
             out.push(s);
         }
     }
@@ -742,6 +754,47 @@ mod tests {
                 .fold(f64::MAX, f64::min);
             assert!(d < 1e-6, "{d}");
         }
+    }
+
+    /// The largest jump in normal curvature across any edge, along the
+    /// direction across it, relative to the larger of the two.
+    fn worst_curvature_jump(b: &Body) -> f64 {
+        let mut worst: f64 = 0.0;
+        for e in b.edge_ids() {
+            let fs = b.edge_faces(e);
+            if fs.len() != 2 {
+                continue;
+            }
+            let ed = b.edge(e);
+            for k in 1..8 {
+                let t = ed.t0 + (ed.t1 - ed.t0) * k as f64 / 8.0;
+                let p = ed.curve.point(t);
+                let along = ed.curve.tangent(t);
+                let ks: Vec<f64> = fs
+                    .iter()
+                    .filter_map(|(f, _)| {
+                        let uv = b.face(*f).surface.project(p, None);
+                        let ductile_geom::Surface::Nurbs(s) = &b.face(*f).surface else { return None };
+                        let d = s.derivs(uv.x, uv.y, 1);
+                        let across = d[1][0].cross(d[0][1]).cross(along);
+                        s.normal_curvature(uv.x, uv.y, across)
+                    })
+                    .collect();
+                if ks.len() == 2 {
+                    worst = worst.max((ks[0] - ks[1]).abs() / ks[0].abs().max(ks[1].abs()).max(1e-9));
+                }
+            }
+        }
+        worst
+    }
+
+    #[test]
+    fn fills_extraordinary_vertices_curvature_continuously() {
+        // Matching curvature across the fills' sides and spokes takes the
+        // jump from about 3% (tangent only) to under 1%.
+        let b = polysplines(&cube()).unwrap();
+        let jump = worst_curvature_jump(&b);
+        assert!(jump < 0.01, "curvature jumps by {jump}");
     }
 
     #[test]

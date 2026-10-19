@@ -207,6 +207,13 @@ impl Surface {
 
     /// Unit normal at (u, v). Analytic surfaces return an exact normal even at
     /// parametric singularities (sphere poles, cone apex).
+    /// The normal curvature at (u, v) along the tangent direction nearest
+    /// `dir`, signed about [`Surface::normal`].
+    pub fn normal_curvature(&self, u: f64, v: f64, dir: DVec3) -> Option<f64> {
+        let d = self.derivs(u, v);
+        normal_curvature_along([d.du, d.dv, d.duu, d.duv, d.dvv], self.normal(u, v), dir)
+    }
+
     pub fn normal(&self, u: f64, v: f64) -> DVec3 {
         match self {
             Surface::Plane { frame } => frame.z,
@@ -545,4 +552,23 @@ mod tests {
             assert!(n.point(u1, v1).distance(s.point(u1, v1)) < 1e-9);
         }
     }
+}
+
+/// Normal curvature about `n` along the tangent nearest `dir`, from the
+/// first and second derivatives [Su, Sv, Suu, Suv, Svv].
+pub(crate) fn normal_curvature_along(d: [DVec3; 5], n: DVec3, dir: DVec3) -> Option<f64> {
+    let [su, sv, suu, suv, svv] = d;
+    // dir ≈ a Su + b Sv, by least squares.
+    let (e, f, g) = (su.dot(su), su.dot(sv), sv.dot(sv));
+    let det = e * g - f * f;
+    if det.abs() < 1e-300 {
+        return None;
+    }
+    let (x, y) = (dir.dot(su), dir.dot(sv));
+    let (a, b) = ((g * x - f * y) / det, (e * y - f * x) / det);
+    let first = a * a * e + 2.0 * a * b * f + b * b * g;
+    if first < 1e-300 {
+        return None;
+    }
+    Some((a * a * suu.dot(n) + 2.0 * a * b * suv.dot(n) + b * b * svv.dot(n)) / first)
 }

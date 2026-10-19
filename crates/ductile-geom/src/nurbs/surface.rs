@@ -84,6 +84,14 @@ impl NurbsSurface {
     }
 
     /// Derivatives `skl[k][l]` = ∂^(k+l) S / ∂u^k ∂v^l for k + l <= d (A3.6 + A4.4).
+    /// The normal curvature at (u, v) along the tangent direction nearest
+    /// `dir`, signed about the normal Su × Sv (positive bending towards it).
+    pub fn normal_curvature(&self, u: f64, v: f64, dir: DVec3) -> Option<f64> {
+        let d = self.derivs(u, v, 2);
+        let n = d[1][0].cross(d[0][1]).try_normalize()?;
+        crate::surface::normal_curvature_along([d[1][0], d[0][1], d[2][0], d[1][1], d[0][2]], n, dir)
+    }
+
     pub fn derivs(&self, u: f64, v: f64, d: usize) -> Vec<Vec<DVec3>> {
         let (p, q) = (self.degree_u, self.degree_v);
         let du = d.min(p);
