@@ -107,6 +107,9 @@ pub struct ObjectStyle {
     pub visible: bool,
     /// Faces drawn (off: edges only).
     pub faces: bool,
+    /// Drawn unlit and see-through after everything else (a curve's
+    /// region fill).
+    pub flat: bool,
     /// A closed solid: its inside shows as a cap where a section cuts it.
     pub solid: bool,
     pub metalness: f32,
@@ -122,6 +125,7 @@ impl Default for ObjectStyle {
             state: 0,
             visible: true,
             faces: true,
+            flat: false,
             solid: false,
             metalness: 0.0,
             roughness: 0.45,
@@ -140,6 +144,7 @@ struct GpuObject {
     edges: Option<(wgpu::Buffer, u32)>,
     visible: bool,
     faces: bool,
+    flat: bool,
 }
 
 struct GpuImage {
@@ -494,7 +499,7 @@ impl ViewportRenderer {
         let edges = self.objects.remove(&id).and_then(|o| o.edges);
         self.objects.insert(
             id,
-            GpuObject { vbuf, ibuf, index_count: idx.len() as u32, obj_buf, face_buf, face_count, bind_group, edges, visible: true, faces: true },
+            GpuObject { vbuf, ibuf, index_count: idx.len() as u32, obj_buf, face_buf, face_count, bind_group, edges, visible: true, faces: true, flat: false },
         );
         self.set_style(id, &ObjectStyle::default(), &[]);
     }
@@ -513,7 +518,7 @@ impl ViewportRenderer {
             color: style.color,
             hover_color: style.hover_color,
             select_color: style.select_color,
-            flags: [style.state, 0, style.solid as u32, 0],
+            flags: [style.state, 0, style.solid as u32, style.flat as u32],
             pbr: [style.metalness, style.roughness, 0.0, 0.0],
         };
         self.queue.write_buffer(&o.obj_buf, 0, bytemuck::bytes_of(&u));
@@ -524,6 +529,7 @@ impl ViewportRenderer {
         self.queue.write_buffer(&o.face_buf, 0, bytemuck::cast_slice(&fs));
         o.visible = style.visible;
         o.faces = style.faces;
+        o.flat = style.flat;
     }
 
     pub fn set_edges(&mut self, id: u64, lines: &[LineInstance]) {
@@ -701,7 +707,15 @@ impl ViewportRenderer {
             pass.draw(0..3, 0..1);
             pass.set_bind_group(0, &self.cam_bg, &[]);
             pass.set_pipeline(if self.xray { &self.mesh_xray_pipeline } else { &self.mesh_pipeline });
-            for o in self.objects.values().filter(|o| o.visible && o.faces) {
+            for o in self.objects.values().filter(|o| o.visible && o.faces && !o.flat) {
+                pass.set_bind_group(1, &o.bind_group, &[]);
+                pass.set_vertex_buffer(0, o.vbuf.slice(..));
+                pass.set_index_buffer(o.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..o.index_count, 0, 0..1);
+            }
+            // See-through fills last, blended over what is behind them.
+            pass.set_pipeline(&self.mesh_xray_pipeline);
+            for o in self.objects.values().filter(|o| o.visible && o.flat) {
                 pass.set_bind_group(1, &o.bind_group, &[]);
                 pass.set_vertex_buffer(0, o.vbuf.slice(..));
                 pass.set_index_buffer(o.ibuf.slice(..), wgpu::IndexFormat::Uint32);

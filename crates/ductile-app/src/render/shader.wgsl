@@ -22,7 +22,8 @@ struct Object {
     color: vec4<f32>,
     hover_color: vec4<f32>,
     select_color: vec4<f32>,
-    // x: whole-object state (0 none, 1 hovered, 2 selected); y: x-ray alpha flag; z: 1 for a solid.
+    // x: whole-object state (0 none, 1 hovered, 2 selected); y: x-ray alpha flag; z: 1 for a solid;
+    // w: 1 for an unlit see-through fill.
     flags: vec4<u32>,
     // x: metalness, y: roughness.
     pbr: vec4<f32>,
@@ -209,6 +210,14 @@ fn fs_mesh(o: MeshOut, @builtin(front_facing) front: bool) -> @location(0) vec4<
     // Looking into a cut solid shows its inside: paint it as a flat cap.
     if (!front && obj.flags.z == 1u && dot(cam.section.xyz, cam.section.xyz) > 0.0) {
         return vec4<f32>(obj.color.rgb * 0.55 + vec3<f32>(0.25, 0.08, 0.08), obj.color.a);
+    }
+    if (obj.flags.w == 1u) {
+        if (obj.flags.x == 2u) {
+            return vec4<f32>(obj.select_color.rgb, obj.color.a * 1.6);
+        } else if (obj.flags.x == 1u) {
+            return vec4<f32>(obj.hover_color.rgb, obj.color.a * 1.4);
+        }
+        return obj.color;
     }
     var base = obj.color.rgb;
     let fs = face_state[o.face];

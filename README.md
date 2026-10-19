@@ -276,7 +276,8 @@ code from them.
   click takes the most specific thing under the cursor (a vertex, then an
   edge, a face, the solid) and a box takes them all.
 - Regions: clicking inside a closed planar curve picks it, as Plasticity
-  picks the region. Extrude, Revolve, Fillet and Chamfer started with
+  picks the region, and the region shows a faint fill that lights up on
+  hover and selection. Extrude, Revolve, Fillet and Chamfer started with
   nothing selected open their dialog and wait for the pick.
 - Click drill-down and auto-invoke, as in Plasticity: in solid mode the
   first click selects the solid and a second click the face or edge under

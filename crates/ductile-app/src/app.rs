@@ -15,6 +15,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 const PREVIEW_ID: u64 = u64::MAX;
+/// Renderer ids of curves' region fills: the curve's id with this bit set.
+const REGION_BIT: u64 = 1 << 62;
+
+/// The fill of a curve object's closed planar loops, for display.
+fn region_mesh(body: &ductile_brep::Body) -> Option<BodyMesh> {
+    use ductile_brep::profile::{loops_plane, wire_chains, Region};
+    let loops: Vec<_> = wire_chains(body).into_iter().filter(|l| l.is_closed()).collect();
+    if loops.is_empty() {
+        return None;
+    }
+    let plane = loops_plane(&loops)?;
+    let mut faces = Vec::new();
+    for r in Region::from_loops(plane, loops) {
+        let sheet = ductile_brep::ops::sheet::patch(&r.outer, &r.holes)?;
+        faces.extend(crate::document::mesh_body(&sheet).faces);
+    }
+    (!faces.is_empty()).then(|| BodyMesh { faces, ..Default::default() })
+}
 
 pub struct Options {
     pub screenshot: Option<std::path::PathBuf>,
@@ -40,6 +58,8 @@ pub struct DuctileApp {
     pub cplane: CPlane,
     renderer: Option<ViewportRenderer>,
     uploaded: HashMap<ObjectId, u64>,
+    /// Revisions of the curves whose region fills are uploaded (None: no fill).
+    regions: HashMap<ObjectId, (u64, bool)>,
     style_key: u64,
     pub tool: Option<Box<dyn Tool>>,
     tool_from_key: bool,
@@ -152,6 +172,7 @@ impl DuctileApp {
             cplane: CPlane::default(),
             renderer,
             uploaded: HashMap::new(),
+            regions: HashMap::new(),
             style_key: 0,
             tool: None,
             tool_from_key: false,
@@ -301,12 +322,22 @@ impl DuctileApp {
         r.set_images(&images);
         let ids: std::collections::HashSet<ObjectId> = self.doc.objects.iter().map(|o| o.id).collect();
         self.uploaded.retain(|id, _| ids.contains(id));
-        r.retain_objects(|id| ids.contains(&id) || id == PREVIEW_ID);
+        r.retain_objects(|id| ids.contains(&(id & !REGION_BIT)) || id == PREVIEW_ID);
+        self.regions.retain(|id, _| ids.contains(id));
         let mut changed = false;
         for o in &self.doc.objects {
             if self.uploaded.get(&o.id) != Some(&o.revision) {
                 r.upload_object(o.id, &o.mesh);
                 self.uploaded.insert(o.id, o.revision);
+                changed = true;
+            }
+            if o.body.kind == ductile_brep::BodyKind::Wire && self.regions.get(&o.id).map(|x| x.0) != Some(o.revision) {
+                let fill = region_mesh(&o.body);
+                match &fill {
+                    Some(m) => r.upload_object(o.id | REGION_BIT, m),
+                    None => r.remove_object(o.id | REGION_BIT),
+                }
+                self.regions.insert(o.id, (o.revision, fill.is_some()));
                 changed = true;
             }
         }
@@ -345,6 +376,10 @@ impl DuctileApp {
                 st.state = 2;
             } else if self.doc.hover == Some(Pick::Object(o.id)) {
                 st.state = 1;
+            }
+            if self.regions.get(&o.id).is_some_and(|x| x.1) {
+                let fill = ObjectStyle { color: [0.45, 0.62, 0.95, 0.16], hover_color: [0.55, 0.72, 1.0, 1.0], select_color: [0.95, 0.75, 0.35, 1.0], flat: true, ..st.clone() };
+                r.set_style(o.id | REGION_BIT, &fill, &[]);
             }
             let mut faces = vec![0u32; o.mesh.faces.len()];
             for p in &self.doc.selection {
