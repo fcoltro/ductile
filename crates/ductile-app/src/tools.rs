@@ -4314,6 +4314,102 @@ impl Tool for RemoveFilletsTool {
     }
 }
 
+// ---------------------------------------------------------- Offset edge ----
+
+/// New edges offset from the selected edges into the planar faces beside
+/// them: drag or type the distance.
+pub struct OffsetEdgeTool {
+    target: (ObjectId, std::sync::Arc<Body>),
+    edges: Vec<EdgeId>,
+    pub distance: f64,
+    typed: Option<f64>,
+    result: Option<Body>,
+    shown: f64,
+}
+
+impl OffsetEdgeTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let picks = doc.selected_edges();
+        let (o, _) = *picks.first()?;
+        let body = doc.object(o)?.body.clone();
+        if body.kind != ductile_brep::BodyKind::Solid {
+            return None;
+        }
+        let edges: Vec<EdgeId> = picks.iter().filter(|(x, _)| *x == o).map(|(_, e)| *e).collect();
+        let d = 0.05 * body.bbox().diagonal();
+        let mut t = Self { target: (o, body), edges, distance: d, typed: None, result: None, shown: f64::NAN };
+        t.update();
+        Some(t)
+    }
+
+    fn value(&self) -> f64 {
+        self.typed.unwrap_or(self.distance)
+    }
+
+    fn update(&mut self) {
+        if self.shown == self.value() {
+            return;
+        }
+        self.shown = self.value();
+        self.result = ductile_brep::ops::cut::offset_edges(&self.target.1, &self.edges, self.value()).ok();
+    }
+}
+
+impl Tool for OffsetEdgeTool {
+    fn name(&self) -> &'static str {
+        "Offset edge"
+    }
+    fn hint(&self) -> String {
+        format!("Offset edge: drag or type the distance ({:.3}), Enter to imprint", self.value())
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if let Some(q) = p.point.or(p.plane_point) {
+            let b = &self.target.1;
+            let e = b.edge(self.edges[0]);
+            let t = e.curve.closest_param_in(q, e.t0.min(e.t1), e.t0.max(e.t1));
+            if p.clicked {
+                return ToolOutcome::Finished;
+            }
+            if self.typed.is_none() && p.point.is_some() {
+                self.distance = snap_len(e.curve.point(t).distance(q), p.world_per_px).max(1e-6);
+                self.update();
+            }
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        self.result.clone()
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut d = self.value();
+        let changed = ui.add(egui::DragValue::new(&mut d).speed(0.005).range(1e-6..=1e6).prefix("Distance ")).changed();
+        if changed {
+            self.typed = Some(d);
+            self.update();
+        }
+        if self.result.is_none() {
+            ui.label("The offset does not fit inside the faces");
+        }
+        changed
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v.filter(|v| *v > 0.0);
+        self.update();
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        vec![self.target.0]
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        match self.result.take() {
+            Some(b) if b.faces.len() > self.target.1.faces.len() => {
+                doc.replace_body(self.target.0, b);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------- Array ----
 
 /// Copies of the selected objects in a row (along a construction plane axis,
@@ -4759,6 +4855,19 @@ mod tests {
         assert_eq!(doc.select_previous(), 1);
         assert!(doc.selection.contains(&Pick::Object(a)));
         assert_eq!(doc.select_previous(), 0);
+    }
+
+    #[test]
+    fn offset_edge_imprints_beside_the_edge() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 3.0, 2.0)));
+        let b = doc.object(id).unwrap().body.clone();
+        let e = b.edge_ids().find(|e| { let m = b.edge(*e).mid(); m.z > 1.9 && m.y < 0.1 }).unwrap();
+        doc.selection.insert(Pick::Edge(id, e));
+        let mut t = OffsetEdgeTool::new(&doc).unwrap();
+        t.typed_value(Some(0.4));
+        assert!(t.commit(&mut doc));
+        assert_eq!(doc.object(id).unwrap().body.faces.len(), 8);
     }
 
     #[test]

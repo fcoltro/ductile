@@ -59,7 +59,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 }
             });
             ui.menu_button("Solid", |ui| {
-                for c in [Command::Extrude, Command::Revolve, Command::Loft, Command::Sweep, Command::Pipe, Command::Patch, Command::BridgeSurface, Command::MatchSurface, Command::Isoparam, Command::RaiseSurfaceDegree, Command::RebuildFace, Command::Untrim, Command::Unjoin, Command::ReverseSheet, Command::FindBoundaryEdges, Command::Thicken, Command::Cut, Command::Imprint, Command::Draft, Command::Fillet, Command::FullRound, Command::RemoveFillets, Command::Chamfer, Command::Shell, Command::OffsetSolid, Command::Union, Command::Subtract, Command::Intersect] {
+                for c in [Command::Extrude, Command::Revolve, Command::Loft, Command::Sweep, Command::Pipe, Command::Patch, Command::BridgeSurface, Command::MatchSurface, Command::Isoparam, Command::RaiseSurfaceDegree, Command::RebuildFace, Command::Untrim, Command::Unjoin, Command::ReverseSheet, Command::FindBoundaryEdges, Command::Thicken, Command::Cut, Command::Imprint, Command::OffsetEdge, Command::Draft, Command::Fillet, Command::FullRound, Command::RemoveFillets, Command::Chamfer, Command::Shell, Command::OffsetSolid, Command::Union, Command::Subtract, Command::Intersect] {
                     menu_item(app, ui, c);
                 }
             });

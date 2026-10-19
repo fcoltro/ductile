@@ -31,6 +31,7 @@ pub enum Command {
     Instance,
     DeleteRedundant,
     RemoveFillets,
+    OffsetEdge,
     SelectPrevious,
     UnwrapFace,
     MakeUnique,
@@ -174,6 +175,7 @@ impl Command {
         Command::Instance,
         Command::DeleteRedundant,
         Command::RemoveFillets,
+        Command::OffsetEdge,
         Command::SelectPrevious,
         Command::UnwrapFace,
         Command::MakeUnique,
@@ -318,6 +320,7 @@ impl Command {
             Instance => "Instance (linked copy)",
             DeleteRedundant => "Delete redundant topology",
             RemoveFillets => "Remove fillets from solid",
+            OffsetEdge => "Offset edge (imprint)",
             SelectPrevious => "Select previous (inputs of the last operation)",
             UnwrapFace => "Unwrap face (lay flat)",
             MakeUnique => "Make instance unique",
@@ -667,6 +670,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             let n = app.doc.select_previous();
             app.status = if n == 0 { "Nothing earlier to select".into() } else { format!("Selected {n} previous item(s)") };
         }
+        OffsetEdge => match crate::tools::OffsetEdgeTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Offset edge: select edges of a solid".into(),
+        },
         RemoveFillets => match crate::tools::RemoveFilletsTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Remove fillets: select solids".into(),

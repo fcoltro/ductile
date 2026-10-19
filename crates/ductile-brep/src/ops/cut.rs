@@ -205,6 +205,57 @@ pub fn knife(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Body, BoolErr
     Ok(super::heal::simplify_across(&cut, &across))
 }
 
+/// Offset edge: new edges at distance `d` from each of `edges`, inside
+/// the planar faces on either side, imprinted into them. Open offsets run
+/// on (along their end tangents) to the edges of the face.
+pub fn offset_edges(solid: &Body, edges: &[crate::topo::EdgeId], d: f64) -> Result<Body, BoolError> {
+    use crate::curves::{extend_segment, offset_chain, Extension};
+    let size = solid.bbox().diagonal().max(1e-9);
+    let mut body = solid.clone();
+    for &e in edges {
+        let ed = solid.edge(e);
+        for (f, c) in solid.edge_faces(e) {
+            let face = solid.face(f);
+            let ductile_geom::Surface::Plane { frame } = &face.surface else { continue };
+            let n = if face.reversed { -frame.z } else { frame.z };
+            // Run the edge the way the face's loop does: the face is on its left.
+            let seg = Segment { curve: ed.curve.clone(), t0: ed.t0, t1: ed.t1, reversed: c.reversed };
+            let closed = seg.is_closed();
+            let mid = seg.curve.point(0.5 * (ed.t0 + ed.t1));
+            let inward = n.cross(seg.tangent_at(0.5 * (ed.t0 + ed.t1))).normalize_or_zero();
+            let mut off = Vec::new();
+            for s in [d, -d] {
+                let o = offset_chain(std::slice::from_ref(&seg), closed, s, n);
+                if let Some(first) = o.first() {
+                    let q = first.curve.point(0.5 * (first.t0 + first.t1));
+                    if (q - mid).dot(inward) > 0.0 {
+                        off = o;
+                        break;
+                    }
+                }
+            }
+            if off.is_empty() {
+                continue;
+            }
+            if !closed {
+                let last = off.len() - 1;
+                let mut ext = extend_segment(&off[0], false, 2.0 * size, Extension::Linear);
+                ext.extend(off[1..last.max(1)].iter().cloned());
+                if last > 0 {
+                    ext.extend(extend_segment(&off[last], true, 2.0 * size, Extension::Linear));
+                } else {
+                    let tail = extend_segment(ext.last().unwrap(), true, 2.0 * size, Extension::Linear);
+                    ext.pop();
+                    ext.extend(tail);
+                }
+                off = ext;
+            }
+            body = knife(&body, &[Loop3 { segments: off }], n)?;
+        }
+    }
+    Ok(body)
+}
+
 /// Projects each curve chain onto the faces of `solid` along `dir` (both
 /// ways), as a wire body of the curves it traces on them.
 pub fn project_curves(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Body, BoolError> {
@@ -458,6 +509,19 @@ mod tests {
         let line = Loop3 { segments: vec![Segment::line(DVec3::new(1.0, 0.0, 2.0), DVec3::new(1.0, 3.0, 2.0))] };
         let k = knife(&knife(&b, &[line], DVec3::Z).unwrap(), &[again], DVec3::Z).unwrap();
         check(&k, 8);
+    }
+
+    #[test]
+    fn offsets_edges_into_their_faces() {
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let top_front = b.edge_ids().find(|e| { let m = b.edge(*e).mid(); m.z > 1.9 && m.y < 0.1 }).unwrap();
+        let k = offset_edges(&b, &[top_front], 0.5).unwrap();
+        // The top and the front each split in two.
+        assert_eq!(k.faces.len(), 8);
+        assert_eq!(crate::ops::boolean::open_edges(&k), 0);
+        assert!((vol(&k) - 24.0).abs() < 1e-6);
+        let new: Vec<DVec3> = k.edges.iter().map(|e| e.mid()).filter(|m| (m.y - 0.5).abs() < 1e-9 && (m.z - 2.0).abs() < 1e-9 || (m.z - 1.5).abs() < 1e-9 && m.y.abs() < 1e-9).collect();
+        assert_eq!(new.len(), 2, "{new:?}");
     }
 
     #[test]
