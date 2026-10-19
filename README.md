@@ -17,9 +17,9 @@ code from them.
 - Primitives: box, cylinder, cone, sphere, torus (exact analytic surfaces).
 - Exact booleans: union, subtract, intersect and slice (both pieces). Q
   previews the other selected solids subtracted from the first; inside it
-  Q unions, W subtracts, Shift+E intersects, Shift+Q slices and T keeps
-  the tools,
-  including coplanar, tangent and pole cases. Cut (C) splits solids
+  Q unions, W subtracts, Shift+E intersects, Shift+Q slices, Shift+R
+  makes every enclosed region its own solid (split further by selected
+  sheets) and T keeps the tools, including coplanar, tangent and pole cases. Cut (C) splits solids
   along curves swept straight through them: a closed curve cuts out a
   plug, an open one splits the solid in two. Imprint (Shift+I) sweeps curves
   the same way but only splits the faces they cross, so the pieces of a

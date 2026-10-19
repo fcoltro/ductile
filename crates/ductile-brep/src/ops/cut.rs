@@ -256,6 +256,41 @@ pub fn offset_edges(solid: &Body, edges: &[crate::topo::EdgeId], d: f64) -> Resu
     Ok(body)
 }
 
+/// Boolean region mode: every closed region the solids enclose together,
+/// each its own solid (where two overlap: the overlap, and each one's part
+/// outside the other), then split further by any sheets reaching across.
+pub fn regions(solids: &[Body], sheets: &[Body]) -> Result<Vec<Body>, BoolError> {
+    let solid = |b: Body| if b.faces.is_empty() { Vec::new() } else { split_shells(&b) };
+    // An empty overlap or remainder is no region, not a failure.
+    let boolean = |a: &Body, b: &Body, op| match boolean(a, b, op) {
+        Err(BoolError::Empty) => Ok(Body::new(BodyKind::Solid)),
+        r => r,
+    };
+    let mut it = solids.iter();
+    let Some(first) = it.next() else { return Ok(Vec::new()) };
+    let mut pieces = solid(first.clone());
+    for b in it {
+        let mut next = Vec::new();
+        let mut outside = b.clone();
+        for p in &pieces {
+            next.extend(solid(boolean(p, b, BoolOp::Intersection)?));
+            next.extend(solid(boolean(p, b, BoolOp::Difference)?));
+            if !outside.faces.is_empty() {
+                outside = boolean(&outside, p, BoolOp::Difference)?;
+            }
+        }
+        next.extend(solid(outside));
+        pieces = next;
+    }
+    for sh in sheets {
+        pieces = pieces.into_iter().flat_map(|p| match cut_with_sheet(&p, sh) {
+            Ok(v) if !v.is_empty() => v,
+            _ => vec![p],
+        }).collect();
+    }
+    Ok(pieces)
+}
+
 /// Complete edge: runs each straight edge on from its ends, across the
 /// planar face it points into (a face in the same plane, beyond the edge's
 /// end vertex), up to the first edge it meets there, and splits that face
@@ -595,6 +630,20 @@ mod tests {
         let line = Loop3 { segments: vec![Segment::line(DVec3::new(1.0, 0.0, 2.0), DVec3::new(1.0, 3.0, 2.0))] };
         let k = knife(&knife(&b, &[line], DVec3::Z).unwrap(), &[again], DVec3::Z).unwrap();
         check(&k, 8);
+    }
+
+    #[test]
+    fn regions_of_overlapping_boxes() {
+        let a = make_box(&Frame::WORLD, DVec3::new(2.0, 2.0, 2.0));
+        let b = make_box(&Frame { origin: DVec3::new(1.0, 1.0, 0.0), ..Frame::WORLD }, DVec3::new(2.0, 2.0, 2.0));
+        let far = make_box(&Frame { origin: DVec3::new(10.0, 0.0, 0.0), ..Frame::WORLD }, DVec3::ONE);
+        let r = regions(&[a, b, far], &[]).unwrap();
+        let mut v: Vec<f64> = r.iter().map(vol).collect();
+        v.sort_by(f64::total_cmp);
+        assert_eq!(v.len(), 4, "{v:?}");
+        for (got, want) in v.iter().zip([1.0, 2.0, 6.0, 6.0]) {
+            assert!((got - want).abs() < 1e-6, "{v:?}");
+        }
     }
 
     #[test]

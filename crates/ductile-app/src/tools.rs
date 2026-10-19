@@ -3143,6 +3143,9 @@ pub enum BooleanKind {
     Intersection,
     /// Both the difference and the intersection, as separate solids.
     Slice,
+    /// Every closed region the solids (and selected sheets) enclose, each
+    /// its own solid.
+    Region,
 }
 
 /// Boolean (Q): combines the first selected solid with the others, with
@@ -3150,6 +3153,8 @@ pub enum BooleanKind {
 pub struct BooleanTool {
     target: (ObjectId, std::sync::Arc<Body>),
     tools: Vec<(ObjectId, std::sync::Arc<Body>)>,
+    /// Selected sheets, splitting the regions in Region mode.
+    sheets: Vec<std::sync::Arc<Body>>,
     pub kind: BooleanKind,
     pub keep_tools: bool,
     cache: std::cell::RefCell<Option<(BooleanKind, Result<Vec<Body>, String>)>>,
@@ -3164,7 +3169,8 @@ impl BooleanTool {
         if tools.is_empty() {
             return None;
         }
-        Some(Self { target, tools, kind: BooleanKind::Difference, keep_tools: false, cache: Default::default() })
+        let sheets = doc.selected_objects().into_iter().filter_map(|id| doc.object(id)).filter(|o| o.body.kind == ductile_brep::BodyKind::Sheet).map(|o| o.body.clone()).collect();
+        Some(Self { target, tools, sheets, kind: BooleanKind::Difference, keep_tools: false, cache: Default::default() })
     }
 
     fn result(&self) -> Result<Vec<Body>, String> {
@@ -3186,6 +3192,14 @@ impl BooleanTool {
             BooleanKind::Difference => run(BoolOp::Difference).map(|b| vec![b]),
             BooleanKind::Intersection => run(BoolOp::Intersection).map(|b| vec![b]),
             BooleanKind::Slice => run(BoolOp::Difference).and_then(|a| Ok(vec![a, run(BoolOp::Intersection)?])),
+            BooleanKind::Region => {
+                let solids: Vec<Body> = std::iter::once(&self.target).chain(&self.tools).map(|t| (*t.1).clone()).collect();
+                let sheets: Vec<Body> = self.sheets.iter().map(|s| (**s).clone()).collect();
+                match ductile_brep::ops::cut::regions(&solids, &sheets) {
+                    Ok(v) if v.is_empty() => Err("no closed regions".into()),
+                    r => r.map_err(|e| e.to_string()),
+                }
+            }
         };
         *self.cache.borrow_mut() = Some((self.kind, r.clone()));
         r
@@ -3199,13 +3213,14 @@ impl Tool for BooleanTool {
             BooleanKind::Difference => "Subtract",
             BooleanKind::Intersection => "Intersect",
             BooleanKind::Slice => "Slice",
+            BooleanKind::Region => "Region",
         }
     }
     fn hint(&self) -> String {
         match self.result() {
             Err(e) => format!("{} failed: {e}", self.name()),
             Ok(_) => format!(
-                "Boolean ({}): Q union, W subtract, Shift+E intersect, Shift+Q slice, T keep tools ({}); Enter to finish",
+                "Boolean ({}): Q union, W subtract, Shift+E intersect, Shift+Q slice, Shift+R region, T keep tools ({}); Enter to finish",
                 self.name().to_lowercase(),
                 if self.keep_tools { "on" } else { "off" }
             ),
@@ -3225,7 +3240,7 @@ impl Tool for BooleanTool {
     fn panel(&mut self, ui: &mut egui::Ui) -> bool {
         let mut ch = false;
         ui.horizontal(|ui| {
-            for (k, name) in [(BooleanKind::Union, "Union"), (BooleanKind::Difference, "Subtract"), (BooleanKind::Intersection, "Intersect"), (BooleanKind::Slice, "Slice")] {
+            for (k, name) in [(BooleanKind::Union, "Union"), (BooleanKind::Difference, "Subtract"), (BooleanKind::Intersection, "Intersect"), (BooleanKind::Slice, "Slice"), (BooleanKind::Region, "Region")] {
                 ch |= ui.selectable_value(&mut self.kind, k, name).changed();
             }
         });
@@ -3241,6 +3256,7 @@ impl Tool for BooleanTool {
             (egui::Key::W, false) => self.kind = BooleanKind::Difference,
             (egui::Key::E, true) => self.kind = BooleanKind::Intersection,
             (egui::Key::Q, true) => self.kind = BooleanKind::Slice,
+            (egui::Key::R, true) => self.kind = BooleanKind::Region,
             (egui::Key::T, false) => self.keep_tools = !self.keep_tools,
             _ => return false,
         }
@@ -3258,6 +3274,9 @@ impl Tool for BooleanTool {
     }
     fn commit(&mut self, doc: &mut Document) -> bool {
         let Ok(mut r) = self.result() else { return false };
+        if r.is_empty() {
+            return false;
+        }
         let first = r.remove(0);
         doc.replace_body(self.target.0, first);
         doc.selection.clear();
@@ -5418,6 +5437,22 @@ mod tests {
         let vols: Vec<f64> = doc.objects.iter().map(|o| volume(&o.body)).collect();
         assert_eq!(vols.len(), 2);
         assert!((vols[0] - 7.0).abs() < 1e-6 && (vols[1] - 1.0).abs() < 1e-6, "{vols:?}");
+    }
+
+    #[test]
+    fn boolean_region_mode() {
+        let mut doc = Document::default();
+        let a = doc.add_body("A", ductile_brep::primitives::make_box(&Frame::WORLD, DVec3::new(2.0, 2.0, 2.0)));
+        let b = doc.add_body("B", ductile_brep::primitives::make_box(&Frame { origin: DVec3::new(1.0, 0.5, 0.5), ..Frame::WORLD }, DVec3::new(2.0, 1.0, 1.0)));
+        doc.selection.insert(Pick::Object(a));
+        doc.selection.insert(Pick::Object(b));
+        let mut t = BooleanTool::new(&doc).unwrap();
+        assert!(t.command_key(egui::Key::R, egui::Modifiers::SHIFT));
+        assert!(t.commit(&mut doc));
+        let mut vols: Vec<f64> = doc.objects.iter().map(|o| volume(&o.body)).collect();
+        vols.sort_by(f64::total_cmp);
+        assert_eq!(vols.len(), 3, "{vols:?}");
+        assert!((vols[0] - 1.0).abs() < 1e-6 && (vols[1] - 1.0).abs() < 1e-6 && (vols[2] - 7.0).abs() < 1e-6, "{vols:?}");
     }
 
     #[test]
