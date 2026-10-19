@@ -576,6 +576,44 @@ pub fn reverse_segment(s: &Segment) -> Segment {
     Segment { curve, t0: a, t1: b, reversed: s.reversed }
 }
 
+/// Splits the chain at parameter `t` of segment `k`. An open chain gives
+/// two chains; a closed one is opened there, starting and ending at `t`.
+/// Splits at an existing joint just divide (or open) the chain there.
+pub fn split_chain(segs: &[Segment], closed: bool, k: usize, t: f64) -> Vec<Vec<Segment>> {
+    let s = &segs[k];
+    let span = (s.t1 - s.t0).abs().max(1e-300);
+    let f = ((t - s.t0) / (s.t1 - s.t0)).clamp(0.0, 1.0);
+    // Fraction along the traversal.
+    let f = if s.reversed { 1.0 - f } else { f };
+    let eps = 1e-9 / span.min(1.0);
+    let mut before: Vec<Segment> = segs[..k].to_vec();
+    let mut after: Vec<Segment> = segs[k + 1..].to_vec();
+    if f <= eps {
+        after.insert(0, s.clone());
+    } else if f >= 1.0 - eps {
+        before.push(s.clone());
+    } else {
+        before.push(trimmed(s, 0.0, f));
+        after.insert(0, trimmed(s, f, 1.0));
+    }
+    if closed {
+        after.extend(before);
+        return vec![after];
+    }
+    [before, after].into_iter().filter(|c| !c.is_empty()).collect()
+}
+
+/// The segment as a spline with one more knot at parameter `t` of its
+/// curve: same shape, one more control point there.
+pub fn insert_knot_segment(s: &Segment, t: f64) -> Segment {
+    let n = s.curve.to_nurbs(s.t0, s.t1);
+    let (a, b) = n.domain();
+    let u = n.closest_param(s.curve.point(t));
+    let u = u.clamp(a, b);
+    let n = if u - a > 1e-9 * (b - a) && b - u > 1e-9 * (b - a) { n.insert_knot(u, 1) } else { n };
+    Segment { curve: Curve3::Nurbs(n), t0: a, t1: b, reversed: s.reversed }
+}
+
 /// A chain of segments run the other way.
 pub fn reverse_chain(segs: &[Segment]) -> Vec<Segment> {
     segs.iter().rev().map(reverse_segment).collect()
@@ -991,5 +1029,49 @@ mod align_tests {
         let g2 = align_curve_end(&a, true, target, 2);
         let dk2 = (curvature(&g2, t0 + h) - curvature(&g2, t0)) / h;
         assert!(dk.abs() < 0.05 * dk2.abs().max(1e-3), "{dk} vs {dk2}");
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    #[test]
+    fn split_chains_and_insert_knots() {
+        let p = [DVec3::ZERO, DVec3::new(2.0, 0.0, 0.0), DVec3::new(2.0, 2.0, 0.0), DVec3::new(0.0, 2.0, 0.0)];
+        let sq: Vec<Segment> = (0..4).map(|i| Segment::line(p[i], p[(i + 1) % 4])).collect();
+        // Closed: opened at the middle of the second side.
+        let at = sq[1].t0 + 0.5 * (sq[1].t1 - sq[1].t0);
+        let c = split_chain(&sq, true, 1, at);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].len(), 5);
+        let mid = DVec3::new(2.0, 1.0, 0.0);
+        assert!(c[0][0].start().distance(mid) < 1e-12 && c[0][4].end().distance(mid) < 1e-12);
+        for w in c[0].windows(2) {
+            assert!(w[0].end().distance(w[1].start()) < 1e-12);
+        }
+        // Open, run backwards: two chains meeting at the split.
+        let open: Vec<Segment> = reverse_chain(&sq[..2]).into_iter().map(|s| s.flipped()).collect();
+        let k = 0;
+        let s = &open[k];
+        let t = s.t0 + 0.25 * (s.t1 - s.t0);
+        let q = s.curve.point(t);
+        let c = split_chain(&open, false, k, t);
+        assert_eq!(c.len(), 2);
+        assert!(c[0].last().unwrap().end().distance(q) < 1e-12 && c[1][0].start().distance(q) < 1e-12);
+        assert!(c[0][0].start().distance(open[0].start()) < 1e-12);
+        // At a joint: just divided there.
+        let c = split_chain(&sq[..3], false, 1, sq[1].t0);
+        assert_eq!((c[0].len(), c[1].len()), (1, 2));
+        // A knot in an arc: one more control point, same shape.
+        let arc = Segment::new(Curve3::Circle { frame: Frame::new(DVec3::ZERO, DVec3::Z, DVec3::X), radius: 1.5 }, 0.2, 2.0);
+        let k = insert_knot_segment(&arc, 0.7);
+        let (Curve3::Nurbs(n), base) = (&k.curve, arc.curve.to_nurbs(arc.t0, arc.t1)) else { panic!() };
+        assert_eq!(n.ctrl.len(), base.ctrl.len() + 1);
+        for i in 0..=20 {
+            let t = k.t0 + (k.t1 - k.t0) * i as f64 / 20.0;
+            assert!((n.point(t).length() - 1.5).abs() < 1e-9);
+        }
+        assert!(k.start().distance(arc.start()) < 1e-9 && k.end().distance(arc.end()) < 1e-9);
     }
 }

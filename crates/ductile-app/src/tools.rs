@@ -3766,6 +3766,164 @@ impl Tool for TrimTool {
     }
 }
 
+// --------------------------------------------------------- Split curve ----
+
+/// Click points on curves to split them there (open curves fall in two,
+/// closed ones open up), or with `knot` to add a control point there
+/// without changing the shape.
+pub struct SplitCurveTool {
+    pub knot: bool,
+    /// Per curve object, its chains: (segments, closed).
+    curves: Vec<(ObjectId, Vec<(Vec<ductile_brep::profile::Segment>, bool)>)>,
+    hover: Option<(usize, usize, usize, f64, DVec3)>,
+    marks: Vec<DVec3>,
+    changed: Vec<bool>,
+}
+
+impl SplitCurveTool {
+    pub fn new(doc: &Document, knot: bool) -> Option<Self> {
+        let curves: Vec<_> = doc
+            .objects
+            .iter()
+            .filter(|o| o.visible && !doc.is_locked(o.id) && o.body.kind == ductile_brep::BodyKind::Wire)
+            .map(|o| {
+                let chains = ductile_brep::profile::wire_chains(&o.body).into_iter().map(|l| {
+                    let closed = l.is_closed();
+                    (l.segments, closed)
+                });
+                (o.id, chains.collect())
+            })
+            .collect::<Vec<_>>();
+        let n = curves.len();
+        (n > 0).then(|| Self { knot, curves, hover: None, marks: Vec::new(), changed: vec![false; n] })
+    }
+
+    /// The nearest curve point under the pointer: (object, chain, segment, parameter, point).
+    fn pick(&self, ray: &Ray, reach: f64) -> Option<(usize, usize, usize, f64, DVec3)> {
+        let mut best = (f64::INFINITY, None);
+        for (i, (_, chains)) in self.curves.iter().enumerate() {
+            for (c, (segs, _)) in chains.iter().enumerate() {
+                for (k, s) in segs.iter().enumerate() {
+                    let pts = s.curve.tessellate(s.t0, s.t1, 1e-3);
+                    for w in pts.windows(2) {
+                        let d = ray_segment_distance(ray, w[0].1, w[1].1);
+                        if d < best.0 {
+                            // Refine: the curve point nearest the ray near this piece.
+                            let q = w[0].1.lerp(w[1].1, 0.5);
+                            let on_ray = ray.origin + ray.dir * (q - ray.origin).dot(ray.dir).max(0.0);
+                            let (lo, hi) = (w[0].0.min(w[1].0), w[0].0.max(w[1].0));
+                            let t = s.curve.closest_param_in(on_ray, lo, hi);
+                            best = (d, Some((i, c, k, t, s.curve.point(t))));
+                        }
+                    }
+                }
+            }
+        }
+        (best.0 < reach).then_some(best.1).flatten()
+    }
+
+    fn apply(&mut self, (i, c, k, t, p): (usize, usize, usize, f64, DVec3)) {
+        let chains = &mut self.curves[i].1;
+        let (segs, closed) = chains[c].clone();
+        if self.knot {
+            chains[c].0[k] = ductile_brep::curves::insert_knot_segment(&segs[k], t);
+        } else {
+            let parts = ductile_brep::curves::split_chain(&segs, closed, k, t);
+            chains.remove(c);
+            for (j, part) in parts.into_iter().enumerate() {
+                chains.insert(c + j, (part, false));
+            }
+        }
+        self.changed[i] = true;
+        self.marks.push(p);
+    }
+}
+
+impl Tool for SplitCurveTool {
+    fn name(&self) -> &'static str {
+        if self.knot {
+            "Insert knot"
+        } else {
+            "Split curve"
+        }
+    }
+    fn hint(&self) -> String {
+        let what = if self.knot { "add a control point (shape kept)" } else { "split it" };
+        format!("{}: click a curve where to {what} ({} so far), K to switch, Enter to finish", self.name(), self.marks.len())
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        self.hover = self.pick(&p.ray, 8.0 * p.world_per_px);
+        if p.clicked {
+            if let Some(h) = self.hover.take() {
+                self.apply(h);
+            }
+        }
+        ToolOutcome::Continue
+    }
+    fn command_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
+        if key == egui::Key::K && m.is_none() {
+            self.knot = !self.knot;
+            return true;
+        }
+        false
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let segs: Vec<_> = self.curves.iter().flat_map(|(_, cs)| cs.iter().flat_map(|c| c.0.iter().cloned())).collect();
+        (!segs.is_empty()).then(|| ductile_brep::profile::wire_from_segments(&segs))
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        let cross = |out: &mut Vec<LineInstance>, p: DVec3, col: [f32; 4]| {
+            let r = 0.02 * (1.0 + p.length() * 0.01);
+            for d in [DVec3::X, DVec3::Y, DVec3::Z] {
+                out.push(LineInstance::new(p - d * r, p + d * r, col, 3.0));
+            }
+        };
+        for p in &self.marks {
+            cross(out, *p, [1.0, 0.85, 0.2, 1.0]);
+        }
+        if let Some(h) = self.hover {
+            cross(out, h.4, [1.0, 0.3, 0.25, 1.0]);
+        }
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let before = self.knot;
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut self.knot, false, "Split");
+            ui.radio_value(&mut self.knot, true, "Insert knot");
+        });
+        ui.label(format!("{} done", self.marks.len()));
+        before != self.knot
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        self.curves.iter().map(|c| c.0).collect()
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        if self.marks.is_empty() {
+            return false;
+        }
+        for (i, (id, chains)) in self.curves.iter().enumerate() {
+            if !self.changed[i] {
+                continue;
+            }
+            if self.knot {
+                let segs: Vec<_> = chains.iter().flat_map(|c| c.0.iter().cloned()).collect();
+                doc.replace_body(*id, ductile_brep::profile::wire_from_segments(&segs));
+                continue;
+            }
+            // The first piece stays in the object; the rest become new curves.
+            let name = doc.object(*id).map(|o| o.name.clone()).unwrap_or_else(|| "Curve".into());
+            let mut it = chains.iter();
+            if let Some(first) = it.next() {
+                doc.replace_body(*id, ductile_brep::profile::wire_from_segments(&first.0));
+            }
+            for c in it {
+                doc.add_body(&name, ductile_brep::profile::wire_from_segments(&c.0));
+            }
+        }
+        true
+    }
+}
+
 // ---------------------------------------------------------------- Array ----
 
 /// Copies of the selected objects in a row (along a construction plane axis,
@@ -4114,6 +4272,42 @@ mod tests {
         let (area, perimeter) = (12.0 - (4.0 - pi) * 0.25, 10.0 + pi);
         let expect = area + perimeter * 0.25 + pi * 0.0625;
         assert!((a - expect).abs() < 2e-2, "{a} vs {expect}");
+    }
+
+    #[test]
+    fn splits_curves_and_inserts_knots() {
+        set_current_cplane(CPlane::default());
+        let mut doc = Document::default();
+        let mut r = CurveTool::new(CurveKind::Rectangle);
+        click(&mut r, &doc, DVec3::ZERO, true);
+        assert!(click(&mut r, &doc, DVec3::new(4.0, 3.0, 0.0), true));
+        assert!(r.commit(&mut doc));
+        // Open the rectangle on its bottom side, then cut off the top.
+        let mut t = SplitCurveTool::new(&doc, false).unwrap();
+        click(&mut t, &doc, DVec3::new(1.0, 0.0, 0.0), true);
+        click(&mut t, &doc, DVec3::new(2.0, 3.0, 0.0), true);
+        assert!(t.commit(&mut doc));
+        assert_eq!(doc.objects.len(), 2);
+        let lens: Vec<f64> = doc.objects.iter().map(|o| o.body.edges.iter().map(|e| e.curve.to_nurbs(e.t0, e.t1).length()).sum()).collect();
+        assert!((lens.iter().sum::<f64>() - 14.0).abs() < 1e-6, "{lens:?}");
+        assert!(lens.iter().any(|l| (l - 8.0).abs() < 1e-6) && lens.iter().any(|l| (l - 6.0).abs() < 1e-6), "{lens:?}");
+        // A knot in a circle: one more control point, same circle.
+        let mut c = CurveTool::new(CurveKind::Circle);
+        click(&mut c, &doc, DVec3::new(10.0, 0.0, 0.0), true);
+        c.typed_value(Some(1.0));
+        assert!(c.commit(&mut doc));
+        let id = doc.objects.last().unwrap().id;
+        let mut t = SplitCurveTool::new(&doc, true).unwrap();
+        click(&mut t, &doc, DVec3::new(10.0 + 0.6, 0.8, 0.0), true);
+        assert!(t.commit(&mut doc));
+        let b = &doc.object(id).unwrap().body;
+        let ductile_geom::Curve3::Nurbs(n) = &b.edges[0].curve else { panic!("{:?}", b.edges[0].curve) };
+        let base = ductile_geom::Curve3::Circle { frame: ductile_geom::Frame::new(DVec3::new(10.0, 0.0, 0.0), DVec3::Z, DVec3::X), radius: 1.0 }.to_nurbs(0.0, std::f64::consts::TAU);
+        assert_eq!(n.ctrl.len(), base.ctrl.len() + 1);
+        for i in 0..=16 {
+            let p = n.point(b.edges[0].t0 + (b.edges[0].t1 - b.edges[0].t0) * i as f64 / 16.0);
+            assert!((p.distance(DVec3::new(10.0, 0.0, 0.0)) - 1.0).abs() < 1e-9);
+        }
     }
 
     #[test]
