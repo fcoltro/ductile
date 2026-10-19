@@ -17,6 +17,7 @@ mod measure;
 mod document;
 mod icons;
 mod picking;
+mod prefs;
 mod recent;
 mod refimage;
 mod select;

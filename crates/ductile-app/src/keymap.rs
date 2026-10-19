@@ -132,6 +132,7 @@ const DEFAULTS: &[(Command, &str)] = {
         (ToggleXray, "Alt+Z"),
         (ToggleZebra, "Alt+R"),
         (Help, "F1"),
+        (Preferences, "Ctrl+,"),
         (Group, "Ctrl+G"),
         (Isoparam, "Ctrl+R"),
         (Untrim, "Alt+T"),
@@ -274,5 +275,15 @@ mod tests {
         }
         assert_eq!(Chord::parse("Ctrl+Shift+S").unwrap().text(), "Ctrl+Shift+S");
         assert_eq!(Chord::parse("Alt+.").unwrap().key, Key::Period);
+    }
+}
+
+#[cfg(test)]
+mod prefs_key_tests {
+    use super::*;
+    #[test]
+    fn ctrl_comma_opens_preferences() {
+        let k = Keymap::defaults();
+        assert_eq!(k.lookup(Key::Comma, egui::Modifiers { ctrl: true, command: true, ..Default::default() }), Some(Command::Preferences));
     }
 }

@@ -246,6 +246,15 @@ code from them.
   Ctrl+Alt+click the faces parallel to it (coaxial for cylinders). A box
   dragged right to left picks anything it touches, left to right only what
   it holds.
+- Click drill-down and auto-invoke, as in Plasticity: in solid mode the
+  first click selects the solid and a second click the face or edge under
+  the cursor. Selecting faces starts Push face and edges start Fillet;
+  drag to set the value (or press D, or Tab, and type it), click or Enter
+  to finish. A click before any change just selects something else.
+- Preferences (Ctrl+,), kept in `~/.config/ductile/prefs.txt`: auto-invoke
+  and drill-down on or off, mouse navigation presets (Plasticity, Blender,
+  Maya, Rhino), zoom toward the cursor, the autosave interval and opening
+  the last session on startup.
 - Transform gizmo: selecting something shows axis arrows and rotation rings
   at it; drag an arrow to move along that axis or a ring to turn about it
   (type a value while dragging for an exact one). Headless: `--select N`.

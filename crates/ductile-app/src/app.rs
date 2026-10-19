@@ -66,6 +66,13 @@ pub struct DuctileApp {
     pub palette_open: bool,
     pub palette_query: String,
     pub show_help: bool,
+    pub show_prefs: bool,
+    pub prefs: crate::prefs::Prefs,
+    /// Set while the running tool was started by selecting a face or edge
+    /// (auto-invoke): whether a drag is driving it right now. Such a tool
+    /// only follows the pointer while dragged, and a click before any
+    /// change goes back to selecting.
+    auto_tool: Option<bool>,
     screenshot: Option<(std::path::PathBuf, u32)>,
     viewport_rect: egui::Rect,
     last_cursor: Option<DVec2>,
@@ -137,6 +144,9 @@ impl DuctileApp {
             palette_open: false,
             palette_query: String::new(),
             show_help: false,
+            show_prefs: false,
+            prefs: if opts.screenshot.is_some() { crate::prefs::Prefs::default() } else { crate::prefs::Prefs::load() },
+            auto_tool: None,
             screenshot: opts.screenshot.map(|p| (p, 0)),
             viewport_rect: egui::Rect::NOTHING,
             last_cursor: None,
@@ -150,8 +160,12 @@ impl DuctileApp {
             pending_finish: false,
             pending_cancel: false,
         };
+        let last = crate::recent::autosave_path().filter(|p| p.exists());
         if let Some(path) = opts.open {
             commands::open_file(&mut app, &path);
+        } else if let (Some(p), true, false) = (last, app.prefs.load_last_session, opts.demo) {
+            commands::open_file(&mut app, &p);
+            app.doc.path = None;
         } else if opts.demo {
             commands::demo_scene(&mut app.doc);
             let bb = app.doc.bbox();
@@ -178,16 +192,19 @@ impl DuctileApp {
 
     pub fn start_tool(&mut self, t: Box<dyn Tool>) {
         self.tool = Some(t);
+        self.auto_tool = None;
         self.typed = None;
         self.tool_from_key = false;
     }
 
     pub fn cancel_tool(&mut self) {
         self.tool = None;
+        self.auto_tool = None;
         self.typed = None;
     }
 
     fn finish_tool(&mut self) {
+        self.auto_tool = None;
         if let Some(mut t) = self.tool.take() {
             self.doc.checkpoint(t.name());
             if !t.commit(&mut self.doc) {
@@ -384,21 +401,25 @@ impl DuctileApp {
         let (mods, scroll, pointer) = ui.input(|i| (i.modifiers, i.smooth_scroll_delta.y, i.pointer.clone()));
 
         // Navigation.
-        let nav_drag = pointer.button_down(egui::PointerButton::Middle) || pointer.button_down(egui::PointerButton::Secondary);
-        if resp.dragged_by(egui::PointerButton::Middle) || resp.dragged_by(egui::PointerButton::Secondary) {
+        let nav = self.prefs.nav;
+        let held = |b| pointer.button_down(b);
+        let nav_now = nav.drag(held(egui::PointerButton::Primary), held(egui::PointerButton::Middle), held(egui::PointerButton::Secondary), mods);
+        let nav_drag = nav_now.is_some();
+        if resp.dragged() {
             let d = resp.drag_delta();
-            if mods.shift {
-                self.camera.pan(d.x as f64, d.y as f64, size.y);
-            } else if mods.ctrl {
-                self.camera.zoom((1.0 + d.y as f64 * 0.01).max(0.1), None);
-            } else {
-                self.camera.orbit(d.x as f64, d.y as f64);
+            match nav_now {
+                Some(crate::prefs::Nav::Pan) => self.camera.pan(d.x as f64, d.y as f64, size.y),
+                Some(crate::prefs::Nav::Zoom) => self.camera.zoom((1.0 + d.y as f64 * 0.01).max(0.1), None),
+                Some(crate::prefs::Nav::Orbit) => self.camera.orbit(d.x as f64, d.y as f64),
+                None => {}
             }
         }
+        // A left drag the camera takes is not a click, box or tool drag.
+        let left_nav = nav.takes_left(mods) && held(egui::PointerButton::Primary);
         let hover_pos = resp.hover_pos();
         let cursor = hover_pos.map(|p| DVec2::new((p.x - rect.min.x) as f64, (p.y - rect.min.y) as f64));
         if resp.hovered() && scroll.abs() > 0.0 {
-            let toward = cursor.and_then(|c| {
+            let toward = cursor.filter(|_| self.prefs.zoom_to_cursor).and_then(|c| {
                 let ndc = DVec2::new(c.x / size.x * 2.0 - 1.0, 1.0 - c.y / size.y * 2.0);
                 let ray = self.camera.ray(ndc);
                 picking::pick_face(&self.doc, &ray).map(|h| h.point).or_else(|| ray.hit_plane(DVec3::ZERO, DVec3::Z))
@@ -420,8 +441,31 @@ impl DuctileApp {
             let ray = self.camera.ray(ndc);
             let moved = self.last_cursor.map(|l| l.distance(c) > 0.5).unwrap_or(true);
             self.last_cursor = Some(c);
-            let clicked = resp.clicked_by(egui::PointerButton::Primary);
-            if self.tool.is_some() {
+            let clicked = resp.clicked_by(egui::PointerButton::Primary) && !left_nav;
+            // An auto-invoked tool follows the pointer only while dragged.
+            let passive = match self.auto_tool {
+                Some(_) if self.tool.is_some() => {
+                    let dragging = resp.dragged_by(egui::PointerButton::Primary) && !left_nav;
+                    self.auto_tool = Some(dragging);
+                    !dragging
+                }
+                _ => false,
+            };
+            if passive {
+                if moved && !nav_drag {
+                    self.doc.hover = self.drill_pick(c, size);
+                }
+                if clicked {
+                    let touched = self.tool.as_ref().is_some_and(|t| t.preview(&self.doc).is_some());
+                    if touched {
+                        self.finish_tool();
+                    } else {
+                        self.cancel_tool();
+                        self.click_select(c, size, mods);
+                        self.auto_invoke();
+                    }
+                }
+            } else if self.tool.is_some() {
                 let wants = self.tool.as_ref().unwrap().wants_selection();
                 if let Some(mode) = wants {
                     // Tools that pick entities first behave like selection.
@@ -473,10 +517,11 @@ impl DuctileApp {
                     None
                 };
                 if moved && !nav_drag && self.box_select.is_none() && self.gizmo_hover.is_none() {
-                    self.doc.hover = picking::pick(&self.doc, &self.camera, c, size, self.doc.mode);
+                    self.doc.hover = self.drill_pick(c, size);
                 }
                 if clicked && self.gizmo_hover.is_none() {
                     self.click_select(c, size, mods);
+                    self.auto_invoke();
                 }
                 if resp.double_clicked() && self.gizmo_hover.is_none() {
                     self.chain_select(c, size);
@@ -487,7 +532,7 @@ impl DuctileApp {
                     self.start_tool(Box::new(t));
                     self.gizmo_drag = true;
                     self.gizmo_hover = None;
-                } else if resp.drag_started_by(egui::PointerButton::Primary) {
+                } else if resp.drag_started_by(egui::PointerButton::Primary) && !left_nav {
                     if let Some(p) = resp.interact_pointer_pos() {
                         self.box_select = Some(BoxSelect { start: p, current: p });
                     }
@@ -675,9 +720,54 @@ impl DuctileApp {
         }
     }
 
+    /// What a click in the viewport picks with no tool running: in object
+    /// mode, a second click on the solid already selected (drill-down)
+    /// takes the edge or face under the cursor.
+    fn drill_pick(&self, c: DVec2, size: DVec2) -> Option<Pick> {
+        let base = picking::pick(&self.doc, &self.camera, c, size, self.doc.mode);
+        if self.doc.mode != SelectMode::Object || !self.prefs.drill_down {
+            return base;
+        }
+        let Some(Pick::Object(o)) = base else { return base };
+        let solid = self.doc.object(o).is_some_and(|x| x.body.kind != ductile_brep::BodyKind::Wire && x.body.mesh.is_none());
+        let focused = !self.doc.selection.is_empty() && self.doc.selection.iter().all(|p| p.object() == o);
+        if !solid || !focused {
+            return base;
+        }
+        let mine = |p: Option<Pick>| p.filter(|p| p.object() == o);
+        mine(picking::pick(&self.doc, &self.camera, c, size, SelectMode::Edge)).or_else(|| mine(picking::pick(&self.doc, &self.camera, c, size, SelectMode::Face))).or(base)
+    }
+
+    /// Auto-invoke (Preferences): selected faces of one solid start Push
+    /// face, selected edges Fillet. The tool waits for a drag or a typed
+    /// value; a click before that goes back to selecting.
+    fn auto_invoke(&mut self) {
+        if !self.prefs.auto_invoke || self.tool.is_some() || self.doc.selection.is_empty() {
+            return;
+        }
+        let o = self.doc.selection.iter().next().unwrap().object();
+        if !self.doc.object(o).is_some_and(|x| x.body.kind == ductile_brep::BodyKind::Solid) || self.doc.selection.iter().any(|p| p.object() != o) {
+            return;
+        }
+        let cmd = if self.doc.selection.iter().all(|p| matches!(p, Pick::Face(..))) {
+            commands::Command::Extrude
+        } else if self.doc.selection.iter().all(|p| matches!(p, Pick::Edge(..))) {
+            commands::Command::Fillet
+        } else {
+            return;
+        };
+        let status = self.status.clone();
+        commands::run(self, cmd);
+        if self.tool.is_some() {
+            self.auto_tool = Some(false);
+        } else {
+            self.status = status;
+        }
+    }
+
     fn click_select(&mut self, c: DVec2, size: DVec2, mods: egui::Modifiers) {
         let mode = self.tool.as_ref().and_then(|t| t.wants_selection()).unwrap_or(self.doc.mode);
-        let hit = picking::pick(&self.doc, &self.camera, c, size, mode);
+        let hit = if self.tool.is_none() && !mods.alt { self.drill_pick(c, size) } else { picking::pick(&self.doc, &self.camera, c, size, mode) };
         if mods.alt {
             // Alt: the edge's loop or the face's tangent run; with Ctrl the
             // edge's ring or the faces parallel to it.
@@ -866,6 +956,9 @@ impl DuctileApp {
         }
         let events = ctx.input(|i| i.events.clone());
         for ev in events {
+            if std::env::var_os("DUCTILE_DEBUG_KEYS").is_some() {
+                eprintln!("{ev:?}");
+            }
             if let egui::Event::Text(text) = &ev {
                 if let (Some(t), true) = (self.typed.as_mut(), self.tool.is_some()) {
                     let mut chars = text.chars();
@@ -941,6 +1034,22 @@ impl DuctileApp {
                     }
                     self.typed = Some(String::new());
                     continue;
+                }
+                if self.auto_tool.is_some() && self.typed.is_none() {
+                    // An auto-invoked tool leaves the digit keys to selection
+                    // modes; D opens its value for typing.
+                    if key == egui::Key::D && !modifiers.any() {
+                        self.auto_tool = None;
+                        self.typed = Some(String::new());
+                        continue;
+                    }
+                    if digit.is_some() {
+                        self.cancel_tool();
+                        if let Some(cmd) = commands::shortcut(key, modifiers) {
+                            self.pending.push(cmd);
+                        }
+                        continue;
+                    }
                 }
                 if let (Some(d), false) = (digit, modifiers.ctrl || modifiers.alt) {
                     self.typed = Some(d.to_string());
@@ -1096,7 +1205,7 @@ impl eframe::App for DuctileApp {
         self.handle_keys(&ctx);
         // Every couple of minutes with unsaved changes, keep a copy to
         // recover from (File > Recover autosave).
-        if self.doc.dirty && self.tool.is_none() && self.last_autosave.elapsed() > std::time::Duration::from_secs(120) {
+        if self.doc.dirty && self.tool.is_none() && self.prefs.autosave_minutes > 0 && self.last_autosave.elapsed() > std::time::Duration::from_secs(60 * self.prefs.autosave_minutes as u64) {
             self.last_autosave = std::time::Instant::now();
             if let Some(p) = crate::recent::autosave_path() {
                 if let Err(e) = commands::write_native(&self.doc, &p) {
@@ -1121,6 +1230,7 @@ impl eframe::App for DuctileApp {
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui, frame));
         crate::ui::palette(self, &ctx);
         crate::ui::help_window(self, &ctx);
+        crate::ui::prefs_window(self, &ctx);
         let title = format!(
             "Ductile — {}{}",
             self.doc.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or("Untitled".into()),

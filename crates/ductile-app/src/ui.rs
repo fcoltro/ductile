@@ -44,7 +44,7 @@ pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
                 }
             });
             ui.menu_button("Edit", |ui| {
-                for c in [Command::Undo, Command::Redo, Command::Duplicate, Command::Instance, Command::MakeUnique, Command::DeleteRedundant, Command::CompleteEdge, Command::UnwrapFace, Command::Delete, Command::SelectAll, Command::DeselectAll, Command::SelectPrevious, Command::Hide, Command::Isolate, Command::UnhideAll] {
+                for c in [Command::Undo, Command::Redo, Command::Duplicate, Command::Instance, Command::MakeUnique, Command::DeleteRedundant, Command::CompleteEdge, Command::UnwrapFace, Command::Delete, Command::SelectAll, Command::DeselectAll, Command::SelectPrevious, Command::Hide, Command::Isolate, Command::UnhideAll, Command::Preferences] {
                     menu_item(app, ui, c);
                 }
             });
@@ -625,6 +625,39 @@ pub fn palette(app: &mut DuctileApp, ctx: &egui::Context) {
 fn fuzzy(hay: &str, needle: &str) -> bool {
     let mut it = hay.chars();
     needle.chars().all(|c| it.any(|h| h == c))
+}
+
+pub fn prefs_window(app: &mut DuctileApp, ctx: &egui::Context) {
+    if !app.show_prefs {
+        return;
+    }
+    let mut open = true;
+    let before = app.prefs.clone();
+    let p = &mut app.prefs;
+    egui::Window::new("Preferences").open(&mut open).default_width(360.0).show(ctx, |ui| {
+        ui.label(RichText::new("Selection").strong());
+        ui.checkbox(&mut p.auto_invoke, "Selecting a face starts Push face, an edge Fillet");
+        ui.checkbox(&mut p.drill_down, "Second click on a selected solid picks its face or edge");
+        ui.add_space(6.0);
+        ui.label(RichText::new("Navigation").strong());
+        egui::ComboBox::from_label("Mouse preset").selected_text(p.nav.label()).show_ui(ui, |ui| {
+            for n in crate::prefs::NavPreset::ALL {
+                ui.selectable_value(&mut p.nav, n, n.label());
+            }
+        });
+        ui.checkbox(&mut p.zoom_to_cursor, "Zoom toward the cursor");
+        ui.add_space(6.0);
+        ui.label(RichText::new("Files").strong());
+        ui.horizontal(|ui| {
+            ui.label("Autosave every");
+            ui.add(egui::DragValue::new(&mut p.autosave_minutes).range(0..=120).suffix(" min"));
+        });
+        ui.checkbox(&mut p.load_last_session, "Open the last session on startup");
+    });
+    app.show_prefs = open;
+    if app.prefs != before {
+        app.prefs.save();
+    }
 }
 
 pub fn help_window(app: &mut DuctileApp, ctx: &egui::Context) {
