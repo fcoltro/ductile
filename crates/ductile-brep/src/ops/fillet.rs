@@ -49,6 +49,11 @@ thread_local! {
     /// rolled rather than given exact tools.
     static ROLL_EXTRUSIONS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static CURVED_CAPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set while retrying with tangent chains rolled, after their exact
+    /// tools (`chain_tools`) were too much for the boolean; `CHAIN_TOOLS`
+    /// notes that a try used them.
+    static ROLL_CHAINS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static CHAIN_TOOLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// `FilletError::Unsupported`, noting where with `DUCTILE_DEBUG_FILLET`.
@@ -259,6 +264,47 @@ fn mixed_corners_first(body: &Body, edges: &[EdgeId], blend: Blend) -> Option<Re
     Some(blend_selected(&b, &grown, blend))
 }
 
+/// Exact tools for a tangent chain of lines and arcs between planes and
+/// cylinders (the rim of an extruded profile): each edge's own tool, the
+/// straight ones cut square where they run on into the next edge, so the
+/// tools meet face to face. Rounds become exact cylinders and tori (or a
+/// sphere, where the radius equals an arc's) instead of rolled surfaces.
+/// None when an edge has no exact tool.
+fn chain_tools(body: &Body, chain: &[super::chain::Link], closed: bool, blend: Blend, size: f64) -> Option<Vec<(EdgeId, EdgeInfo, Body)>> {
+    if matches!(blend, Blend::Smooth(_)) || ROLL_EXTRUSIONS.get() || ROLL_CHAINS.get() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (k, l) in chain.iter().enumerate() {
+        let ed = body.edge(l.edge);
+        let info = edge_info(body, l.edge).ok()?;
+        let fits = match (&ed.curve, &body.face(info.f1).surface, &body.face(info.f2).surface) {
+            (Curve3::Line { .. }, Surface::Plane { .. }, Surface::Plane { .. }) => true,
+            (Curve3::Circle { .. }, Surface::Plane { .. }, Surface::Cylinder { .. }) | (Curve3::Circle { .. }, Surface::Cylinder { .. }, Surface::Plane { .. }) => true,
+            _ => false,
+        };
+        if !fits || out.first().is_some_and(|(_, i, _): &(EdgeId, EdgeInfo, Body)| i.convex != info.convex) {
+            return None;
+        }
+        let mut tool = edge_tool(body, l.edge, &info, blend, size).ok()?;
+        if ed.curve.is_linear() {
+            // Ends shared with the chain's neighbours, in chain order.
+            let (first, last) = (k == 0 && !closed, k + 1 == chain.len() && !closed);
+            let (start, end) = if l.fwd { (ed.start(), ed.end()) } else { (ed.end(), ed.start()) };
+            let along = (end - start).normalize();
+            if !first {
+                tool = boolean(&tool, &half_space(start, -along, size), BoolOp::Intersection).ok()?;
+            }
+            if !last {
+                tool = boolean(&tool, &half_space(end, along, size), BoolOp::Intersection).ok()?;
+            }
+        }
+        out.push((l.edge, info, tool));
+    }
+    CHAIN_TOOLS.set(true);
+    Some(out)
+}
+
 fn blend_selected(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, FilletError> {
     match blend_together(body, edges, blend) {
         Err(err @ (FilletError::Boolean(_) | FilletError::Unsupported)) if edges.len() > 1 => {
@@ -314,7 +360,18 @@ fn blend_in_turn(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, Fi
 }
 
 fn blend_together(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, FilletError> {
-    match blend_tooled(body, edges, blend) {
+    CHAIN_TOOLS.set(false);
+    let first = blend_tooled(body, edges, blend);
+    let first = match first {
+        Err(FilletError::Boolean(_)) if CHAIN_TOOLS.get() && !ROLL_CHAINS.get() => {
+            ROLL_CHAINS.set(true);
+            let r = blend_tooled(body, edges, blend);
+            ROLL_CHAINS.set(false);
+            r
+        }
+        r => r,
+    };
+    match first {
         // A lone edge whose tool the boolean cannot take (its blend runs
         // tangentially into an earlier one) is rolled instead, ending in
         // the face that caps it.
@@ -358,6 +415,16 @@ fn blend_tooled(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, Fil
     let mut smooth_lines: Vec<EdgeId> = Vec::new();
     for (chain, closed) in super::chain::tangent_chains(body, &set.iter().copied().collect::<Vec<_>>()) {
         if chain.len() > 1 {
+            if let Some(ts) = chain_tools(body, &chain, closed, blend, size) {
+                if std::env::var_os("DUCTILE_DEBUG_FILLET").is_some() {
+                    eprintln!("exact tools along chain {:?}", chain.iter().map(|l| l.edge.0).collect::<Vec<_>>());
+                }
+                for (e, info, t) in ts {
+                    tools.push((e, t));
+                    infos.insert(e, info);
+                }
+                continue;
+            }
             base = super::chain::roll_chain(&base, &chain, closed, blend)?;
             rolled = true;
             continue;
@@ -933,8 +1000,12 @@ fn circle_tool(b: &Body, center: DVec3, pf: FaceId, cf: FaceId, info: &EdgeInfo,
     let d = match blend {
         Blend::Fillet(r) | Blend::Smooth(r) | Blend::Chamfer(r) => r,
     };
-    let rho_p = big_r + zs * sigma * d;
-    if rho_p <= 1e-9 {
+    let mut rho_p = big_r + zs * sigma * d;
+    // A radius equal to the arc's closes the torus into a sphere about
+    // the axis (a rim filleted at the corner radius).
+    if rho_p.abs() <= 1e-9 * big_r.max(1.0) {
+        rho_p = 0.0;
+    } else if rho_p < 0.0 {
         return Err(FilletError::TooLarge);
     }
     let corner = at(big_r, 0.0);
@@ -1081,6 +1152,26 @@ mod tests {
         assert_eq!(open_edges(&f), 0);
         // Two foot fillets add material, the upright one takes a little.
         assert!(vol(&f) > 20.0 + cut && vol(&f) < 20.0 + 4.0 * cut, "{}", vol(&f));
+    }
+
+    #[test]
+    fn fillets_a_rim_at_its_corner_radius_into_spheres() {
+        // Uprights rounded first, then the top rim at the same radius: each
+        // corner closes into an exact sphere.
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let up: Vec<EdgeId> = b.edge_ids().filter(|e| (b.edge(*e).start() - b.edge(*e).end()).z.abs() > 1.0).collect();
+        let r = 0.6;
+        let b = blend_edges(&b, &up, Blend::Fillet(r)).unwrap();
+        let rim: Vec<EdgeId> = b.edge_ids().filter(|e| b.edge(*e).start().z > 1.99 && b.edge(*e).end().z > 1.99).collect();
+        let f = blend_edges(&b, &rim, Blend::Fillet(r)).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        assert_eq!(f.face_ids().filter(|x| matches!(f.face(*x).surface, Surface::Sphere { .. })).count(), 4);
+        // The straight runs lose r²(1 - π/4) each; every corner loses the
+        // quarter cylinder minus the sphere's octant.
+        let straight = 2.0 * (4.0 - 2.0 * r) + 2.0 * (3.0 - 2.0 * r);
+        let corner = PI * r * r * r / 4.0 - PI * r * r * r / 6.0;
+        let want = vol(&b) - straight * r * r * (1.0 - PI / 4.0) - 4.0 * corner;
+        assert!((vol(&f) - want).abs() < 2e-3, "{} vs {want}", vol(&f));
     }
 
     #[test]
