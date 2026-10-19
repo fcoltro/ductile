@@ -54,6 +54,9 @@ thread_local! {
     /// notes that a try used them.
     static ROLL_CHAINS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static CHAIN_TOOLS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set while retrying with convex straight tools run on past the
+    /// planar faces their edges end in rather than stopped there.
+    static UNCAPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// `FilletError::Unsupported`, noting where with `DUCTILE_DEBUG_FILLET`.
@@ -175,6 +178,16 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     CURVED_CAPS.set(false);
     if capped.is_ok() {
         return capped;
+    }
+    // A cut stopped at a planar end face lies flat on that face, tangent
+    // to any round beside it, which the boolean may not take. Beyond a
+    // convex end there is no material near the edge, so the cut can run on
+    // instead.
+    UNCAPPED.set(true);
+    let uncapped = blend_selected(body, edges, blend);
+    UNCAPPED.set(false);
+    if uncapped.is_ok() {
+        return uncapped;
     }
     // An edge running on tangentially into others (into an earlier
     // fillet's arc, say) may have no sensible end on its own: blend the
@@ -540,7 +553,7 @@ fn line_ends(b: &Body, e: EdgeId, info: &EdgeInfo, caps: &[(DVec3, DVec3)], r: f
         let others: Vec<FaceId> = vertex_faces(b, v).into_iter().filter(|f| *f != info.f1 && *f != info.f2).collect();
         if let [f] = others[..] {
             let n = outward(b, f, p);
-            if b.face(f).surface.is_planar() && n.dot(along) > 1e-6 {
+            if b.face(f).surface.is_planar() && n.dot(along) > 1e-6 && !(info.convex && UNCAPPED.get()) {
                 ends.push((p, n));
                 continue;
             }
@@ -751,7 +764,7 @@ fn cap_line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, mut tool: Body, size: f64
             if info.convex && b.face(others[0]).surface.is_planar() && n.dot(along) < -1e-6 {
                 // Rising from a floor: keep the cut above it.
                 tool = boolean(&tool, &half_space(p, -n, size), BoolOp::Intersection)?;
-            } else if n.dot(along) > 1e-6 {
+            } else if n.dot(along) > 1e-6 && !(info.convex && UNCAPPED.get() && b.face(others[0]).surface.is_planar()) {
                 tool = match &b.face(others[0]).surface {
                     // A curved end face (a hole the edge runs into) bends
                     // away from its tangent plane: stop at the face itself.
