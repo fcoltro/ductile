@@ -262,6 +262,11 @@ code from them.
   selection modes, the view toggles, a drawing tool strip, a bottom
   command bar with a More menu (inapplicable commands greyed, never
   hidden), the floating command dialog and a strip of the command's keys.
+- Selection modes combine: 1 to 4 switch to vertices, edges, faces or
+  solids, 5 turns them all on, and Shift+click on a mode button (or the
+  unbound Toggle … mode commands) adds or removes one. With several on, a
+  click takes the most specific thing under the cursor (a vertex, then an
+  edge, a face, the solid) and a box takes them all.
 - Click drill-down and auto-invoke, as in Plasticity: in solid mode the
   first click selects the solid and a second click the face or edge under
   the cursor. Selecting faces starts Push face and edges start Fillet;

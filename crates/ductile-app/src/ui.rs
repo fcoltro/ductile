@@ -118,6 +118,15 @@ fn glyph_button(ui: &mut egui::Ui, size: f32, on: bool, tip: &str, paint: impl F
     resp.on_hover_text(tip)
 }
 
+fn toggle_command(m: SelectMode) -> Command {
+    match m {
+        SelectMode::Vertex => Command::ToggleVertexMode,
+        SelectMode::Edge => Command::ToggleEdgeMode,
+        SelectMode::Face => Command::ToggleFaceMode,
+        SelectMode::Object => Command::ToggleObjectMode,
+    }
+}
+
 fn tip(c: Command) -> String {
     match c.shortcut_text().as_str() {
         "" => c.label().to_string(),
@@ -291,12 +300,12 @@ pub fn viewport_overlays(app: &mut DuctileApp, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 for (m, cmd) in [(SelectMode::Vertex, Command::ModeVertex), (SelectMode::Edge, Command::ModeEdge), (SelectMode::Face, Command::ModeFace), (SelectMode::Object, Command::ModeObject)] {
-                    if glyph_button(ui, 26.0, app.doc.mode == m, &tip(cmd), |p, r, c| {
+                    let r = glyph_button(ui, 26.0, app.doc.mode_on(m), &format!("{}\nShift+click to toggle", tip(cmd)), |p, r, c| {
                         crate::icons::paint(cmd, p, r, c);
-                    })
-                    .clicked()
-                    {
-                        app.pending.push(cmd);
+                    });
+                    if r.clicked() {
+                        // Shift adds or removes the mode instead of switching to it.
+                        app.pending.push(if ui.input(|i| i.modifiers.shift) { toggle_command(m) } else { cmd });
                     }
                 }
             });

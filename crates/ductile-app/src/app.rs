@@ -628,7 +628,7 @@ impl DuctileApp {
                         let b = DVec2::new((bs.current.x - rect.min.x) as f64, (bs.current.y - rect.min.y) as f64);
                         // Right to left: anything the box touches; left to right: only what it holds.
                         let crossing = b.x < a.x;
-                        let picks = picking::pick_box(&self.doc, &self.camera, a, b, size, self.doc.mode, crossing);
+                        let picks = picking::pick_box_in(&self.doc, &self.camera, a, b, size, &self.doc.modes(), crossing);
                         if !mods.shift && !mods.ctrl {
                             self.doc.selection.clear();
                         }
@@ -814,8 +814,8 @@ impl DuctileApp {
     /// mode, a second click on the solid already selected (drill-down)
     /// takes the edge or face under the cursor.
     fn drill_pick(&self, c: DVec2, size: DVec2) -> Option<Pick> {
-        let base = picking::pick(&self.doc, &self.camera, c, size, self.doc.mode);
-        if self.doc.mode != SelectMode::Object || !self.prefs.drill_down {
+        let base = picking::pick_in(&self.doc, &self.camera, c, size, &self.doc.modes());
+        if !self.doc.mode_on(SelectMode::Object) || !self.prefs.drill_down {
             return base;
         }
         let Some(Pick::Object(o)) = base else { return base };
@@ -856,8 +856,8 @@ impl DuctileApp {
     }
 
     fn click_select(&mut self, c: DVec2, size: DVec2, mods: egui::Modifiers) {
-        let mode = self.tool.as_ref().and_then(|t| t.wants_selection()).unwrap_or(self.doc.mode);
-        let hit = if self.tool.is_none() && !mods.alt { self.drill_pick(c, size) } else { picking::pick(&self.doc, &self.camera, c, size, mode) };
+        let modes = self.tool.as_ref().and_then(|t| t.wants_selection()).map_or_else(|| self.doc.modes(), |m| vec![m]);
+        let hit = if self.tool.is_none() && !mods.alt { self.drill_pick(c, size) } else { picking::pick_in(&self.doc, &self.camera, c, size, &modes) };
         if mods.alt {
             // Alt: the edge's loop or the face's tangent run; with Ctrl the
             // edge's ring or the faces parallel to it.
@@ -916,8 +916,8 @@ impl DuctileApp {
     /// Double-click on an edge: adds the edges running on tangentially from
     /// it (a filleted outline, a spline profile's edges) to the selection.
     fn chain_select(&mut self, c: DVec2, size: DVec2) {
-        let mode = self.tool.as_ref().and_then(|t| t.wants_selection()).unwrap_or(self.doc.mode);
-        if let Some(Pick::Edge(o, e)) = picking::pick(&self.doc, &self.camera, c, size, mode) {
+        let modes = self.tool.as_ref().and_then(|t| t.wants_selection()).map_or_else(|| self.doc.modes(), |m| vec![m]);
+        if let Some(Pick::Edge(o, e)) = picking::pick_in(&self.doc, &self.camera, c, size, &modes) {
             let Some(ob) = self.doc.object(o) else { return };
             for x in ductile_brep::ops::chain::grow_tangent_chain(&ob.body, e, &|_| true) {
                 self.doc.selection.insert(Pick::Edge(o, x));
@@ -1223,7 +1223,7 @@ pub fn is_seam(body: &ductile_brep::Body, e: ductile_brep::EdgeId) -> bool {
 }
 
 fn vertex_overlay(doc: &Document, out: &mut Vec<LineInstance>) {
-    let show_all = doc.mode == SelectMode::Vertex;
+    let show_all = doc.mode_on(SelectMode::Vertex);
     for o in doc.objects.iter().filter(|o| o.visible) {
         for (vi, v) in o.body.vertices.iter().enumerate() {
             let p = Pick::Vertex(o.id, ductile_brep::VertexId(vi as u32));
@@ -1430,8 +1430,9 @@ impl DuctileApp {
     }
 
     pub fn set_mode(&mut self, m: SelectMode) {
-        if self.doc.mode != m {
+        if self.doc.mode != m || self.doc.also != 0 {
             self.doc.mode = m;
+            self.doc.also = 0;
             self.doc.selection.clear();
             self.doc.hover = None;
         }

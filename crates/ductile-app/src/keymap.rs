@@ -103,6 +103,7 @@ const DEFAULTS: &[(Command, &str)] = {
         (ModeEdge, "2"),
         (ModeFace, "3"),
         (ModeObject, "4"),
+        (ModeAll, "5"),
         (Curve, "Shift+A"),
         (Extrude, "E"),
         (Revolve, "V"),

@@ -80,6 +80,25 @@ pub enum SelectMode {
     Object,
 }
 
+impl SelectMode {
+    /// Every mode, in the order a click tries them when several are on.
+    pub const ALL: [SelectMode; 4] = [SelectMode::Vertex, SelectMode::Edge, SelectMode::Face, SelectMode::Object];
+
+    fn bit(self) -> u8 {
+        1 << self as u8
+    }
+
+    /// The mode that picks `p`.
+    pub fn of(p: &Pick) -> SelectMode {
+        match p {
+            Pick::Object(_) => SelectMode::Object,
+            Pick::Face(..) => SelectMode::Face,
+            Pick::Edge(..) => SelectMode::Edge,
+            Pick::Vertex(..) | Pick::Control(..) | Pick::SurfaceControl(..) => SelectMode::Vertex,
+        }
+    }
+}
+
 /// A dimension placed in the scene: the distance from `a` to `b`, its
 /// line drawn `offset` away from them.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,6 +127,8 @@ pub struct Document {
     pub selection: BTreeSet<Pick>,
     pub hover: Option<Pick>,
     pub mode: SelectMode,
+    /// Modes toggled on alongside `mode`, as bits of `SelectMode`.
+    pub also: u8,
     next_id: ObjectId,
     revision: u64,
     undo: Vec<Snapshot>,
@@ -133,6 +154,7 @@ impl Default for Document {
             selection: BTreeSet::new(),
             hover: None,
             mode: SelectMode::Object,
+            also: 0,
             next_id: 1,
             revision: 1,
             undo: vec![],
@@ -173,6 +195,48 @@ impl Document {
     /// (Plasticity's Ctrl+1..4): solids give all their vertices, edges or
     /// faces; faces give their edges and corners; edges their ends and the
     /// faces on either side; vertices the edges and faces that touch them.
+    /// The selection modes that are on, most specific first.
+    pub fn modes(&self) -> Vec<SelectMode> {
+        SelectMode::ALL.into_iter().filter(|m| self.mode_on(*m)).collect()
+    }
+
+    pub fn mode_on(&self, m: SelectMode) -> bool {
+        m == self.mode || self.also & m.bit() != 0
+    }
+
+    /// Turns one mode on or off, keeping at least one on. Picks of a mode
+    /// turned off leave the selection.
+    pub fn toggle_mode(&mut self, m: SelectMode) {
+        if !self.mode_on(m) {
+            self.also |= m.bit();
+            return;
+        }
+        if m == self.mode {
+            let Some(next) = SelectMode::ALL.into_iter().rev().find(|x| *x != m && self.also & x.bit() != 0) else { return };
+            self.mode = next;
+            self.also &= !next.bit();
+        } else {
+            self.also &= !m.bit();
+        }
+        self.selection.retain(|p| SelectMode::of(p) != m);
+        self.hover = None;
+    }
+
+    /// Every mode on at once.
+    pub fn all_modes(&mut self) {
+        self.mode = SelectMode::Object;
+        self.also = SelectMode::ALL.iter().fold(0, |b, m| b | m.bit()) & !SelectMode::Object.bit();
+    }
+
+    /// The kind of thing selected when it is all one kind, else the mode.
+    pub fn selection_mode(&self) -> SelectMode {
+        let mut kinds = self.selection.iter().map(SelectMode::of);
+        match kinds.next() {
+            Some(k) if kinds.all(|x| x == k) => k,
+            _ => self.mode,
+        }
+    }
+
     pub fn converted_selection(&self, to: SelectMode) -> BTreeSet<Pick> {
         let mut out = BTreeSet::new();
         for p in &self.selection {
@@ -559,6 +623,28 @@ mod tests {
         doc.selection = [Pick::Object(id)].into();
         assert_eq!(doc.converted_selection(SelectMode::Edge).len(), 12);
         assert_eq!(doc.converted_selection(SelectMode::Vertex).len(), 8);
+    }
+
+    #[test]
+    fn toggles_selection_modes_independently() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", make_box(&Frame::WORLD, DVec3::ONE));
+        let f = doc.object(id).unwrap().body.face_ids().next().unwrap();
+        doc.mode = SelectMode::Face;
+        doc.toggle_mode(SelectMode::Edge);
+        assert_eq!(doc.modes(), vec![SelectMode::Edge, SelectMode::Face]);
+        doc.selection.insert(Pick::Face(id, f));
+        // Turning the primary mode off hands over to the other and drops its picks.
+        doc.toggle_mode(SelectMode::Face);
+        assert_eq!((doc.mode, doc.modes()), (SelectMode::Edge, vec![SelectMode::Edge]));
+        assert!(doc.selection.is_empty());
+        // The last mode stays on.
+        doc.toggle_mode(SelectMode::Edge);
+        assert_eq!(doc.modes(), vec![SelectMode::Edge]);
+        doc.all_modes();
+        assert_eq!(doc.modes(), SelectMode::ALL.to_vec());
+        doc.selection = [Pick::Object(id)].into();
+        assert_eq!(doc.selection_mode(), SelectMode::Object);
     }
 
     #[test]

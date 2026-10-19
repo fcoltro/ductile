@@ -100,6 +100,12 @@ pub fn pick(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, mode: Sele
     pick_any(doc, cam, cursor, size, mode).filter(|p| !doc.is_locked(p.object()))
 }
 
+/// What the cursor picks with several modes on: the first mode, most
+/// specific first, that finds something.
+pub fn pick_in(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, modes: &[SelectMode]) -> Option<Pick> {
+    modes.iter().find_map(|m| pick(doc, cam, cursor, size, *m))
+}
+
 fn pick_any(doc: &Document, cam: &Camera, cursor: DVec2, size: DVec2, mode: SelectMode) -> Option<Pick> {
     let ndc = DVec2::new(cursor.x / size.x * 2.0 - 1.0, 1.0 - cursor.y / size.y * 2.0);
     let ray = cam.ray(ndc);
@@ -200,6 +206,11 @@ pub fn pick_box(doc: &Document, cam: &Camera, a: DVec2, b: DVec2, size: DVec2, m
     v
 }
 
+/// A box's picks over every mode that is on.
+pub fn pick_box_in(doc: &Document, cam: &Camera, a: DVec2, b: DVec2, size: DVec2, modes: &[SelectMode], crossing: bool) -> Vec<Pick> {
+    modes.iter().flat_map(|m| pick_box(doc, cam, a, b, size, *m, crossing)).collect()
+}
+
 fn pick_box_any(doc: &Document, cam: &Camera, a: DVec2, b: DVec2, size: DVec2, mode: SelectMode, crossing: bool) -> Vec<Pick> {
     let lo = a.min(b);
     let hi = a.max(b);
@@ -285,4 +296,30 @@ fn segment_hits_box(a: DVec2, b: DVec2, lo: DVec2, hi: DVec2) -> bool {
         }
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ductile_brep::primitives::make_box;
+    use ductile_geom::Frame;
+
+    #[test]
+    fn picks_the_most_specific_mode_that_is_on() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", make_box(&Frame { origin: DVec3::splat(-1.0), ..Frame::WORLD }, DVec3::splat(2.0)));
+        let mut cam = Camera { aspect: 1.0, ..Default::default() };
+        cam.target = DVec3::ZERO;
+        cam.set_view(DVec3::Z);
+        let size = DVec2::splat(800.0);
+        let at = |p: DVec3| to_screen(&cam, p, size).unwrap().0;
+        let modes = [SelectMode::Edge, SelectMode::Face, SelectMode::Object];
+        // The middle of the top face is a face; its rim is an edge.
+        assert!(matches!(pick_in(&doc, &cam, at(DVec3::new(0.0, 0.0, 1.0)), size, &modes), Some(Pick::Face(o, _)) if o == id));
+        assert!(matches!(pick_in(&doc, &cam, at(DVec3::new(0.0, 1.0, 1.0)), size, &modes), Some(Pick::Edge(o, _)) if o == id));
+        assert_eq!(pick_in(&doc, &cam, at(DVec3::new(0.0, 0.0, 1.0)), size, &[SelectMode::Object]), Some(Pick::Object(id)));
+        // A box round the whole solid takes its faces and edges together.
+        let picks = pick_box_in(&doc, &cam, DVec2::ZERO, size, size, &modes[..2], false);
+        assert!(picks.iter().any(|p| matches!(p, Pick::Edge(..))) && picks.iter().any(|p| matches!(p, Pick::Face(..))));
+    }
 }

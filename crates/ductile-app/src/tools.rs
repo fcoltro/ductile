@@ -1182,7 +1182,7 @@ pub fn intersection_curves_selected(doc: &Document) -> Result<Vec<Body>, String>
 pub fn delete_selected(doc: &mut Document) -> Option<String> {
     use ductile_brep::ops::delete::{delete_faces, extract_edges};
     use std::collections::BTreeMap;
-    match doc.mode {
+    match doc.selection_mode() {
         SelectMode::Object => {
             let ids = doc.selected_objects();
             if ids.is_empty() {

@@ -57,6 +57,11 @@ pub enum Command {
     ModeEdge,
     ModeFace,
     ModeObject,
+    ModeAll,
+    ToggleVertexMode,
+    ToggleEdgeMode,
+    ToggleFaceMode,
+    ToggleObjectMode,
     Box,
     Cylinder,
     Cone,
@@ -219,6 +224,11 @@ impl Command {
         Command::ModeEdge,
         Command::ModeFace,
         Command::ModeObject,
+        Command::ModeAll,
+        Command::ToggleVertexMode,
+        Command::ToggleEdgeMode,
+        Command::ToggleFaceMode,
+        Command::ToggleObjectMode,
         Command::Box,
         Command::Cylinder,
         Command::Cone,
@@ -382,6 +392,11 @@ impl Command {
             ModeEdge => "Select edges",
             ModeFace => "Select faces",
             ModeObject => "Select solids",
+            ModeAll => "Select everything (all modes)",
+            ToggleVertexMode => "Toggle vertex mode",
+            ToggleEdgeMode => "Toggle edge mode",
+            ToggleFaceMode => "Toggle face mode",
+            ToggleObjectMode => "Toggle solid mode",
             Box => "Box",
             Cylinder => "Cylinder",
             Cone => "Cone",
@@ -521,7 +536,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
     // Shift+R repeats modeling commands, not navigation or selection.
     let fleeting = matches!(
         cmd,
-        Repeat | Palette | Help | Preferences | ToggleLeftPanel | ToggleRightPanel | SuggestedMenu | ConvertToVertices | ConvertToEdges | ConvertToFaces | ConvertToSolids | Undo | Redo | New | Open | Save | SaveAs | QuickSaveVersion | SaveStartup | NewWindow | Quit | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | Group | Ungroup | LockSelected | UnlockAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleIsophote | ToggleDraft | ToggleFaceDirection | ToggleCurvature | ToggleSection | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
+        Repeat | Palette | Help | Preferences | ToggleLeftPanel | ToggleRightPanel | SuggestedMenu | ConvertToVertices | ConvertToEdges | ConvertToFaces | ConvertToSolids | Undo | Redo | New | Open | Save | SaveAs | QuickSaveVersion | SaveStartup | NewWindow | Quit | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | Group | Ungroup | LockSelected | UnlockAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ModeAll | ToggleVertexMode | ToggleEdgeMode | ToggleFaceMode | ToggleObjectMode | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleIsophote | ToggleDraft | ToggleFaceDirection | ToggleCurvature | ToggleSection | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
     );
     if !fleeting {
         app.last_command = Some(cmd);
@@ -964,6 +979,11 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         ModeEdge => app.set_mode(SelectMode::Edge),
         ModeFace => app.set_mode(SelectMode::Face),
         ModeObject => app.set_mode(SelectMode::Object),
+        ModeAll => app.doc.all_modes(),
+        ToggleVertexMode => app.doc.toggle_mode(SelectMode::Vertex),
+        ToggleEdgeMode => app.doc.toggle_mode(SelectMode::Edge),
+        ToggleFaceMode => app.doc.toggle_mode(SelectMode::Face),
+        ToggleObjectMode => app.doc.toggle_mode(SelectMode::Object),
         Box => app.start_tool(std::boxed::Box::new(BoxTool::new())),
         Cylinder => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Cylinder))),
         Cone => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Cone))),
@@ -1321,6 +1341,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             };
             app.doc.selection = app.doc.converted_selection(to);
             app.doc.mode = to;
+            app.doc.also = 0;
         }
         SuggestedMenu => app.suggest_at = app.pointer_pos.or(Some(app.viewport_rect.center())),
     }
