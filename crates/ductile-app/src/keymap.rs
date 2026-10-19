@@ -135,6 +135,7 @@ const DEFAULTS: &[(Command, &str)] = {
         (Preferences, "Ctrl+,"),
         (ToggleLeftPanel, "Ctrl+B"),
         (ToggleRightPanel, "Ctrl+Shift+B"),
+        (SuggestedMenu, "Shift+F"),
         (Group, "Ctrl+G"),
         (Isoparam, "Ctrl+R"),
         (Untrim, "Alt+T"),

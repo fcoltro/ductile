@@ -390,10 +390,28 @@ pub fn viewport_overlays(app: &mut DuctileApp, ctx: &egui::Context) {
                         }
                     }
                     let more = glyph_button(ui, 28.0, false, "More commands   Shift+F", |p, r, c| crate::icons::dots(p, r, c));
-                    egui::Popup::menu(&more).show(|ui| suggested(app, ui));
+                    egui::Popup::menu(&more).show(|ui| suggested(app, ui, false));
                 });
             });
         });
+    }
+    // Suggested commands at the cursor (Shift+F).
+    if let Some(at) = app.suggest_at {
+        let resp = egui::Area::new(egui::Id::unique("suggested at cursor")).fixed_pos(at).constrain(true).order(egui::Order::Foreground).show(ctx, |ui| {
+            egui::Frame::menu(ui.style()).show(ui, |ui| {
+                ui.set_min_width(200.0);
+                ui.label(RichText::new("SUGGESTED").size(11.0).color(theme::TEXT_DIM));
+                let before = app.pending.len();
+                ui.visuals_mut().widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| suggested(app, ui, true));
+                if app.pending.len() != before {
+                    app.suggest_at = None;
+                }
+            });
+        });
+        if resp.response.clicked_elsewhere() {
+            app.suggest_at = None;
+        }
     }
     // The command dialog, bottom left.
     if app.tool.is_some() {
@@ -466,7 +484,7 @@ pub fn viewport_overlays(app: &mut DuctileApp, ctx: &egui::Context) {
 
 /// The More menu (Shift+F): one fixed list, with what does not apply to
 /// the selection greyed out so places stay put.
-fn suggested(app: &mut DuctileApp, ui: &mut egui::Ui) {
+fn suggested(app: &mut DuctileApp, ui: &mut egui::Ui, only_applicable: bool) {
     use crate::document::Pick;
     use Command::*;
     let sel = &app.doc.selection;
@@ -478,6 +496,10 @@ fn suggested(app: &mut DuctileApp, ui: &mut egui::Ui) {
     let faces = sel.iter().any(|p| matches!(p, Pick::Face(..)));
     let edges = sel.iter().any(|p| matches!(p, Pick::Edge(..)));
     let any = !sel.is_empty();
+    if only_applicable && !any {
+        ui.label(RichText::new("Select something to see what applies").color(theme::TEXT_DIM));
+        return;
+    }
     for (c, ok) in [
         (CurveArray, any),
         (MirrorX, any),
@@ -502,6 +524,9 @@ fn suggested(app: &mut DuctileApp, ui: &mut egui::Ui) {
         (Draft, faces),
         (MatchSurface, edges),
     ] {
+        if only_applicable && !ok {
+            continue;
+        }
         let b = egui::Button::new(c.label()).shortcut_text(c.shortcut_text());
         if ui.add_enabled(ok, b).clicked() {
             app.pending.push(c);

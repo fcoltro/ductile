@@ -64,6 +64,10 @@ pub struct DuctileApp {
     /// The last measurement, shown while the selection it measured stays.
     pub measurement: Option<(crate::measure::Measurement, std::collections::BTreeSet<Pick>)>,
     pub palette_open: bool,
+    /// Where the Shift+F menu of suggested commands is open.
+    pub suggest_at: Option<egui::Pos2>,
+    /// The pointer over the viewport, for menus that open at the cursor.
+    pub pointer_pos: Option<egui::Pos2>,
     pub palette_query: String,
     pub show_help: bool,
     pub show_prefs: bool,
@@ -149,6 +153,8 @@ impl DuctileApp {
             section: None,
             measurement: None,
             palette_open: false,
+            suggest_at: None,
+            pointer_pos: None,
             palette_query: String::new(),
             show_help: false,
             show_prefs: false,
@@ -455,6 +461,7 @@ impl DuctileApp {
         // A left drag the camera takes is not a click, box or tool drag.
         let left_nav = nav.takes_left(mods) && held(egui::PointerButton::Primary);
         let hover_pos = resp.hover_pos();
+        self.pointer_pos = hover_pos;
         let cursor = hover_pos.map(|p| DVec2::new((p.x - rect.min.x) as f64, (p.y - rect.min.y) as f64));
         if resp.hovered() && scroll.abs() > 0.0 {
             let toward = cursor.filter(|_| self.prefs.zoom_to_cursor).and_then(|c| {
@@ -1021,6 +1028,9 @@ impl DuctileApp {
                         None => format!("{} is now {}", chord.text(), cmd.label()),
                     }
                 };
+                continue;
+            }
+            if key == egui::Key::Escape && self.suggest_at.take().is_some() {
                 continue;
             }
             // Modal typing for active tools.

@@ -262,6 +262,10 @@ code from them.
   and drill-down on or off, mouse navigation presets (Plasticity, Blender,
   Maya, Rhino), zoom toward the cursor, the autosave interval and opening
   the last session on startup.
+- While dragging a value, the number shows beside the handle (five
+  decimals) and push and fillet drags draw an endless guide along their
+  direction. Shift+F opens the commands that apply to the selection at
+  the cursor.
 - Transform gizmo: selecting something shows axis arrows and rotation rings
   at it; drag an arrow to move along that axis or a ring to turn about it
   (type a value while dragging for an exact one). Headless: `--select N`.

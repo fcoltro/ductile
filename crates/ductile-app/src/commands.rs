@@ -154,6 +154,7 @@ pub enum Command {
     Preferences,
     ToggleLeftPanel,
     ToggleRightPanel,
+    SuggestedMenu,
     Repeat,
     InvertSelection,
     Boolean,
@@ -305,6 +306,7 @@ impl Command {
         Command::Preferences,
         Command::ToggleLeftPanel,
         Command::ToggleRightPanel,
+        Command::SuggestedMenu,
         Command::Repeat,
         Command::InvertSelection,
         Command::Boolean,
@@ -457,6 +459,7 @@ impl Command {
             Preferences => "Preferences",
             ToggleLeftPanel => "Toggle left panel",
             ToggleRightPanel => "Toggle right panel",
+            SuggestedMenu => "Suggested commands",
             Repeat => "Repeat last command",
             InvertSelection => "Invert selection",
             Boolean => "Boolean (union, subtract, intersect or slice)",
@@ -488,7 +491,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
     // Shift+R repeats modeling commands, not navigation or selection.
     let fleeting = matches!(
         cmd,
-        Repeat | Palette | Help | Preferences | ToggleLeftPanel | ToggleRightPanel | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | Group | Ungroup | LockSelected | UnlockAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleIsophote | ToggleDraft | ToggleFaceDirection | ToggleCurvature | ToggleSection | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
+        Repeat | Palette | Help | Preferences | ToggleLeftPanel | ToggleRightPanel | SuggestedMenu | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | Group | Ungroup | LockSelected | UnlockAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleIsophote | ToggleDraft | ToggleFaceDirection | ToggleCurvature | ToggleSection | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
     );
     if !fleeting {
         app.last_command = Some(cmd);
@@ -1229,6 +1232,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Preferences => app.show_prefs = !app.show_prefs,
         ToggleLeftPanel => app.show_left = !app.show_left,
         ToggleRightPanel => app.show_right = !app.show_right,
+        SuggestedMenu => app.suggest_at = app.pointer_pos.or(Some(app.viewport_rect.center())),
     }
 }
 
