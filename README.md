@@ -28,7 +28,9 @@ code from them.
   mode (K while drawing any curve) splits just the face the curve is drawn
   on; earlier imprints survive later booleans. Delete redundant topology merges
   them away again. Offset edge imprints new edges at a distance from the
-  selected edges, inside the flat faces beside them. Complete edge runs
+  selected edges, inside the flat faces beside them (O with edges); with
+  flat faces selected, O offsets each face's outer loop inward instead
+  (Offset face loop). Complete edge runs
   straight edges that stop partway on across the flat face beyond them, to
   the next edge, finishing a partial split. Offset face up to a face
   moves the selected flat faces until they reach the face clicked next

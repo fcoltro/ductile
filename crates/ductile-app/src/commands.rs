@@ -374,7 +374,7 @@ impl Command {
             DeleteRedundant => "Delete redundant topology",
             CompleteEdge => "Complete edge",
             RemoveFillets => "Remove fillets from solid",
-            OffsetEdge => "Offset edge (imprint)",
+            OffsetEdge => "Offset edge / face loop (imprint)",
             OffsetFaceTo => "Offset face up to a face",
             ConstrainedSurface => "Constrained surface (through points)",
             SelectPrevious => "Select previous (inputs of the last operation)",
@@ -556,10 +556,12 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Mirror => run(app, MirrorX),
         Offset => {
             let curves = app.doc.selected_objects().iter().any(|id| app.doc.object(*id).is_some_and(|o| o.body.kind == ductile_brep::BodyKind::Wire));
+            // As in Plasticity: edges and faces get new imprinted edges
+            // (push faces with E).
             let next = if curves {
                 OffsetCurve
-            } else if !app.doc.selected_faces().is_empty() {
-                OffsetFaces
+            } else if !app.doc.selected_edges().is_empty() || !app.doc.selected_faces().is_empty() {
+                OffsetEdge
             } else {
                 OffsetSolid
             };
@@ -798,7 +800,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         },
         OffsetEdge => match crate::tools::OffsetEdgeTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
-            None => app.status = "Offset edge: select edges of a solid".into(),
+            None => app.status = "Offset edge: select edges or flat faces of a solid".into(),
         },
         RemoveFillets => match crate::tools::RemoveFilletsTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),

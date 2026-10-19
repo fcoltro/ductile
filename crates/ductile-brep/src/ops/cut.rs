@@ -256,6 +256,48 @@ pub fn offset_edges(solid: &Body, edges: &[crate::topo::EdgeId], d: f64) -> Resu
     Ok(body)
 }
 
+/// Offset face loop: a new closed edge at distance `d` inside the outer
+/// boundary of each planar face in `faces`, imprinted into it.
+pub fn offset_face_loops(solid: &Body, faces: &[crate::topo::FaceId], d: f64) -> Result<Body, BoolError> {
+    use crate::curves::offset_chain;
+    let size = solid.bbox().diagonal().max(1e-9);
+    let length = |segs: &[Segment]| -> f64 {
+        segs.iter().map(|s| s.sample(1e-3 * size).windows(2).map(|w| w[0].distance(w[1])).sum::<f64>()).sum()
+    };
+    let mut chains = Vec::new();
+    for &f in faces {
+        let face = solid.face(f);
+        let ductile_geom::Surface::Plane { frame } = &face.surface else { continue };
+        let n = if face.reversed { -frame.z } else { frame.z };
+        let Some(outer) = solid.face_loops(f).next() else { continue };
+        let segs: Vec<Segment> = outer
+            .coedges
+            .iter()
+            .map(|c| {
+                let ed = solid.edge(c.edge);
+                Segment { curve: ed.curve.clone(), t0: ed.t0, t1: ed.t1, reversed: c.reversed }
+            })
+            .collect();
+        // Inward is whichever side makes the loop shorter.
+        let (a, b) = (offset_chain(&segs, true, d, n), offset_chain(&segs, true, -d, n));
+        let inner = match (a.is_empty(), b.is_empty()) {
+            (false, false) => if length(&a) < length(&b) { a } else { b },
+            (false, true) => a,
+            (true, false) => b,
+            _ => continue,
+        };
+        chains.push((inner, n));
+    }
+    if chains.is_empty() {
+        return Err(BoolError::Empty);
+    }
+    let mut body = solid.clone();
+    for (segs, n) in chains {
+        body = knife(&body, &[Loop3 { segments: segs }], n)?;
+    }
+    Ok(body)
+}
+
 /// Boolean region mode: every closed region the solids enclose together,
 /// each its own solid (where two overlap: the overlap, and each one's part
 /// outside the other), then split further by any sheets reaching across.
@@ -672,6 +714,19 @@ mod tests {
         assert!((vol(&k) - 24.0).abs() < 1e-6);
         let new: Vec<DVec3> = k.edges.iter().map(|e| e.mid()).filter(|m| (m.y - 0.5).abs() < 1e-9 && (m.z - 2.0).abs() < 1e-9 || (m.z - 1.5).abs() < 1e-9 && m.y.abs() < 1e-9).collect();
         assert_eq!(new.len(), 2, "{new:?}");
+    }
+
+    #[test]
+    fn offsets_a_face_loop_inside_the_face() {
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let top = b.face_ids().find(|f| b.face_edges(*f).iter().all(|e| b.edge(*e).mid().z > 1.9)).unwrap();
+        let k = offset_face_loops(&b, &[top], 0.5).unwrap();
+        // The top becomes a ring and an inner rectangle 3 x 2.
+        assert_eq!(k.faces.len(), 7);
+        assert_eq!(crate::ops::boolean::open_edges(&k), 0);
+        assert!((vol(&k) - 24.0).abs() < 1e-6);
+        let inner: f64 = k.edges.iter().filter(|e| { let m = e.mid(); (m.z - 2.0).abs() < 1e-9 && m.x > 0.4 && m.x < 3.6 && m.y > 0.4 && m.y < 2.6 }).map(|e| e.length()).sum();
+        assert!((inner - 10.0).abs() < 1e-6, "{inner}");
     }
 
     #[test]

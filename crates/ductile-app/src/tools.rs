@@ -4817,10 +4817,12 @@ impl Tool for RemoveFilletsTool {
 // ---------------------------------------------------------- Offset edge ----
 
 /// New edges offset from the selected edges into the planar faces beside
-/// them: drag or type the distance.
+/// them, or (with faces selected) inside each face's outer loop: drag or
+/// type the distance.
 pub struct OffsetEdgeTool {
     target: (ObjectId, std::sync::Arc<Body>),
     edges: Vec<EdgeId>,
+    faces: Vec<FaceId>,
     pub distance: f64,
     typed: Option<f64>,
     result: Option<Body>,
@@ -4830,14 +4832,16 @@ pub struct OffsetEdgeTool {
 impl OffsetEdgeTool {
     pub fn new(doc: &Document) -> Option<Self> {
         let picks = doc.selected_edges();
-        let (o, _) = *picks.first()?;
+        let face_picks = doc.selected_faces();
+        let o = picks.first().map(|p| p.0).or(face_picks.first().map(|p| p.0))?;
         let body = doc.object(o)?.body.clone();
         if body.kind != ductile_brep::BodyKind::Solid {
             return None;
         }
         let edges: Vec<EdgeId> = picks.iter().filter(|(x, _)| *x == o).map(|(_, e)| *e).collect();
+        let faces: Vec<FaceId> = if edges.is_empty() { face_picks.iter().filter(|(x, _)| *x == o).map(|(_, f)| *f).collect() } else { Vec::new() };
         let d = 0.05 * body.bbox().diagonal();
-        let mut t = Self { target: (o, body), edges, distance: d, typed: None, result: None, shown: f64::NAN };
+        let mut t = Self { target: (o, body), edges, faces, distance: d, typed: None, result: None, shown: f64::NAN };
         t.update();
         Some(t)
     }
@@ -4851,7 +4855,20 @@ impl OffsetEdgeTool {
             return;
         }
         self.shown = self.value();
-        self.result = ductile_brep::ops::cut::offset_edges(&self.target.1, &self.edges, self.value()).ok();
+        self.result = if self.faces.is_empty() {
+            ductile_brep::ops::cut::offset_edges(&self.target.1, &self.edges, self.value()).ok()
+        } else {
+            ductile_brep::ops::cut::offset_face_loops(&self.target.1, &self.faces, self.value()).ok()
+        };
+    }
+
+    /// The edges the distance is measured from.
+    fn base_edges(&self) -> Vec<EdgeId> {
+        if self.faces.is_empty() {
+            self.edges.clone()
+        } else {
+            self.faces.iter().flat_map(|f| self.target.1.face_edges(*f)).collect()
+        }
     }
 }
 
@@ -4860,21 +4877,24 @@ impl Tool for OffsetEdgeTool {
         true
     }
     fn name(&self) -> &'static str {
-        "Offset edge"
+        if self.faces.is_empty() { "Offset edge" } else { "Offset face loop" }
     }
     fn hint(&self) -> String {
-        format!("Offset edge: drag or type the distance ({:.3}), Enter to imprint", self.value())
+        format!("{}: drag or type the distance ({}), Enter to imprint", self.name(), crate::units::len(self.value()))
     }
     fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
         if let Some(q) = p.point.or(p.plane_point) {
             let b = &self.target.1;
-            let e = b.edge(self.edges[0]);
-            let t = e.curve.closest_param_in(q, e.t0.min(e.t1), e.t0.max(e.t1));
             if p.clicked {
                 return ToolOutcome::Finished;
             }
-            if self.typed.is_none() && p.point.is_some() {
-                self.distance = snap_len(e.curve.point(t).distance(q), p.world_per_px).max(1e-6);
+            let near = self.base_edges().iter().map(|e| {
+                let e = b.edge(*e);
+                let t = e.curve.closest_param_in(q, e.t0.min(e.t1), e.t0.max(e.t1));
+                e.curve.point(t).distance(q)
+            }).fold(f64::INFINITY, f64::min);
+            if self.typed.is_none() && p.point.is_some() && near.is_finite() {
+                self.distance = snap_len(near, p.world_per_px).max(1e-6);
                 self.update();
             }
         }
@@ -5656,6 +5676,16 @@ mod tests {
         t.typed_value(Some(0.4));
         assert!(t.commit(&mut doc));
         assert_eq!(doc.object(id).unwrap().body.faces.len(), 8);
+        // With a face selected it offsets the face's loop.
+        let b = doc.object(id).unwrap().body.clone();
+        let f = b.face_ids().find(|f| b.face_edges(*f).iter().all(|e| b.edge(*e).mid().z < 0.1)).unwrap();
+        doc.selection.clear();
+        doc.selection.insert(Pick::Face(id, f));
+        let mut t = OffsetEdgeTool::new(&doc).unwrap();
+        assert_eq!(t.name(), "Offset face loop");
+        t.typed_value(Some(0.4));
+        assert!(t.commit(&mut doc));
+        assert_eq!(doc.object(id).unwrap().body.faces.len(), 9);
     }
 
     #[test]
