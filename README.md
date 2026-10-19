@@ -60,7 +60,8 @@ code from them.
   (open or closed C2), arc (three points or from the center), rectangle
   (from a corner, the center or three points), circle (from the center,
   two or three points), slot, ellipse, regular polygon,
-  helix (radius, height and turns; sweep a circle along it for a spring).
+  helix (radius, height and turns; sweep a circle along it for a spring),
+  spiral (center and outer radius; start radius, turns and an optional rise).
   C inside the rectangle, circle and arc commands switches between their
   variants, as in Plasticity.
   Tangent arc leaves the end of a curve tangentially (D flips it). Tangent

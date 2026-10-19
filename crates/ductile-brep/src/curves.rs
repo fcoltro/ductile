@@ -31,15 +31,27 @@ fn trimmed(seg: &Segment, a: f64, b: f64) -> Segment {
 /// of 15 degrees each, tangent to the helix at every joint and off it by
 /// under 1e-7 of the radius.
 pub fn helix(frame: &Frame, radius: f64, height: f64, turns: f64) -> NurbsCurve {
+    spiral(frame, radius, radius, height, turns)
+}
+
+/// A spiral about `frame`'s z axis starting on its x axis, its radius
+/// growing evenly from `r0` to `r1` over `turns` turns while it rises
+/// `height` (zero for a flat spiral). Built like [`helix`].
+pub fn spiral(frame: &Frame, r0: f64, r1: f64, height: f64, turns: f64) -> NurbsCurve {
     let n = ((turns.abs() * 24.0).ceil() as usize).max(1);
     let w = turns * std::f64::consts::TAU;
-    let at = |s: f64| frame.to_world(DVec3::new(radius * (s * w).cos(), radius * (s * w).sin(), height * s));
+    let rad = |s: f64| r0 + (r1 - r0) * s;
+    let at = |s: f64| frame.to_world(DVec3::new(rad(s) * (s * w).cos(), rad(s) * (s * w).sin(), height * s));
     let h = 1.0 / n as f64;
     // Handle length of the best cubic arc, 4/3 tan(a/4) of the radius for
     // an arc of angle a, in place of the plain tangent's a/3.
     let da = h * w;
     let fit = if da.abs() > 1e-12 { 4.0 * (da / 4.0).tan() / da } else { 1.0 };
-    let tan = |s: f64| frame.dir_to_world(DVec3::new(-radius * w * fit * (s * w).sin(), radius * w * fit * (s * w).cos(), height));
+    let dr = r1 - r0;
+    let tan = |s: f64| {
+        let (sn, cs) = (s * w).sin_cos();
+        frame.dir_to_world(DVec3::new(dr * cs - rad(s) * w * fit * sn, dr * sn + rad(s) * w * fit * cs, height))
+    };
     let mut ctrl = vec![at(0.0)];
     let mut knots = vec![0.0; 4];
     for k in 0..n {
@@ -959,6 +971,22 @@ mod tests {
         // Tension pulls the bridge further along the end directions.
         let loose = bridge_curve(&a, &b, 1, [2.0, 2.0]);
         assert!(loose.length() > bridge_curve(&a, &b, 1, [1.0, 1.0]).length());
+    }
+
+    #[test]
+    fn spiral_grows_evenly() {
+        let c = spiral(&Frame::WORLD, 1.0, 3.0, 0.0, 2.0);
+        let (t0, t1) = c.domain();
+        for k in 0..=200 {
+            let s = k as f64 / 200.0;
+            let p = c.point(t0 + (t1 - t0) * s);
+            assert!(p.z.abs() < 1e-12);
+            // The radius at the curve's own angle, unwound by turn count.
+            let ang = p.y.atan2(p.x).rem_euclid(std::f64::consts::TAU);
+            let turn = (s * 2.0 - ang / std::f64::consts::TAU).round();
+            let expect = 1.0 + 2.0 * (turn + ang / std::f64::consts::TAU) / 2.0;
+            assert!((p.truncate().length() - expect).abs() < 2e-3, "s {s} r {} want {expect}", p.truncate().length());
+        }
     }
 
     #[test]

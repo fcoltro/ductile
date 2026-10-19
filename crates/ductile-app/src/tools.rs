@@ -362,6 +362,9 @@ pub enum RoundKind {
     Torus,
     /// A helix curve round the axis, `turns` turns up the height.
     Helix,
+    /// A spiral from a start radius out to the clicked radius, flat or
+    /// rising.
+    Spiral,
 }
 
 pub struct RoundTool {
@@ -380,7 +383,7 @@ impl RoundTool {
     }
     fn stages(&self) -> u8 {
         match self.kind {
-            RoundKind::Sphere => 2,
+            RoundKind::Sphere | RoundKind::Spiral => 2,
             _ => 3,
         }
     }
@@ -394,6 +397,7 @@ impl Tool for RoundTool {
             RoundKind::Sphere => "Sphere",
             RoundKind::Torus => "Torus",
             RoundKind::Helix => "Helix",
+            RoundKind::Spiral => "Spiral",
         }
     }
     fn hint(&self) -> String {
@@ -463,8 +467,12 @@ impl Tool for RoundTool {
             RoundKind::Cone => make_frustum(&f, self.radius, self.radius2.max(0.0), h),
             RoundKind::Sphere => make_sphere_in(&f, self.radius),
             RoundKind::Torus => make_torus(&f, self.radius, self.radius2.max(self.radius * 0.05)),
-            RoundKind::Helix => {
-                let c = ductile_brep::curves::helix(&f, self.radius, h, self.turns);
+            RoundKind::Helix | RoundKind::Spiral => {
+                let c = if self.kind == RoundKind::Helix {
+                    ductile_brep::curves::helix(&f, self.radius, h, self.turns)
+                } else {
+                    ductile_brep::curves::spiral(&f, self.radius2.clamp(0.0, self.radius), self.radius, self.height, self.turns)
+                };
                 let (t0, t1) = c.domain();
                 ductile_brep::profile::wire_from_segments(&[ductile_brep::profile::Segment::new(ductile_geom::Curve3::Nurbs(c), t0, t1)])
             }
@@ -488,6 +496,11 @@ impl Tool for RoundTool {
                 ch |= drag_value(ui, "Height", &mut self.height, 0.1);
                 ch |= drag_value(ui, "Turns", &mut self.turns, 0.1);
             }
+            RoundKind::Spiral => {
+                ch |= drag_value(ui, "Start radius", &mut self.radius2, 0.05);
+                ch |= drag_value(ui, "Turns", &mut self.turns, 0.1);
+                ch |= drag_value(ui, "Height", &mut self.height, 0.1);
+            }
             RoundKind::Sphere => {}
         }
         if ch && self.center.is_some() && self.stage < self.stages() - 1 {
@@ -496,7 +509,7 @@ impl Tool for RoundTool {
         ch
     }
     fn commit(&mut self, doc: &mut Document) -> bool {
-        if self.kind != RoundKind::Sphere && self.kind != RoundKind::Torus && self.height.abs() < 1e-9 {
+        if !matches!(self.kind, RoundKind::Sphere | RoundKind::Torus | RoundKind::Spiral) && self.height.abs() < 1e-9 {
             return false;
         }
         let Some(b) = self.preview(doc) else { return false };
@@ -5280,6 +5293,21 @@ impl Tool for RevolveTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spiral_commits_a_flat_curve() {
+        let mut doc = Document::default();
+        let mut t = RoundTool::new(RoundKind::Spiral);
+        t.center = Some(DVec3::ZERO);
+        t.radius = 3.0;
+        t.radius2 = 1.0;
+        t.turns = 2.5;
+        assert!(t.commit(&mut doc));
+        let o = &doc.objects[0];
+        assert_eq!(o.body.kind, ductile_brep::BodyKind::Wire);
+        let bb = o.body.bbox();
+        assert!(bb.max.z - bb.min.z < 3e-3 && (bb.min.x + 3.0).abs() < 0.1, "{bb:?}");
+    }
 
     /// A click straight down onto the construction plane at `p`.
     fn click(t: &mut dyn Tool, doc: &Document, p: DVec3, clicked: bool) -> bool {

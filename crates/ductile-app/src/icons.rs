@@ -254,6 +254,15 @@ pub fn paint(cmd: Command, painter: &Painter, rect: Rect, color: Color32) -> boo
             }
         }
         Command::Helix => {
+            // A coil seen from the side.
+            let pts: Vec<(f32, f32)> = (0..=96).map(|i| {
+                let t = i as f32 / 96.0;
+                let a = t * 3.5 * TAU;
+                (0.5 + 0.32 * a.cos(), 0.85 - 0.7 * t + 0.08 * a.sin())
+            }).collect();
+            p.line(&pts);
+        }
+        Command::Spiral => {
             let pts: Vec<(f32, f32)> = (0..=64).map(|i| {
                 let a = i as f32 / 64.0 * 3.0 * TAU;
                 let r = 0.06 + 0.36 * i as f32 / 64.0;

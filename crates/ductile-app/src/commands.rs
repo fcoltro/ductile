@@ -84,6 +84,7 @@ pub enum Command {
     ThreePointCircle,
     CenterArc,
     Helix,
+    Spiral,
     Extrude,
     Revolve,
     Loft,
@@ -251,6 +252,7 @@ impl Command {
         Command::ThreePointCircle,
         Command::CenterArc,
         Command::Helix,
+        Command::Spiral,
         Command::Extrude,
         Command::Revolve,
         Command::Loft,
@@ -419,6 +421,7 @@ impl Command {
             ThreePointCircle => "Circle by three points",
             CenterArc => "Arc from center",
             Helix => "Helix",
+            Spiral => "Spiral (flat, or rising like a cone spring)",
             Extrude => "Extrude face or curves",
             Revolve => "Revolve curves",
             Loft => "Loft",
@@ -990,6 +993,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         Sphere => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Sphere))),
         Torus => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Torus))),
         Helix => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Helix))),
+        Spiral => app.start_tool(std::boxed::Box::new(RoundTool::new(RoundKind::Spiral))),
         Extrude => match ExtrudeTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             // Curved faces push and pull by offsetting.
