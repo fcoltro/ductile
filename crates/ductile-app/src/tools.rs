@@ -444,6 +444,10 @@ pub struct TransformTool {
     /// Typed value: distance, degrees or factor.
     pub typed: Option<f64>,
     value: f64,
+    /// Surface control points: how many grid steps around the selection
+    /// follow with a smooth falloff, and whether the mirror (in u) moves too.
+    pub falloff: usize,
+    pub mirror: bool,
 }
 
 impl TransformTool {
@@ -482,7 +486,7 @@ impl TransformTool {
             }
         }
         let pivot = if bb.is_empty() { DVec3::ZERO } else { bb.center() };
-        Self { kind, targets, controls, surface_controls, faces, pivot, start: None, current: None, axis: None, typed: None, value: 0.0 }
+        Self { kind, targets, controls, surface_controls, faces, pivot, start: None, current: None, axis: None, typed: None, value: 0.0, falloff: 0, mirror: false }
     }
 
     /// The object's body after applying `m` to it, or to its selected
@@ -521,7 +525,7 @@ impl TransformTool {
         }
         let on_surface: Vec<_> = self.surface_controls.iter().filter(|c| c.0 == id).map(|c| (c.1, c.2)).collect();
         if !on_surface.is_empty() {
-            return ductile_brep::ops::sheet::move_surface_controls(body, &on_surface, m).unwrap_or_else(|| body.clone());
+            return ductile_brep::ops::sheet::move_surface_controls_with(body, &on_surface, m, self.falloff, self.mirror).unwrap_or_else(|| body.clone());
         }
         let mine: Vec<_> = self.controls.iter().filter(|c| c.0 == id).map(|c| (c.1, c.2)).collect();
         ductile_brep::profile::move_controls(body, &mine, m)
@@ -702,6 +706,14 @@ impl Tool for TransformTool {
                 }
             }
         });
+        let mut ch = ch;
+        if !self.surface_controls.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("Falloff");
+                ch |= ui.add(egui::DragValue::new(&mut self.falloff).range(0..=20)).changed();
+                ch |= ui.checkbox(&mut self.mirror, "Mirror").changed();
+            });
+        }
         ch
     }
     fn hidden_objects(&self) -> Vec<ObjectId> {

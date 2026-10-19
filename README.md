@@ -132,6 +132,9 @@ code from them.
 - Raise surface degree lifts the selected faces' surfaces one degree in u
   and v without changing their shape; Rebuild face refits them as smooth
   NURBS surfaces with the number of control points you choose.
+- Moving surface control points (G/R/S) can drag their neighbours along
+  with a smooth falloff (Falloff, in grid steps) and move the mirrored
+  points across the surface's u middle (Mirror) for symmetric shaping.
 - Full round: select the top face of a rib (between two parallel sides)
   and it becomes a half cylinder tangent to both.
 - Fillets (B) and chamfers (Shift+K) on edges between planes, on

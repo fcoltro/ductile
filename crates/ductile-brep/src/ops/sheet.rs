@@ -849,6 +849,14 @@ pub fn surface_control_points(b: &Body) -> Vec<(crate::topo::FaceId, u32, DVec3)
 /// points of other faces at the same place (shared boundaries, the seam
 /// of a closed surface) move with them, so the faces stay joined.
 pub fn move_surface_controls(b: &Body, moves: &[(crate::topo::FaceId, u32)], m: &DMat4) -> Option<Body> {
+    move_surface_controls_with(b, moves, m, 0, false)
+}
+
+/// As [`move_surface_controls`], with proportional editing: control points
+/// up to `falloff` rows away follow, less the further they are; and with
+/// `mirror`, each picked point's counterpart across its net (in u) moves
+/// the mirror-image way.
+pub fn move_surface_controls_with(b: &Body, moves: &[(crate::topo::FaceId, u32)], m: &DMat4, falloff: usize, mirror: bool) -> Option<Body> {
     if surface_control_points(b).is_empty() {
         return None;
     }
@@ -865,11 +873,49 @@ pub fn move_surface_controls(b: &Body, moves: &[(crate::topo::FaceId, u32)], m: 
     for f in b.face_ids() {
         let Surface::Nurbs(s) = &b.face(f).surface else { return None };
         let mut s = s.clone();
-        for h in s.ctrl.iter_mut() {
-            let p = h.truncate() / h.w;
-            if picked.iter().any(|q| q.distance(p) < tol) {
-                *h = (m.transform_point3(p) * h.w).extend(h.w);
+        let (nu, nv) = (s.nu, s.nv);
+        let at = |i: usize| -> DVec3 { s.ctrl[i].truncate() / s.ctrl[i].w };
+        let hits: Vec<(usize, usize)> = (0..s.ctrl.len()).filter(|i| picked.iter().any(|q| q.distance(at(*i)) < tol)).map(|i| (i / nv, i % nv)).collect();
+        // Per control point: how much of the move it takes, and whether mirrored.
+        let mut weight = vec![(0.0f64, None::<DMat4>); s.ctrl.len()];
+        for &(iu, iv) in &hits {
+            let mut spread = |cu: usize, cv: usize, mat: Option<DMat4>| {
+                let r = falloff as i64;
+                for du in -r..=r {
+                    for dv in -r..=r {
+                        let (u, v) = (cu as i64 + du, cv as i64 + dv);
+                        if u < 0 || v < 0 || u >= nu as i64 || v >= nv as i64 {
+                            continue;
+                        }
+                        let d = ((du * du + dv * dv) as f64).sqrt();
+                        let w = if d == 0.0 { 1.0 } else if d > r as f64 { 0.0 } else { 0.5 * (1.0 + (std::f64::consts::PI * d / (r as f64 + 1.0)).cos()) };
+                        let k = u as usize * nv + v as usize;
+                        if w > weight[k].0 {
+                            weight[k] = (w, mat);
+                        }
+                    }
+                }
+            };
+            spread(iu, iv, None);
+            let ju = nu - 1 - iu;
+            if mirror && ju != iu {
+                // Reflect the move in the plane halfway between the pair.
+                let (p, q) = (at(iu * nv + iv), at(ju * nv + iv));
+                if let Some(n) = (q - p).try_normalize() {
+                    let c = 0.5 * (p + q);
+                    let refl = DMat4::from_translation(c) * DMat4::from_mat3(DMat3::IDENTITY - 2.0 * DMat3::from_cols(n * n.x, n * n.y, n * n.z)) * DMat4::from_translation(-c);
+                    spread(ju, iv, Some(refl * *m * refl));
+                }
             }
+        }
+        for (k, h) in s.ctrl.iter_mut().enumerate() {
+            let (w, mat) = weight[k];
+            if w <= 0.0 {
+                continue;
+            }
+            let p = h.truncate() / h.w;
+            let moved = mat.as_ref().unwrap_or(m).transform_point3(p);
+            *h = (p.lerp(moved, w) * h.w).extend(h.w);
         }
         sw.patch_oriented(s, b.face(f).reversed);
     }
@@ -1022,6 +1068,32 @@ mod tests {
             assert!(s.point(uv.x, uv.y).distance(*p) < 1e-3, "{p}");
         }
         assert!(constrained_surface(&pts[..2], 1e-6).is_none());
+    }
+
+    #[test]
+    fn proportional_and_mirrored_cv_moves() {
+        let mut sw = Sewer::new(BodyKind::Sheet, 1e-9);
+        let ctrl: Vec<DVec4> = (0..25).map(|i| DVec3::new((i / 5) as f64, (i % 5) as f64, 0.0).extend(1.0)).collect();
+        let k = ductile_geom::nurbs::basis::uniform_clamped_knots(5, 3);
+        sw.patch(NurbsSurface::new(3, 3, k.clone(), k, 5, 5, ctrl));
+        let b = sw.body;
+        let up = DMat4::from_translation(DVec3::Z);
+        // Point (1, 2): its neighbours rise less, far points not at all.
+        let moved = move_surface_controls_with(&b, &[(crate::topo::FaceId(0), 7)], &up, 1, false).unwrap();
+        let Surface::Nurbs(s) = &moved.faces[0].surface else { panic!() };
+        let z = |i: usize| s.ctrl[i].z / s.ctrl[i].w;
+        assert!((z(7) - 1.0).abs() < 1e-12);
+        assert!(z(8) > 0.1 && z(8) < 1.0 && z(2) > 0.1);
+        assert_eq!(z(24), 0.0);
+        // Mirrored: the counterpart in u, (3, 2), rises too.
+        let moved = move_surface_controls_with(&b, &[(crate::topo::FaceId(0), 7)], &up, 0, true).unwrap();
+        let Surface::Nurbs(s) = &moved.faces[0].surface else { panic!() };
+        assert!((s.ctrl[17].z - 1.0).abs() < 1e-12 && s.ctrl[8].z == 0.0);
+        // Sideways moves mirror: along u one way, the other the opposite way.
+        let side = DMat4::from_translation(DVec3::X * 0.5);
+        let moved = move_surface_controls_with(&b, &[(crate::topo::FaceId(0), 7)], &side, 0, true).unwrap();
+        let Surface::Nurbs(s) = &moved.faces[0].surface else { panic!() };
+        assert!((s.ctrl[7].x - 1.5).abs() < 1e-12 && (s.ctrl[17].x - 2.5).abs() < 1e-12);
     }
 
     fn volume(b: &Body) -> f64 {
