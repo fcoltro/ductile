@@ -30,6 +30,7 @@ pub enum Command {
     Duplicate,
     Instance,
     DeleteRedundant,
+    CompleteEdge,
     RemoveFillets,
     OffsetEdge,
     ConstrainedSurface,
@@ -176,6 +177,7 @@ impl Command {
         Command::Duplicate,
         Command::Instance,
         Command::DeleteRedundant,
+        Command::CompleteEdge,
         Command::RemoveFillets,
         Command::OffsetEdge,
         Command::ConstrainedSurface,
@@ -323,6 +325,7 @@ impl Command {
             Duplicate => "Duplicate",
             Instance => "Instance (linked copy)",
             DeleteRedundant => "Delete redundant topology",
+            CompleteEdge => "Complete edge",
             RemoveFillets => "Remove fillets from solid",
             OffsetEdge => "Offset edge (imprint)",
             ConstrainedSurface => "Constrained surface (through points)",
@@ -685,6 +688,33 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Remove fillets: select solids".into(),
         },
+        CompleteEdge => {
+            let mut by_obj: std::collections::BTreeMap<crate::document::ObjectId, Vec<ductile_brep::EdgeId>> = Default::default();
+            for (o, e) in app.doc.selected_edges() {
+                by_obj.entry(o).or_default().push(e);
+            }
+            if by_obj.is_empty() {
+                app.status = "Complete edge: select straight edges that stop partway across a face".into();
+            } else {
+                app.doc.checkpoint("Complete edge");
+                let mut done = 0;
+                for (id, edges) in by_obj {
+                    let b = app.doc.object(id).unwrap().body.clone();
+                    if let Ok(c) = ductile_brep::ops::cut::complete_edges(&b, &edges) {
+                        if c.faces.len() > b.faces.len() {
+                            done += c.faces.len() - b.faces.len();
+                            app.doc.replace_body(id, c);
+                        }
+                    }
+                }
+                if done == 0 {
+                    app.doc.undo();
+                    app.status = "Complete edge: nothing to extend".into();
+                } else {
+                    app.status = format!("Completed edges: split {done} face(s)");
+                }
+            }
+        }
         DeleteRedundant => {
             let ids: Vec<crate::document::ObjectId> = app.doc.selected_objects().into_iter().filter(|id| app.doc.object(*id).is_some_and(|o| o.body.kind != ductile_brep::BodyKind::Wire && o.body.mesh.is_none())).collect();
             if ids.is_empty() {

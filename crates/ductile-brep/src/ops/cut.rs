@@ -256,6 +256,92 @@ pub fn offset_edges(solid: &Body, edges: &[crate::topo::EdgeId], d: f64) -> Resu
     Ok(body)
 }
 
+/// Complete edge: runs each straight edge on from its ends, across the
+/// planar face it points into (a face in the same plane, beyond the edge's
+/// end vertex), up to the first edge it meets there, and splits that face
+/// along the extension. Finishes partial splits of a face.
+pub fn complete_edges(solid: &Body, edges: &[crate::topo::EdgeId]) -> Result<Body, BoolError> {
+    let size = solid.bbox().diagonal().max(1e-9);
+    let tol = 1e-7 * size;
+    // Rays to run: from an end vertex, outward along the edge.
+    let mut rays = Vec::new();
+    for &e in edges {
+        let ed = solid.edge(e);
+        let (a, b) = (ed.start(), ed.end());
+        let chord = b - a;
+        if chord.length() < tol || ed.mid().distance(a + chord * 0.5) > tol * 10.0 {
+            continue;
+        }
+        let d = chord.normalize();
+        rays.push((b, d));
+        rays.push((a, -d));
+    }
+    let mut body = solid.clone();
+    for (p, d) in rays {
+        let mut cut = None;
+        for f in body.face_ids() {
+            let face = body.face(f);
+            let ductile_geom::Surface::Plane { frame } = &face.surface else { continue };
+            if frame.z.dot(d).abs() > 1e-6 || frame.z.dot(p - frame.origin).abs() > tol * 10.0 {
+                continue;
+            }
+            // The face's boundary, flattened into its plane.
+            let flat = |q: DVec3| {
+                let l = frame.to_local(q);
+                ductile_geom::DVec2::new(l.x, l.y)
+            };
+            let mut segs = Vec::new();
+            for lp in body.face_loops(f) {
+                for c in &lp.coedges {
+                    let ed = body.edge(c.edge);
+                    let pts = ed.curve.tessellate(ed.t0, ed.t1, tol);
+                    segs.extend(pts.windows(2).map(|w| (flat(w[0].1), flat(w[1].1))));
+                }
+            }
+            let (p2, d2) = (flat(p), {
+                let l = frame.to_local(p + d) - frame.to_local(p);
+                ductile_geom::DVec2::new(l.x, l.y)
+            });
+            if !segs.iter().any(|(a, b)| point_seg_dist(p2, *a, *b) < tol * 10.0) {
+                continue;
+            }
+            // Ray against the boundary: the nearest crossing ahead.
+            let hits: Vec<f64> = segs
+                .iter()
+                .filter_map(|(a, b)| {
+                    let e = *b - *a;
+                    let den = d2.perp_dot(e);
+                    if den.abs() < 1e-14 {
+                        return None;
+                    }
+                    let w = *a - p2;
+                    let t = w.perp_dot(e) / den;
+                    let u = w.perp_dot(d2) / den;
+                    (t > tol * 100.0 && (-1e-9..=1.0 + 1e-9).contains(&u)).then_some(t)
+                })
+                .collect();
+            let Some(t) = hits.iter().copied().reduce(f64::min) else { continue };
+            // The run must go through the face, not along its outside.
+            let m = p2 + d2 * (0.5 * t);
+            let crossings = segs.iter().filter(|(a, b)| (a.y > m.y) != (b.y > m.y) && m.x < a.x + (m.y - a.y) / (b.y - a.y) * (b.x - a.x)).count();
+            if crossings % 2 == 1 {
+                cut = Some((p + d * t, if face.reversed { -frame.z } else { frame.z }));
+                break;
+            }
+        }
+        if let Some((q, n)) = cut {
+            body = knife(&body, &[Loop3 { segments: vec![Segment::line(p, q)] }], n)?;
+        }
+    }
+    Ok(body)
+}
+
+fn point_seg_dist(p: ductile_geom::DVec2, a: ductile_geom::DVec2, b: ductile_geom::DVec2) -> f64 {
+    let e = b - a;
+    let t = ((p - a).dot(e) / e.length_squared().max(1e-300)).clamp(0.0, 1.0);
+    p.distance(a + e * t)
+}
+
 /// Projects each curve chain onto the faces of `solid` along `dir` (both
 /// ways), as a wire body of the curves it traces on them.
 pub fn project_curves(solid: &Body, chains: &[Loop3], dir: DVec3) -> Result<Body, BoolError> {
@@ -509,6 +595,21 @@ mod tests {
         let line = Loop3 { segments: vec![Segment::line(DVec3::new(1.0, 0.0, 2.0), DVec3::new(1.0, 3.0, 2.0))] };
         let k = knife(&knife(&b, &[line], DVec3::Z).unwrap(), &[again], DVec3::Z).unwrap();
         check(&k, 8);
+    }
+
+    #[test]
+    fn completes_a_partial_split() {
+        let b = make_box(&Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let full = Loop3 { segments: vec![Segment::line(DVec3::new(1.0, 0.0, 2.0), DVec3::new(1.0, 3.0, 2.0))] };
+        let part = Loop3 { segments: vec![Segment::line(DVec3::new(1.0, 1.0, 2.0), DVec3::new(4.0, 1.0, 2.0))] };
+        let k = knife(&knife(&b, &[full], DVec3::Z).unwrap(), &[part], DVec3::Z).unwrap();
+        assert_eq!(k.faces.len(), 8);
+        let e = k.edge_ids().find(|e| { let m = k.edge(*e).mid(); (m.y - 1.0).abs() < 1e-9 && (m.z - 2.0).abs() < 1e-9 }).unwrap();
+        let c = complete_edges(&k, &[e]).unwrap();
+        assert_eq!(c.faces.len(), 9);
+        assert_eq!(crate::ops::boolean::open_edges(&c), 0);
+        assert!((vol(&c) - 24.0).abs() < 1e-6);
+        assert!(c.edges.iter().any(|e| { let m = e.mid(); (m.y - 1.0).abs() < 1e-9 && (m.x - 0.5).abs() < 1e-9 && (m.z - 2.0).abs() < 1e-9 }));
     }
 
     #[test]

@@ -28,7 +28,9 @@ code from them.
   mode (K while drawing any curve) splits just the face the curve is drawn
   on; earlier imprints survive later booleans. Delete redundant topology merges
   them away again. Offset edge imprints new edges at a distance from the
-  selected edges, inside the flat faces beside them. Draft tilts
+  selected edges, inside the flat faces beside them. Complete edge runs
+  straight edges that stop partway on across the flat face beyond them, to
+  the next edge, finishing a partial split. Draft tilts
   selected planar faces about the line where they meet a neutral plane
   through their base, by a dragged or typed angle. Intersection curves
   adds the curves where selected solids cross; Project (I)
