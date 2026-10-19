@@ -275,7 +275,7 @@ impl Command {
             SaveAs => "Save as…",
             ImportStep => "Import STEP…",
             ImportSvg => "Import SVG curves…",
-            ImportMesh => "Import mesh (OBJ, STL)…",
+            ImportMesh => "Import mesh (OBJ, STL, 3MF)…",
             ExportStep => "Export STEP…",
             ExportStl => "Export STL…",
             ExportObj => "Export OBJ…",
@@ -468,7 +468,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             }
         }
         ImportMesh => {
-            if let Some(path) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "stl"]).pick_file() {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Mesh", &["obj", "stl", "3mf"]).pick_file() {
                 app.status = match import_mesh(&mut app.doc, &path) {
                     Ok(n) => {
                         app.frame_selection();
@@ -1051,12 +1051,14 @@ pub fn import_svg(doc: &mut Document, path: &std::path::Path) -> Result<usize, S
     Ok(chains.len())
 }
 
-/// Adds an OBJ or STL file's meshes as reference mesh objects (an OBJ's
+/// Adds an OBJ, STL or 3MF file's meshes as reference mesh objects (an OBJ's
 /// objects grouped under the file's name); returns the triangle count.
 pub fn import_mesh(doc: &mut Document, path: &std::path::Path) -> Result<usize, String> {
     let stem = path.file_stem().map_or("Mesh".to_string(), |s| s.to_string_lossy().into_owned());
     let meshes = if is_ext(path, "stl") {
         vec![(stem.clone(), ductile_io::mesh::read_stl(&std::fs::read(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?)]
+    } else if is_ext(path, "3mf") {
+        ductile_io::mesh::read_3mf(&std::fs::read(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?
     } else {
         ductile_io::mesh::read_obj(&std::fs::read_to_string(path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?
     };
@@ -1118,7 +1120,7 @@ pub fn load_into(doc: &mut Document, path: &std::path::Path) -> Result<(), Strin
         doc.clear();
         return import_svg(doc, path).map(|_| ());
     }
-    if is_ext(path, "stl") || is_ext(path, "obj") {
+    if is_ext(path, "stl") || is_ext(path, "obj") || is_ext(path, "3mf") {
         doc.clear();
         return import_mesh(doc, path).map(|_| ());
     }

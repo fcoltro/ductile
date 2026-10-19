@@ -180,11 +180,137 @@ pub fn read_obj(text: &str) -> crate::Result<Vec<(String, TriMesh)>> {
     Ok(meshes)
 }
 
+/// Reads a 3MF package: one mesh per build item (components flattened,
+/// transforms applied), named after its object.
+pub fn read_3mf(data: &[u8]) -> crate::Result<Vec<(String, TriMesh)>> {
+    use std::io::Read;
+    let bad = |e: String| crate::IoError::Parse(e);
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(data)).map_err(|e| bad(format!("not a 3MF package: {e}")))?;
+    let mut read = |name: &str| -> Option<String> {
+        let mut f = zip.by_name(name.trim_start_matches('/')).ok()?;
+        let mut s = String::new();
+        f.read_to_string(&mut s).ok()?;
+        Some(s)
+    };
+    // The model part the package's relationships point at.
+    let model_path = read("_rels/.rels")
+        .and_then(|rels| {
+            let doc = roxmltree::Document::parse(&rels).ok()?;
+            doc.descendants().find(|n| n.attribute("Type").is_some_and(|t| t.ends_with("/3dmodel"))).and_then(|n| n.attribute("Target")).map(str::to_string)
+        })
+        .unwrap_or_else(|| "3D/3dmodel.model".into());
+    let xml = read(&model_path).ok_or_else(|| bad(format!("the package has no model at {model_path}")))?;
+    let doc = roxmltree::Document::parse(&xml).map_err(|e| bad(e.to_string()))?;
+    // Row-major 3x4: p' = [x y z 1] * M.
+    let transform = |s: Option<&str>| -> glam::DMat4 {
+        let v: Vec<f64> = s.unwrap_or("").split_whitespace().filter_map(|x| x.parse().ok()).collect();
+        if v.len() != 12 {
+            return glam::DMat4::IDENTITY;
+        }
+        glam::DMat4::from_cols(
+            glam::DVec4::new(v[0], v[1], v[2], 0.0),
+            glam::DVec4::new(v[3], v[4], v[5], 0.0),
+            glam::DVec4::new(v[6], v[7], v[8], 0.0),
+            glam::DVec4::new(v[9], v[10], v[11], 1.0),
+        )
+    };
+    struct Obj<'a> {
+        name: String,
+        mesh: Option<TriMesh>,
+        components: Vec<(&'a str, glam::DMat4)>,
+    }
+    let mut objects: std::collections::HashMap<&str, Obj> = Default::default();
+    for o in doc.descendants().filter(|n| n.has_tag_name("object")) {
+        let Some(id) = o.attribute("id") else { continue };
+        let mesh = o.children().find(|n| n.has_tag_name("mesh")).map(|m| {
+            let mut t = TriMesh::default();
+            for v in m.descendants().filter(|n| n.has_tag_name("vertex")) {
+                let c = |k: &str| v.attribute(k).and_then(|x| x.parse::<f64>().ok()).unwrap_or(0.0);
+                t.positions.push(DVec3::new(c("x"), c("y"), c("z")));
+            }
+            let n = t.positions.len() as u32;
+            for tri in m.descendants().filter(|n| n.has_tag_name("triangle")) {
+                let i = |k: &str| tri.attribute(k).and_then(|x| x.parse::<u32>().ok()).unwrap_or(u32::MAX);
+                let idx = [i("v1"), i("v2"), i("v3")];
+                if idx.iter().all(|&k| k < n) {
+                    t.triangles.push(idx);
+                }
+            }
+            t
+        });
+        let components = o.descendants().filter(|n| n.has_tag_name("component")).filter_map(|c| Some((c.attribute("objectid")?, transform(c.attribute("transform"))))).collect();
+        objects.insert(id, Obj { name: o.attribute("name").unwrap_or("").to_string(), mesh, components });
+    }
+    fn flatten(objects: &std::collections::HashMap<&str, Obj>, id: &str, m: glam::DMat4, depth: usize, out: &mut TriMesh) {
+        let Some(o) = objects.get(id) else { return };
+        if depth > 16 {
+            return;
+        }
+        if let Some(t) = &o.mesh {
+            let base = out.positions.len() as u32;
+            out.positions.extend(t.positions.iter().map(|p| m.transform_point3(*p)));
+            let flip = m.determinant() < 0.0;
+            out.triangles.extend(t.triangles.iter().map(|tri| if flip { [base + tri[0], base + tri[2], base + tri[1]] } else { tri.map(|k| base + k) }));
+        }
+        for (c, cm) in &o.components {
+            flatten(objects, c, m * *cm, depth + 1, out);
+        }
+    }
+    let mut out = vec![];
+    for item in doc.descendants().filter(|n| n.has_tag_name("item")) {
+        let Some(id) = item.attribute("objectid") else { continue };
+        let mut t = TriMesh::default();
+        flatten(&objects, id, transform(item.attribute("transform")), 0, &mut t);
+        if !t.triangles.is_empty() {
+            out.push((objects.get(id).map(|o| o.name.clone()).unwrap_or_default(), t));
+        }
+    }
+    if out.is_empty() {
+        return Err(bad("no meshes in the 3MF package".into()));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ductile_brep::{primitives::make_box, tessellate, TessOptions};
     use ductile_geom::Frame;
+
+    #[test]
+    fn reads_a_3mf_with_a_moved_component() {
+        use std::io::Write;
+        let model = r#"<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">
+ <resources>
+  <object id="1" type="model" name="Tri"><mesh>
+   <vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices>
+   <triangles><triangle v1="0" v2="1" v3="2"/></triangles>
+  </mesh></object>
+  <object id="2" type="model" name="Pair"><components>
+   <component objectid="1"/>
+   <component objectid="1" transform="1 0 0 0 1 0 0 0 1 10 0 5"/>
+  </components></object>
+ </resources>
+ <build><item objectid="2" transform="1 0 0 0 1 0 0 0 1 0 0 1"/></build>
+</model>"#;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let o = zip::write::SimpleFileOptions::default();
+            z.start_file("_rels/.rels", o).unwrap();
+            z.write_all(br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Target="/3D/3dmodel.model" Id="rel0" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>"#).unwrap();
+            z.start_file("3D/3dmodel.model", o).unwrap();
+            z.write_all(model.as_bytes()).unwrap();
+            z.finish().unwrap();
+        }
+        let m = read_3mf(buf.get_ref()).unwrap();
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].0, "Pair");
+        assert_eq!(m[0].1.triangles.len(), 2);
+        assert!(m[0].1.positions.contains(&DVec3::new(11.0, 0.0, 6.0)));
+        assert!(m[0].1.positions.contains(&DVec3::new(0.0, 1.0, 1.0)));
+    }
 
     #[test]
     fn stl_and_obj_read_back_what_was_written() {

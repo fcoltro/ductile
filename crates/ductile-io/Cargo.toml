@@ -13,3 +13,5 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 usvg = { version = "0.48", default-features = false }
+roxmltree = "0.21"
+zip = { version = "2", default-features = false, features = ["deflate"] }
