@@ -4858,6 +4858,25 @@ mod tests {
     }
 
     #[test]
+    fn raise_and_rebuild_selected_faces() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Cyl", ductile_brep::primitives::make_cylinder(&ductile_geom::Frame::WORLD, 1.0, 2.0));
+        let b = doc.object(id).unwrap().body.clone();
+        let side = b.face_ids().find(|f| !b.face(*f).surface.is_planar()).unwrap();
+        doc.selection = [Pick::Face(id, side)].into_iter().collect();
+        assert_eq!(raise_selected_face_degree(&mut doc), Ok(1));
+        assert!(matches!(doc.object(id).unwrap().body.face(side).surface, ductile_geom::Surface::Nurbs(_)));
+        doc.selection = [Pick::Face(id, side)].into_iter().collect();
+        let mut t = RebuildFaceTool::new(&doc).unwrap();
+        t.nu = 10;
+        t.nv = 3;
+        assert!(t.commit(&mut doc));
+        let ductile_geom::Surface::Nurbs(n) = &doc.object(id).unwrap().body.face(side).surface else { panic!() };
+        assert_eq!((n.nu, n.nv), (10, 3));
+        assert!(doc.object(id).unwrap().mesh.triangle_count() > 0);
+    }
+
+    #[test]
     fn isoparam_untrim_unjoin_and_boundary_edges() {
         let mut doc = Document::default();
         let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 2.0, 1.0)));
@@ -5995,6 +6014,120 @@ impl Tool for AlignCurveTool {
         let new = ductile_brep::profile::Segment::new(ductile_geom::Curve3::Nurbs(c), t0, t1);
         let segs: Vec<_> = o.body.edges.iter().enumerate().map(|(i, e)| if i == eid.idx() { new.clone() } else { ductile_brep::profile::Segment::new(e.curve.clone(), e.t0, e.t1) }).collect();
         doc.replace_body(oid, ductile_brep::profile::wire_from_segments(&segs));
+        true
+    }
+}
+
+// ------------------------------------------------- Rebuild face / raise ----
+
+/// Each object with its selected faces' surfaces changed by `f`.
+fn edit_faces(doc: &Document, faces: &[(ObjectId, FaceId)], f: &dyn Fn(&Body, FaceId) -> Option<Body>) -> Vec<(ObjectId, Body)> {
+    let mut out: Vec<(ObjectId, Body)> = Vec::new();
+    for (o, face) in faces {
+        let i = match out.iter().position(|x| x.0 == *o) {
+            Some(i) => i,
+            None => {
+                let Some(ob) = doc.object(*o) else { continue };
+                out.push((*o, (*ob.body).clone()));
+                out.len() - 1
+            }
+        };
+        if let Some(b) = f(&out[i].1, *face) {
+            out[i].1 = b;
+        }
+    }
+    out
+}
+
+/// Raise surface degree: the selected faces' surfaces one degree higher in
+/// u and v, the shape unchanged, for finer control point editing.
+pub fn raise_selected_face_degree(doc: &mut Document) -> Result<usize, String> {
+    let faces = doc.selected_faces();
+    if faces.is_empty() {
+        return Err("Select faces to raise the degree of (face mode: 3)".into());
+    }
+    let bodies = edit_faces(doc, &faces, &ductile_brep::ops::untrim::raise_face_degree);
+    doc.checkpoint("Raise surface degree");
+    for (o, b) in bodies {
+        doc.replace_body(o, b);
+    }
+    Ok(faces.len())
+}
+
+/// Rebuild face: the selected faces' surfaces refitted as smooth NURBS
+/// surfaces with the chosen number of control points.
+pub struct RebuildFaceTool {
+    faces: Vec<(ObjectId, FaceId)>,
+    pub nu: usize,
+    pub nv: usize,
+    pub degree: usize,
+    cache: std::cell::RefCell<Option<((usize, usize, usize), Vec<(ObjectId, Body)>)>>,
+}
+
+impl RebuildFaceTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let faces = doc.selected_faces();
+        (!faces.is_empty()).then(|| Self { faces, nu: 6, nv: 6, degree: 3, cache: Default::default() })
+    }
+
+    fn bodies(&self, doc: &Document) -> Vec<(ObjectId, Body)> {
+        let key = (self.nu, self.nv, self.degree);
+        if let Some((k, b)) = &*self.cache.borrow() {
+            if *k == key {
+                return b.clone();
+            }
+        }
+        let (nu, nv, d) = key;
+        let b = edit_faces(doc, &self.faces, &|b, f| ductile_brep::ops::untrim::rebuild_face(b, f, nu, nv, d));
+        *self.cache.borrow_mut() = Some((key, b.clone()));
+        b
+    }
+}
+
+impl Tool for RebuildFaceTool {
+    fn name(&self) -> &'static str {
+        "Rebuild face"
+    }
+    fn hint(&self) -> String {
+        format!("Rebuild face: {} × {} control points, degree {}; set them in the panel, Enter to finish", self.nu, self.nv, self.degree)
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        if p.clicked {
+            return ToolOutcome::Finished;
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, doc: &Document) -> Option<Body> {
+        let mut out: Option<Body> = None;
+        for (_, b) in self.bodies(doc) {
+            match &mut out {
+                None => out = Some(b),
+                Some(o) => o.append(&b),
+            }
+        }
+        out
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        let mut ids: Vec<ObjectId> = self.faces.iter().map(|f| f.0).collect();
+        ids.dedup();
+        ids
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut ch = false;
+        for (label, v, lo) in [("U points", &mut self.nu, 2usize), ("V points", &mut self.nv, 2), ("Degree", &mut self.degree, 1)] {
+            let mut x = *v as f64;
+            if drag_value(ui, label, &mut x, 0.1) {
+                *v = (x.round() as usize).clamp(lo, 64);
+                ch = true;
+            }
+        }
+        ch
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let bodies = self.bodies(doc);
+        for (o, b) in bodies {
+            doc.replace_body(o, b);
+        }
         true
     }
 }

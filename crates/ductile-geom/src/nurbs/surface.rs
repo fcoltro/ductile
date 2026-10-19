@@ -141,6 +141,24 @@ impl NurbsSurface {
     }
 
     /// Swaps the roles of u and v (flips the normal).
+    /// The same surface one degree higher along u (the shape is unchanged).
+    pub fn elevated_u(&self) -> Self {
+        let cols: Vec<NurbsCurve> = (0..self.nv).map(|j| NurbsCurve::new(self.degree_u, self.knots_u.clone(), (0..self.nu).map(|i| self.ctrl[i * self.nv + j]).collect()).elevated()).collect();
+        let nu = cols[0].ctrl.len();
+        let mut ctrl = vec![DVec4::ZERO; nu * self.nv];
+        for (j, c) in cols.iter().enumerate() {
+            for i in 0..nu {
+                ctrl[i * self.nv + j] = c.ctrl[i];
+            }
+        }
+        Self::new(self.degree_u + 1, self.degree_v, cols[0].knots.clone(), self.knots_v.clone(), nu, self.nv, ctrl)
+    }
+
+    /// The same surface one degree higher along v.
+    pub fn elevated_v(&self) -> Self {
+        self.transposed().elevated_u().transposed()
+    }
+
     pub fn transposed(&self) -> Self {
         let mut ctrl = Vec::with_capacity(self.ctrl.len());
         for j in 0..self.nv {

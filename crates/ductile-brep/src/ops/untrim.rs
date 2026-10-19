@@ -6,7 +6,7 @@ use crate::ops::isoparam::face_param_range;
 use crate::ops::sheet::Sewer;
 use crate::profile::Segment;
 use crate::topo::{Body, BodyKind, FaceId};
-use ductile_geom::{Curve3, NurbsCurve, Surface};
+use ductile_geom::{Curve3, DVec3, NurbsCurve, Surface};
 
 /// A sheet of the untrimmed surface under face `f`: a NURBS surface's
 /// whole domain; an analytic surface over the face's parameter range,
@@ -95,5 +95,89 @@ mod tests {
         assert!((area - std::f64::consts::TAU * 2.0).abs() < 1e-2, "{area}");
         let back = reverse_sheet(&sheet);
         assert_ne!(back.face(FaceId(0)).reversed, sheet.face(FaceId(0)).reversed);
+    }
+}
+
+/// The face's surface as a NURBS net covering the face (an analytic
+/// surface over the face's parameter range, a little wider).
+fn face_net(b: &Body, f: FaceId) -> Option<ductile_geom::NurbsSurface> {
+    let s = &b.face(f).surface;
+    if let Surface::Nurbs(n) = s {
+        return Some(n.clone());
+    }
+    let (u, v) = (face_param_range(b, f, true)?, face_param_range(b, f, false)?);
+    let grow = |r: (f64, f64), period: Option<f64>| {
+        let m = 0.01 * (r.1 - r.0);
+        match period {
+            Some(p) if r.1 - r.0 + 2.0 * m > p => (r.0, r.0 + p.max(r.1 - r.0)),
+            _ => (r.0 - m, r.1 + m),
+        }
+    };
+    let (u, v) = (grow(u, s.period_u()), grow(v, s.period_v()));
+    Some(s.to_nurbs(u.0, u.1, v.0, v.1))
+}
+
+fn with_surface(b: &Body, f: FaceId, n: ductile_geom::NurbsSurface) -> Body {
+    let mut out = b.clone();
+    out.faces[f.idx()].surface = Surface::Nurbs(n);
+    out
+}
+
+/// `b` with face `f`'s surface raised one degree in u and v: the same
+/// shape with more control points to edit.
+pub fn raise_face_degree(b: &Body, f: FaceId) -> Option<Body> {
+    let n = face_net(b, f)?;
+    Some(with_surface(b, f, n.elevated_u().elevated_v()))
+}
+
+/// `b` with face `f`'s surface refitted as a smooth NURBS surface of the
+/// given degree with `nu` × `nv` control points; its trims stay.
+pub fn rebuild_face(b: &Body, f: FaceId, nu: usize, nv: usize, degree: usize) -> Option<Body> {
+    let n = face_net(b, f)?;
+    let ((u0, u1), (v0, v1)) = n.domain();
+    let (nu, nv) = (nu.max(2), nv.max(2));
+    let grid: Vec<Vec<DVec3>> = (0..nu)
+        .map(|i| (0..nv).map(|j| n.point(u0 + (u1 - u0) * i as f64 / (nu - 1) as f64, v0 + (v1 - v0) * j as f64 / (nv - 1) as f64)).collect())
+        .collect();
+    // Parameters in [0, 1], as the fit expects.
+    let us: Vec<f64> = (0..nu).map(|i| i as f64 / (nu - 1) as f64).collect();
+    let vs: Vec<f64> = (0..nv).map(|j| j as f64 / (nv - 1) as f64).collect();
+    let mut fit = ductile_geom::NurbsSurface::interpolate_grid_with_params(&grid, degree.min(nu - 1).max(1), degree.min(nv - 1).max(1), &us, &vs);
+    // A surface closed on itself stays exactly closed.
+    let (fu, fv) = (fit.nu, fit.nv);
+    if n.closed_u() {
+        for j in 0..fv {
+            fit.ctrl[(fu - 1) * fv + j] = fit.ctrl[j];
+        }
+    }
+    if n.closed_v() {
+        for i in 0..fu {
+            fit.ctrl[i * fv + fv - 1] = fit.ctrl[i * fv];
+        }
+    }
+    Some(with_surface(b, f, fit))
+}
+
+#[cfg(test)]
+mod surface_edit_tests {
+    use super::*;
+    use crate::primitives::make_cylinder;
+    use ductile_geom::Frame;
+
+    #[test]
+    fn raising_and_rebuilding_keep_the_shape() {
+        let c = make_cylinder(&Frame::WORLD, 2.0, 3.0);
+        let side = c.face_ids().find(|f| matches!(c.face(*f).surface, Surface::Cylinder { .. })).unwrap();
+        let vol = |b: &Body| crate::tessellate(b, &crate::TessOptions { chord_tol: 1e-4, angle_tol: 0.05 }).volume();
+        let v0 = vol(&c);
+        let r = raise_face_degree(&c, side).unwrap();
+        let Surface::Nurbs(n) = &r.faces[side.idx()].surface else { panic!() };
+        assert_eq!(n.degree_u.min(n.degree_v), 2);
+        assert!((vol(&r) - v0).abs() < 1e-3 * v0, "{} {v0}", vol(&r));
+        let rb = rebuild_face(&c, side, 12, 4, 3).unwrap();
+        let Surface::Nurbs(n) = &rb.faces[side.idx()].surface else { panic!() };
+        assert_eq!((n.nu * n.nv), 48);
+        assert!(!n.ctrl.iter().any(|p| p.w != 1.0), "rebuilt surfaces are not rational");
+        assert!((vol(&rb) - v0).abs() < 1e-2 * v0, "{} {v0}", vol(&rb));
     }
 }

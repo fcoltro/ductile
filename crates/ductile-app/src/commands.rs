@@ -85,6 +85,8 @@ pub enum Command {
     Isoparam,
     Untrim,
     FullRound,
+    RaiseSurfaceDegree,
+    RebuildFace,
     Unjoin,
     FindBoundaryEdges,
     ReverseSheet,
@@ -215,6 +217,8 @@ impl Command {
         Command::Isoparam,
         Command::Untrim,
         Command::FullRound,
+        Command::RaiseSurfaceDegree,
+        Command::RebuildFace,
         Command::Unjoin,
         Command::FindBoundaryEdges,
         Command::ReverseSheet,
@@ -346,6 +350,8 @@ impl Command {
             Isoparam => "Isoparam (split a face along its surface's u or v)",
             Untrim => "Untrim (the whole surface under a face)",
             FullRound => "Full round fillet (rib tops)",
+            RaiseSurfaceDegree => "Raise surface degree",
+            RebuildFace => "Rebuild face (refit its surface)",
             Unjoin => "Unjoin (faces, bodies or curves into pieces)",
             FindBoundaryEdges => "Find boundary edges",
             ReverseSheet => "Reverse sheet",
@@ -729,6 +735,16 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             },
         },
         Isoparam => app.start_tool(std::boxed::Box::new(crate::tools::IsoparamTool::new())),
+        RaiseSurfaceDegree => {
+            app.status = match crate::tools::raise_selected_face_degree(&mut app.doc) {
+                Ok(n) => format!("Raised the degree of {n} face(s)"),
+                Err(e) => e,
+            }
+        }
+        RebuildFace => match crate::tools::RebuildFaceTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Select faces to rebuild (face mode: 3)".into(),
+        },
         FullRound => {
             app.status = match crate::tools::full_round_selected(&mut app.doc) {
                 Ok(n) => format!("Rounded {n} face(s)"),
