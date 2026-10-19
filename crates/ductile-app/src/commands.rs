@@ -85,6 +85,7 @@ pub enum Command {
     JoinCurves,
     SplitCurve,
     DeformCurve,
+    SlideCv,
     InsertKnot,
     Trim,
     Isoparam,
@@ -223,6 +224,7 @@ impl Command {
         Command::Trim,
         Command::SplitCurve,
         Command::DeformCurve,
+        Command::SlideCv,
         Command::InsertKnot,
         Command::Isoparam,
         Command::Untrim,
@@ -361,6 +363,7 @@ impl Command {
             Trim => "Trim curves",
             SplitCurve => "Split curve at a point",
             DeformCurve => "Deform curves onto a face",
+            SlideCv => "Slide control points",
             InsertKnot => "Insert knot (add a control point)",
             Isoparam => "Isoparam (split a face along its surface's u or v)",
             Untrim => "Untrim (the whole surface under a face)",
@@ -805,6 +808,10 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
             let n = crate::tools::reverse_selected_sheets(&mut app.doc);
             app.status = if n == 0 { "Select sheets to reverse".into() } else { format!("Reversed {n} sheet(s)") };
         }
+        SlideCv => match crate::tools::SlideCvTool::new(&app.doc) {
+            Some(t) => app.start_tool(std::boxed::Box::new(t)),
+            None => app.status = "Slide CV: select curve control points (vertex mode)".into(),
+        },
         DeformCurve => match crate::tools::DeformCurveTool::new(&app.doc) {
             Some(t) => app.start_tool(std::boxed::Box::new(t)),
             None => app.status = "Deform curve: select the curves first".into(),

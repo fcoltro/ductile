@@ -87,6 +87,7 @@ const DEFAULTS: &[(Command, &str)] = {
         (Delete, "Shift+X"),
         (Duplicate, "Shift+D"),
         (Instance, "Alt+D"),
+        (SlideCv, "Shift+G"),
         (Place, "Ctrl+D"),
         (SelectAll, "A"),
         (SelectAll, "Ctrl+A"),

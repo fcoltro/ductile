@@ -4097,6 +4097,122 @@ impl Tool for DeformCurveTool {
     }
 }
 
+// ------------------------------------------------------------ Slide CV ----
+
+/// Slides the selected curve control points along their control polygon
+/// (towards the next point for a positive distance): drag, or type it.
+pub struct SlideCvTool {
+    /// Per control: object, edge, index, start position and slide direction.
+    cvs: Vec<(ObjectId, EdgeId, u32, DVec3, DVec3)>,
+    start: Option<DVec3>,
+    pub distance: f64,
+    typed: Option<f64>,
+}
+
+impl SlideCvTool {
+    pub fn new(doc: &Document) -> Option<Self> {
+        let mut cvs = Vec::new();
+        for p in &doc.selection {
+            let Pick::Control(o, e, i) = *p else { continue };
+            let Some(ob) = doc.object(o) else { continue };
+            let ductile_geom::Curve3::Nurbs(n) = &ob.body.edge(e).curve else { continue };
+            let pts = n.control_points();
+            let i = i as usize;
+            if pts.len() < 2 || i >= pts.len() {
+                continue;
+            }
+            let (a, b) = (pts[i.saturating_sub(1)], pts[(i + 1).min(pts.len() - 1)]);
+            let Some(d) = (b - a).try_normalize() else { continue };
+            cvs.push((o, e, i as u32, pts[i], d));
+        }
+        (!cvs.is_empty()).then(|| Self { cvs, start: None, distance: 0.0, typed: None })
+    }
+
+    fn slid(&self, body: &Body, id: ObjectId) -> Body {
+        let d = self.typed.unwrap_or(self.distance);
+        let mut b = body.clone();
+        for (_, e, i, _, dir) in self.cvs.iter().filter(|c| c.0 == id) {
+            b = ductile_brep::profile::move_controls(&b, &[(*e, *i)], &DMat4::from_translation(*dir * d));
+        }
+        b
+    }
+
+    fn objects(&self) -> Vec<ObjectId> {
+        let mut v: Vec<ObjectId> = self.cvs.iter().map(|c| c.0).collect();
+        v.dedup();
+        v
+    }
+}
+
+impl Tool for SlideCvTool {
+    fn name(&self) -> &'static str {
+        "Slide CV"
+    }
+    fn hint(&self) -> String {
+        format!("Slide CV: drag along the control polygon or type a distance ({:.3}), Enter to finish", self.typed.unwrap_or(self.distance))
+    }
+    fn pointer(&mut self, _doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        let (_, _, _, at, dir) = self.cvs[0];
+        // The point on the slide line nearest the view ray.
+        let w = p.ray.dir.cross(dir);
+        let n = dir.cross(w);
+        let q = if n.length_squared() > 1e-18 { p.ray.hit_plane(at, n.normalize()) } else { None };
+        let Some(q) = q else { return ToolOutcome::Continue };
+        let t = (q - at).dot(dir);
+        match self.start {
+            None if p.clicked => self.start = Some(at + dir * t),
+            Some(s) => {
+                self.distance = snap_len((at + dir * t - s).dot(dir).abs(), p.world_per_px) * (at + dir * t - s).dot(dir).signum();
+                if p.clicked {
+                    return ToolOutcome::Finished;
+                }
+            }
+            None => {}
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, doc: &Document) -> Option<Body> {
+        let segs: Vec<_> = self
+            .objects()
+            .into_iter()
+            .filter_map(|id| doc.object(id).map(|o| self.slid(&o.body, id)))
+            .flat_map(|b| b.edges.into_iter().map(|e| ductile_brep::profile::Segment::new(e.curve, e.t0, e.t1)))
+            .collect();
+        Some(ductile_brep::profile::wire_from_segments(&segs))
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        for (_, _, _, at, dir) in &self.cvs {
+            out.push(LineInstance::new(*at - *dir * 0.5, *at + *dir * 0.5, [0.35, 0.75, 1.0, 1.0], 2.0));
+        }
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut d = self.typed.unwrap_or(self.distance);
+        let changed = ui.add(egui::DragValue::new(&mut d).speed(0.01).prefix("Distance ")).changed();
+        if changed {
+            self.typed = Some(d);
+        }
+        changed
+    }
+    fn typed_value(&mut self, v: Option<f64>) {
+        self.typed = v;
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        self.objects()
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        if self.typed.unwrap_or(self.distance).abs() < 1e-12 {
+            return false;
+        }
+        for id in self.objects() {
+            if let Some(o) = doc.object(id) {
+                let b = self.slid(&o.body, id);
+                doc.replace_body(id, b);
+            }
+        }
+        true
+    }
+}
+
 // ---------------------------------------------------------------- Array ----
 
 /// Copies of the selected objects in a row (along a construction plane axis,
@@ -4507,6 +4623,23 @@ mod tests {
         let len = p.distance(q);
         assert!((len - 6.0).abs() < 1e-4 || (len - 8.0).abs() < 1e-4, "{len}");
         assert!(p.x > 19.9 && q.x < 28.1);
+    }
+
+    #[test]
+    fn slides_control_points_along_the_polygon() {
+        let mut doc = Document::default();
+        let n = ductile_geom::NurbsCurve::uniform(3, &[DVec3::ZERO, DVec3::new(1.0, 1.0, 0.0), DVec3::new(2.0, 1.0, 0.0), DVec3::new(3.0, 0.0, 0.0)]);
+        let (a, b) = n.domain();
+        let id = doc.add_body("Curve", ductile_brep::profile::wire_from_segments(&[ductile_brep::profile::Segment::new(ductile_geom::Curve3::Nurbs(n), a, b)]));
+        doc.selection.insert(Pick::Control(id, EdgeId(0), 1));
+        let mut t = SlideCvTool::new(&doc).unwrap();
+        t.typed_value(Some(0.5));
+        assert!(t.commit(&mut doc));
+        let ductile_geom::Curve3::Nurbs(n) = &doc.object(id).unwrap().body.edges[0].curve else { panic!() };
+        // Along the line from the previous to the next control point.
+        let d = DVec3::new(2.0, 1.0, 0.0).normalize() * 0.5;
+        assert!(n.control_points()[1].distance(DVec3::new(1.0, 1.0, 0.0) + d) < 1e-12);
+        assert!(n.control_points()[2].distance(DVec3::new(2.0, 1.0, 0.0)) < 1e-12);
     }
 
     #[test]
