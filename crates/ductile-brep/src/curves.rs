@@ -900,3 +900,96 @@ mod tests {
         }
     }
 }
+
+/// Aligns one end of `a` to a point of another curve with continuity G0 to
+/// G3 (`order`), moving only the control points next to that end. `target`
+/// holds the other curve's point and derivatives there, `[B, B', B'', B''']`,
+/// taken along a parameter that runs from the other curve into `a`; `a`
+/// leaves the point along B' keeping its own speed and the parts of its
+/// derivatives along the tangent, so its shape changes as little as the
+/// continuity allows.
+pub fn align_curve_end(a: &NurbsCurve, at_start: bool, target: [DVec3; 4], order: usize) -> NurbsCurve {
+    let order = order.min(3);
+    if !at_start {
+        return align_curve_end(&a.reversed(), true, target, order).reversed();
+    }
+    // Derivatives of a rational curve are not linear in its points: refit.
+    let mut c = if a.is_rational() {
+        let (t0, t1) = a.domain();
+        let pts: Vec<DVec3> = (0..=24).map(|i| a.point(t0 + (t1 - t0) * i as f64 / 24.0)).collect();
+        NurbsCurve::interpolate(&pts, 3)
+    } else {
+        a.clone()
+    };
+    if c.degree < order.max(1) {
+        c = c.elevated_to(order.max(1));
+    }
+    // Room for this end's points without touching the other end's.
+    while c.ctrl.len() < 2 * (order + 1) {
+        let k = &c.knots;
+        let (i, _) = k.windows(2).enumerate().max_by(|x, y| (x.1[1] - x.1[0]).total_cmp(&(y.1[1] - y.1[0]))).unwrap();
+        c = c.insert_knot(0.5 * (k[i] + k[i + 1]), 1);
+    }
+    let t0 = c.domain().0;
+    // Derivatives of each basis function at the end.
+    let basis: Vec<Vec<f64>> = (0..=order)
+        .map(|i| {
+            let ctrl = (0..c.ctrl.len()).map(|j| if i == j { ductile_geom::DVec4::new(1.0, 0.0, 0.0, 1.0) } else { ductile_geom::DVec4::new(0.0, 0.0, 0.0, 1.0) }).collect();
+            NurbsCurve::new(c.degree, c.knots.clone(), ctrl).derivs(t0, order).iter().map(|d| d.x).collect()
+        })
+        .collect();
+    let d = c.derivs(t0, order);
+    let [b, b1, b2, b3] = target;
+    let bb = b1.length_squared().max(1e-300);
+    let lam = if order >= 1 { d[1].length() / bb.sqrt() } else { 0.0 };
+    let mu = if order >= 2 { (d[2] - b2 * lam * lam).dot(b1) / bb } else { 0.0 };
+    let nu = if order >= 3 { (d[3] - b3 * lam.powi(3) - b2 * (3.0 * lam * mu)).dot(b1) / bb } else { 0.0 };
+    let want = [b, b1 * lam, b2 * lam * lam + b1 * mu, b3 * lam.powi(3) + b2 * (3.0 * lam * mu) + b1 * nu];
+    let mut pts = c.control_points();
+    for k in 0..=order {
+        let rest: DVec3 = (0..k).map(|i| pts[i] * basis[i][k]).sum();
+        if basis[k][k].abs() < 1e-300 {
+            break;
+        }
+        pts[k] = (want[k] - rest) / basis[k][k];
+    }
+    NurbsCurve::from_points(c.degree, c.knots.clone(), &pts)
+}
+
+#[cfg(test)]
+mod align_tests {
+    use super::*;
+
+    fn curvature(c: &NurbsCurve, t: f64) -> f64 {
+        let d = c.derivs(t, 2);
+        d[1].cross(d[2]).length() / d[1].length().powi(3)
+    }
+
+    #[test]
+    fn aligns_a_curve_to_a_circle_with_g2_and_g3() {
+        // The circle of radius 2 about the origin, at angle 0 heading +Y.
+        let target = [DVec3::new(2.0, 0.0, 0.0), DVec3::new(0.0, 2.0, 0.0), DVec3::new(-2.0, 0.0, 0.0), DVec3::new(0.0, -2.0, 0.0)];
+        let a = NurbsCurve::uniform(3, &[DVec3::new(2.3, 0.2, 0.0), DVec3::new(2.5, 1.5, 0.0), DVec3::new(2.0, 3.0, 0.0), DVec3::new(1.0, 4.0, 0.0), DVec3::new(0.0, 5.0, 0.0), DVec3::new(-1.0, 5.5, 0.0)]);
+        for order in 0..=3 {
+            let c = align_curve_end(&a, true, target, order);
+            let t0 = c.domain().0;
+            assert!(c.point(t0).distance(target[0]) < 1e-12);
+            if order >= 1 {
+                assert!(c.tangent(t0).normalize().distance(DVec3::Y) < 1e-9);
+            }
+            if order >= 2 {
+                assert!((curvature(&c, t0) - 0.5).abs() < 1e-7, "{}", curvature(&c, t0));
+            }
+            // The far end does not move.
+            assert!(c.point(c.domain().1).distance(a.point(a.domain().1)) < 1e-9);
+        }
+        // G3: the rate of change of curvature matches the circle's (zero).
+        let c = align_curve_end(&a, true, target, 3);
+        let t0 = c.domain().0;
+        let h = 1e-4;
+        let dk = (curvature(&c, t0 + h) - curvature(&c, t0)) / h;
+        let g2 = align_curve_end(&a, true, target, 2);
+        let dk2 = (curvature(&g2, t0 + h) - curvature(&g2, t0)) / h;
+        assert!(dk.abs() < 0.05 * dk2.abs().max(1e-3), "{dk} vs {dk2}");
+    }
+}

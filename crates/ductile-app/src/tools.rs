@@ -4836,6 +4836,28 @@ mod tests {
     }
 
     #[test]
+    fn align_curve_meets_a_line_end_with_g2() {
+        use ductile_brep::profile::{wire_from_segments, Segment};
+        let mut doc = Document::default();
+        doc.add_body("Line", wire_from_segments(&[Segment::line(DVec3::ZERO, DVec3::new(4.0, 0.0, 0.0))]));
+        let pts = [DVec3::new(5.0, 1.0, 0.0), DVec3::new(6.0, 2.0, 0.0), DVec3::new(6.5, 4.0, 0.0), DVec3::new(6.0, 6.0, 0.0)];
+        let sp = ductile_geom::NurbsCurve::uniform(3, &pts);
+        let id = doc.add_body("Spline", wire_from_segments(&[Segment::new(ductile_geom::Curve3::Nurbs(sp), 0.0, 1.0)]));
+        let mut t = AlignCurveTool::new(&doc);
+        // Click the spline's start, then the line.
+        click(&mut t, &doc, DVec3::new(5.0, 1.0, 0.0), true);
+        assert!(t.moving.is_some());
+        assert!(click(&mut t, &doc, DVec3::new(3.0, 0.0, 0.0), true));
+        assert!(t.commit(&mut doc));
+        let e = &doc.object(id).unwrap().body.edges[0];
+        let c = e.curve.to_nurbs(e.t0, e.t1);
+        let d = c.derivs(c.domain().0, 2);
+        assert!(d[0].distance(DVec3::new(4.0, 0.0, 0.0)) < 1e-9);
+        assert!(d[1].normalize().distance(DVec3::X) < 1e-9);
+        assert!(d[1].cross(d[2]).length() < 1e-9, "curvature zero, as the line's");
+    }
+
+    #[test]
     fn isoparam_untrim_unjoin_and_boundary_edges() {
         let mut doc = Document::default();
         let id = doc.add_body("Box", ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 2.0, 1.0)));
@@ -5813,5 +5835,166 @@ impl Tool for DimensionTool {
             }
             None => false,
         }
+    }
+}
+
+// --------------------------------------------------------- Align curve ----
+
+/// Align curve: click the end of a curve to change, then the curve to
+/// align it to; the end moves onto the other curve (its nearest end, or
+/// the nearest point along it) and leaves it with G0 to G3 continuity.
+pub struct AlignCurveTool {
+    /// Every visible edge: object, edge, curve, range, samples.
+    edges: Vec<(ObjectId, EdgeId, ductile_geom::Curve3, f64, f64, Vec<DVec3>)>,
+    /// The edge to change, and whether its start moves.
+    moving: Option<(usize, bool)>,
+    hover: Option<usize>,
+    cursor_ray: Option<Ray>,
+    pub order: usize,
+}
+
+impl AlignCurveTool {
+    pub fn new(doc: &Document) -> Self {
+        let edges = doc
+            .objects
+            .iter()
+            .filter(|o| o.visible && !doc.is_locked(o.id))
+            .flat_map(|o| o.body.edges.iter().enumerate().map(move |(i, e)| (o.id, EdgeId(i as u32), e.curve.clone(), e.t0, e.t1, e.curve.tessellate(e.t0, e.t1, 1e-3).into_iter().map(|q| q.1).collect::<Vec<_>>())))
+            .filter(|e| e.5.len() > 1)
+            .collect();
+        Self { edges, moving: None, hover: None, cursor_ray: None, order: 2 }
+    }
+
+    fn pick(&self, p: &PointerInfo, wires_only: Option<&Document>) -> Option<usize> {
+        let mut best = (8.0 * p.world_per_px, None);
+        for (i, e) in self.edges.iter().enumerate() {
+            if wires_only.is_some_and(|d| d.object(e.0).is_none_or(|o| o.body.kind != ductile_brep::BodyKind::Wire)) {
+                continue;
+            }
+            for w in e.5.windows(2) {
+                let d = ray_segment_distance(&p.ray, w[0], w[1]);
+                if d < best.0 {
+                    best = (d, Some(i));
+                }
+            }
+        }
+        best.1
+    }
+
+    /// The changed curve, aligned to edge `target`.
+    fn aligned(&self, target: usize) -> Option<ductile_geom::NurbsCurve> {
+        let (mi, at_start) = self.moving?;
+        if mi == target {
+            return None;
+        }
+        let m = &self.edges[mi];
+        let a = m.2.to_nurbs(m.3, m.4);
+        let (a0, a1) = a.domain();
+        let end = a.point(if at_start { a0 } else { a1 });
+        let t = &self.edges[target];
+        let b = t.2.to_nurbs(t.3, t.4);
+        let (b0, b1) = b.domain();
+        let tb = b.closest_param(end);
+        let span = b.length().max(1e-12);
+        let pt = b.point(tb);
+        // Near an end of the other curve: meet that end.
+        let (tb, rev) = if b.point(b1).distance(pt) < 0.15 * span || b.point(b1).distance(end) < 0.15 * span {
+            (b1, false)
+        } else if b.point(b0).distance(pt) < 0.15 * span || b.point(b0).distance(end) < 0.15 * span {
+            (b0, true)
+        } else {
+            // Along the curve: go the way the changed curve already leaves.
+            let d = a.derivs(if at_start { a0 } else { a1 }, 1)[1] * if at_start { 1.0 } else { -1.0 };
+            (tb, d.dot(b.derivs(tb, 1)[1]) < 0.0)
+        };
+        let d = b.derivs(tb, 3);
+        let s = if rev { -1.0 } else { 1.0 };
+        let target = [d[0], d[1] * s, d[2], d[3] * s];
+        Some(ductile_brep::curves::align_curve_end(&a, at_start, target, self.order))
+    }
+}
+
+impl Tool for AlignCurveTool {
+    fn name(&self) -> &'static str {
+        "Align curve"
+    }
+    fn hint(&self) -> String {
+        match self.moving {
+            None => "Align curve: click near the end of the curve to change".into(),
+            Some(_) => format!("Align curve (G{}): click the curve to align to; 0–3 set the continuity", self.order),
+        }
+    }
+    fn pointer(&mut self, doc: &Document, _cplane: &CPlane, p: &PointerInfo) -> ToolOutcome {
+        self.cursor_ray = Some(p.ray);
+        self.hover = self.pick(p, self.moving.is_none().then_some(doc));
+        if p.clicked {
+            if let Some(h) = self.hover {
+                match self.moving {
+                    None => {
+                        let e = &self.edges[h];
+                        let (s, t) = (e.2.point(e.3), e.2.point(e.4));
+                        let near = |q: DVec3| {
+                            let v = q - p.ray.origin;
+                            (v - p.ray.dir * v.dot(p.ray.dir)).length()
+                        };
+                        self.moving = Some((h, near(s) < near(t)));
+                    }
+                    Some(_) if self.aligned(h).is_some() => return ToolOutcome::Finished,
+                    _ => {}
+                }
+            }
+        }
+        ToolOutcome::Continue
+    }
+    fn preview(&self, _doc: &Document) -> Option<Body> {
+        let c = self.aligned(self.hover?)?;
+        let (t0, t1) = c.domain();
+        Some(ductile_brep::profile::wire_from_segments(&[ductile_brep::profile::Segment::new(ductile_geom::Curve3::Nurbs(c), t0, t1)]))
+    }
+    fn guides(&self, out: &mut Vec<LineInstance>) {
+        for (i, color) in [(self.moving.map(|m| m.0), [0.3, 0.7, 1.0, 1.0]), (self.hover, [1.0, 0.8, 0.3, 1.0])] {
+            if let Some(i) = i {
+                for w in self.edges[i].5.windows(2) {
+                    out.push(LineInstance::new(w[0], w[1], color, 3.0));
+                }
+            }
+        }
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut ch = false;
+        ui.horizontal(|ui| {
+            for k in 0..=3 {
+                ch |= ui.selectable_value(&mut self.order, k, format!("G{k}")).changed();
+            }
+        });
+        ch
+    }
+    fn command_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
+        let k = match key {
+            egui::Key::Num0 => 0,
+            egui::Key::Num1 => 1,
+            egui::Key::Num2 => 2,
+            egui::Key::Num3 => 3,
+            _ => return false,
+        };
+        if m.any() {
+            return false;
+        }
+        self.order = k;
+        true
+    }
+    fn hidden_objects(&self) -> Vec<ObjectId> {
+        vec![]
+    }
+    fn commit(&mut self, doc: &mut Document) -> bool {
+        let (Some((mi, _)), Some(h)) = (self.moving, self.hover) else { return false };
+        let Some(c) = self.aligned(h) else { return false };
+        let (oid, eid) = (self.edges[mi].0, self.edges[mi].1);
+        let Some(o) = doc.object(oid) else { return false };
+        let (t0, t1) = c.domain();
+        let new = ductile_brep::profile::Segment::new(ductile_geom::Curve3::Nurbs(c), t0, t1);
+        let segs: Vec<_> = o.body.edges.iter().enumerate().map(|(i, e)| if i == eid.idx() { new.clone() } else { ductile_brep::profile::Segment::new(e.curve.clone(), e.t0, e.t1) }).collect();
+        doc.replace_body(oid, ductile_brep::profile::wire_from_segments(&segs));
+        true
     }
 }

@@ -68,7 +68,9 @@ code from them.
   curve that meets them with G0 to G3 continuity and adjustable tension;
   Extend lengthens open curves past their ends, naturally (lines
   and arcs stay lines and arcs, splines continue their own polynomial) or
-  straight along the end tangent.
+  straight along the end tangent. Align curve moves the end of a curve onto another
+  curve and leaves it with G0 to G3 continuity, changing only the control
+  points next to that end.
 - Extrude (E): push/pull planar faces, or turn closed planar curves (with
   holes) into solids, with live preview. Curves drawn on a solid's face
   join it when pulled out and cut it when pushed in (or pick New, Join or
