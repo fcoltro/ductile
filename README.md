@@ -74,7 +74,8 @@ code from them.
   one opens there); Insert knot (K to switch) adds a control point
   without changing the shape. Deform curve lays curves drawn over a flat
   face onto another face (curved too), with scale, offset and flips in its
-  u, v and normal. Slide CV (Shift+G) moves selected control points along
+  u, v and normal (Unwrap face lays a face flat first, exactly for planes,
+  cylinders and cones, as a reference). Slide CV (Shift+G) moves selected control points along
   their control polygon. Bridge (Alt+B) joins two curve ends with a new
   curve that meets them with G0 to G3 continuity and adjustable tension;
   Extend lengthens open curves past their ends, naturally (lines

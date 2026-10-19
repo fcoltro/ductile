@@ -30,6 +30,7 @@ pub enum Command {
     Duplicate,
     Instance,
     DeleteRedundant,
+    UnwrapFace,
     MakeUnique,
     SelectAll,
     DeselectAll,
@@ -170,6 +171,7 @@ impl Command {
         Command::Duplicate,
         Command::Instance,
         Command::DeleteRedundant,
+        Command::UnwrapFace,
         Command::MakeUnique,
         Command::SelectAll,
         Command::DeselectAll,
@@ -311,6 +313,7 @@ impl Command {
             Duplicate => "Duplicate",
             Instance => "Instance (linked copy)",
             DeleteRedundant => "Delete redundant topology",
+            UnwrapFace => "Unwrap face (lay flat)",
             MakeUnique => "Make instance unique",
             SelectAll => "Select all",
             DeselectAll => "Deselect all",
@@ -616,6 +619,42 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
                 app.doc.selection.clear();
                 app.doc.selection.extend(made.into_iter().map(Pick::Object));
                 app.start_tool(std::boxed::Box::new(TransformTool::new(TransformKind::Move, &app.doc)));
+            }
+        }
+        UnwrapFace => {
+            let faces = app.doc.selected_faces();
+            if faces.is_empty() {
+                app.status = "Unwrap face: select faces (face mode)".into();
+            } else {
+                // Laid out on the construction plane, beside the model.
+                let cp = crate::tools::current_cplane().frame;
+                let bb = app.doc.bbox();
+                let mut x = if bb.is_empty() { 0.0 } else { (bb.max - cp.origin).dot(cp.x) + 0.1 * bb.diagonal() };
+                let mut made = Vec::new();
+                for (o, f) in faces {
+                    let Some(b) = app.doc.object(o).map(|ob| ob.body.clone()) else { continue };
+                    let onto = Frame { origin: cp.origin + cp.x * x, ..cp };
+                    if let Some(flat) = ductile_brep::ops::unwrap::unwrap_face(&b, f, &onto) {
+                        // Shift so pieces sit side by side.
+                        let fb = flat.bbox();
+                        let lo = (fb.min - onto.origin).dot(cp.x);
+                        let flat = flat.transformed(&ductile_geom::DMat4::from_translation(-cp.x * lo));
+                        x += (fb.max - fb.min).dot(cp.x).abs() + 0.05 * bb.diagonal().max(1.0);
+                        made.push(flat);
+                    }
+                }
+                if made.is_empty() {
+                    app.status = "Unwrap face: could not lay the faces flat".into();
+                } else {
+                    app.doc.checkpoint("Unwrap face");
+                    app.doc.selection.clear();
+                    let n = made.len();
+                    for b in made {
+                        let id = app.doc.add_body("Unwrapped", b);
+                        app.doc.selection.insert(Pick::Object(id));
+                    }
+                    app.status = format!("Laid {n} face(s) flat");
+                }
             }
         }
         DeleteRedundant => {
