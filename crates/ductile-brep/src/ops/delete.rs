@@ -12,8 +12,9 @@ use std::collections::{HashMap, HashSet};
 /// whose edges all border deleted faces is dropped as well, so deleting a
 /// hole or a boss closes the face it sat in and the solid stays solid.
 /// A fillet or chamfer between two planes is removed by growing the
-/// planes back to their sharp edge. When the gap cannot be closed the
-/// result is an open sheet.
+/// planes back to their sharp edge, and a round fillet band (round a boss,
+/// say) by growing the faces either side to their circle of contact. When
+/// the gap cannot be closed the result is an open sheet.
 pub fn delete_faces(b: &Body, faces: &[FaceId]) -> Body {
     let gone: HashSet<FaceId> = faces.iter().copied().collect();
     if gone.is_empty() {
@@ -27,6 +28,11 @@ pub fn delete_faces(b: &Body, faces: &[FaceId]) -> Body {
             if nbrs.iter().all(|n| !gone.contains(n)) {
                 let mut trial = work.clone();
                 if remove_blend(&mut trial, *f) {
+                    work = trial;
+                    continue;
+                }
+                let mut trial = work.clone();
+                if remove_band(&mut trial, *f) {
                     work = trial;
                 }
             }
@@ -197,6 +203,106 @@ fn remove_blend(b: &mut Body, f: FaceId) -> bool {
     false
 }
 
+/// Removes a closed blend band — a face bounded by two closed edges and a
+/// seam, like a fillet round a circular edge — by growing the faces either
+/// side until they meet in the circle where their surfaces cross. `f` is
+/// left with no loops; returns false (with `b` partly changed) when the
+/// faces do not meet in one circle near the band.
+fn remove_band(b: &mut Body, f: FaceId) -> bool {
+    let face = b.face(f).clone();
+    if face.loops.len() != 1 {
+        return false;
+    }
+    let co = b.loops[face.loops[0].idx()].coedges.clone();
+    let mut count: HashMap<EdgeId, usize> = HashMap::new();
+    for c in &co {
+        *count.entry(c.edge).or_default() += 1;
+    }
+    let seams: Vec<EdgeId> = count.iter().filter(|(_, n)| **n == 2).map(|(e, _)| *e).collect();
+    let rims: Vec<EdgeId> = co.iter().map(|c| c.edge).filter(|e| count[e] == 1).collect();
+    let ([seam], [ea, eb]) = (&seams[..], &rims[..]) else { return false };
+    let (seam, ea, eb) = (*seam, *ea, *eb);
+    if co.len() != 4 || b.edge(ea).v0 != b.edge(ea).v1 || b.edge(eb).v0 != b.edge(eb).v1 {
+        return false;
+    }
+    let across = |b: &Body, e: EdgeId| -> Option<FaceId> {
+        let fs = b.edge_faces(e);
+        (fs.len() == 2).then(|| fs.iter().map(|x| x.0).find(|x| *x != f)).flatten()
+    };
+    let (Some(fa), Some(fb)) = (across(b, ea), across(b, eb)) else { return false };
+    if fa == fb {
+        return false;
+    }
+    let tol = 1e-6 * b.bbox().diagonal().max(1.0);
+    let roi = b.bbox().expanded(b.bbox().diagonal());
+    let Some(crate::ssi::Ssi::Curves(curves)) = crate::ssi::intersect_analytic(&b.face(fa).surface, &b.face(fb).surface, &roi, tol) else { return false };
+    let (va, vb) = (b.edge(ea).v0, b.edge(eb).v0);
+    let mid = 0.5 * (b.vertex(va) + b.vertex(vb));
+    // The circle nearest the band.
+    let near = |c: &Curve3| c.point(c.closest_param(mid)).distance(mid);
+    let Some((Curve3::Circle { frame, radius }, _, _)) = curves.iter().filter(|c| matches!(c.0, Curve3::Circle { .. })).min_by(|x, y| near(&x.0).total_cmp(&near(&y.0))).cloned() else { return false };
+    let band = b.vertex(va).distance(b.vertex(vb));
+    let start = { let c = Curve3::Circle { frame, radius }; c.point(c.closest_param(mid)) };
+    if start.distance(mid) > 2.0 * band + tol {
+        return false;
+    }
+    let ring = Curve3::Circle { frame: ductile_geom::Frame::new(frame.origin, frame.z, start - frame.origin), radius };
+    // Which way each old rim ran, at a point of it, decides the new one's
+    // orientation in the faces that used it.
+    let flipped = |b: &Body, e: EdgeId, rev: bool| {
+        let ed = b.edge(e);
+        let t = 0.5 * (ed.t0 + ed.t1);
+        let along = ed.curve.tangent(t) * if rev { -1.0 } else { 1.0 };
+        let q = ed.curve.point(t);
+        along.dot(ring.tangent(ring.closest_param(q))) < 0.0
+    };
+    let mut fixes: Vec<(usize, usize, bool)> = Vec::new();
+    for (l, lp) in b.loops.iter().enumerate() {
+        for (k, c) in lp.coedges.iter().enumerate() {
+            if (c.edge == ea || c.edge == eb) && !face.loops.iter().any(|x| x.idx() == l) {
+                fixes.push((l, k, flipped(b, c.edge, c.reversed)));
+            }
+        }
+    }
+    b.vertices[va.idx()].point = start;
+    for e in b.edges.iter_mut() {
+        if e.v0 == vb {
+            e.v0 = va;
+        }
+        if e.v1 == vb {
+            e.v1 = va;
+        }
+    }
+    {
+        let e = &mut b.edges[ea.idx()];
+        (e.curve, e.t0, e.t1) = (ring, 0.0, std::f64::consts::TAU);
+    }
+    for (l, k, rev) in fixes {
+        b.loops[l].coedges[k] = Coedge::new(ea, rev);
+    }
+    // Straight edges into the moved vertex stretch to reach it.
+    for i in 0..b.edges.len() {
+        let id = EdgeId(i as u32);
+        let e = &b.edges[i];
+        if [ea, eb, seam].contains(&id) || (e.v0 != va && e.v1 != va) {
+            continue;
+        }
+        if !matches!(e.curve, Curve3::Line { .. }) {
+            return false;
+        }
+        let (p, q) = (b.vertex(e.v0), b.vertex(e.v1));
+        if p.distance(q) < tol {
+            return false;
+        }
+        let e = &mut b.edges[i];
+        e.curve = Curve3::line_through(p, q);
+        (e.t0, e.t1) = (0.0, p.distance(q));
+    }
+    let fl = b.faces[f.idx()].loops[0];
+    b.loops[fl.idx()].coedges.clear();
+    true
+}
+
 /// The point on the line (p, d) where the line (q, e) crosses it.
 fn line_meet(p: DVec3, d: DVec3, q: DVec3, e: DVec3, tol: f64) -> Option<DVec3> {
     let e = e.normalize();
@@ -276,6 +382,25 @@ mod tests {
         let sharp = delete_faces(&rounded, &[f]);
         assert_eq!(sharp.kind, BodyKind::Solid);
         assert!((vol(&sharp) - 18.0).abs() < 1e-6, "{}", vol(&sharp));
+    }
+
+    #[test]
+    fn deleting_round_fillets() {
+        use crate::ops::fillet::{blend_edges, Blend};
+        // A boss on a plate, rounded at its top and filleted at its foot.
+        let plate = make_box(&Frame::WORLD, DVec3::new(6.0, 6.0, 1.0));
+        let boss = make_cylinder(&Frame::new(DVec3::new(3.0, 3.0, 0.5), DVec3::Z, DVec3::X), 1.5, 2.5);
+        let part = boolean(&plate, &boss, BoolOp::Union).unwrap();
+        let full = vol(&part);
+        let circle_at = |b: &Body, z: f64| b.edge_ids().find(|e| matches!(b.edge(*e).curve, ductile_geom::Curve3::Circle { .. }) && (b.edge(*e).mid().z - z).abs() < 1e-9).unwrap();
+        for (z, r) in [(3.0, 0.4), (1.0, 0.3)] {
+            let e = circle_at(&part, z);
+            let rounded = blend_edges(&part, &[e], Blend::Fillet(r)).unwrap();
+            let f = rounded.face_ids().find(|f| matches!(rounded.face(*f).surface, Surface::Torus { .. })).unwrap();
+            let sharp = delete_faces(&rounded, &[f]);
+            assert_eq!(sharp.kind, BodyKind::Solid, "z {z}");
+            assert!((vol(&sharp) - full).abs() < 1e-4, "z {z}: {} vs {full}", vol(&sharp));
+        }
     }
 
     #[test]

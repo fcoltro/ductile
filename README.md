@@ -35,7 +35,8 @@ code from them.
   faces around them (curved neighbours follow a straight push).
 - Delete faces (Delete in face mode) heals the solid where it can: holes
   and bosses close up, and fillets or chamfers between planes grow back to
-  a sharp edge. Otherwise the solid becomes an open sheet. Duplicate
+  a sharp edge, as do round fillets on circular edges (the top or foot of
+  a boss). Otherwise the solid becomes an open sheet. Duplicate
   (Shift+D) in face or edge mode copies the selected faces out as a sheet
   or the selected edges out as curves. Instance (Alt+D) places linked
   copies: each moves on its own, but editing one (fillet, knife, boolean...)
