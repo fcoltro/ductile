@@ -540,6 +540,9 @@ pub struct TransformTool {
     /// Selected faces of solids; when any, these move and the faces
     /// around them are re-trimmed to follow.
     faces: Vec<(ObjectId, FaceId)>,
+    /// Selected straight edges of solids and sheets; when any, the planar
+    /// faces along them tilt to follow.
+    edges: Vec<(ObjectId, EdgeId)>,
     pivot: DVec3,
     start: Option<DVec3>,
     current: Option<DVec3>,
@@ -559,7 +562,18 @@ impl TransformTool {
         let surface_controls: Vec<_> = doc.selection.iter().filter_map(|p| if let Pick::SurfaceControl(o, f, i) = p { Some((*o, *f, *i)) } else { None }).collect();
         let targets = doc.selected_objects();
         let faces: Vec<(ObjectId, FaceId)> = if controls.is_empty() && surface_controls.is_empty() { doc.selected_faces() } else { Vec::new() };
+        let edges: Vec<(ObjectId, EdgeId)> = if controls.is_empty() && surface_controls.is_empty() && faces.is_empty() {
+            doc.selected_edges().into_iter().filter(|(o, _)| doc.object(*o).is_some_and(|ob| ob.body.kind != ductile_brep::BodyKind::Wire)).collect()
+        } else {
+            Vec::new()
+        };
         let mut bb = ductile_geom::BBox3::EMPTY;
+        for (o, e) in &edges {
+            if let Some(ob) = doc.object(*o) {
+                let ed = ob.body.edge(*e);
+                bb = bb.union(&ductile_geom::BBox3::from_points([ob.body.vertex(ed.v0), ob.body.vertex(ed.v1)]));
+            }
+        }
         for (o, f) in &faces {
             if let Some(ob) = doc.object(*o) {
                 let b = &ob.body;
@@ -573,7 +587,7 @@ impl TransformTool {
                 }
             }
         }
-        if controls.is_empty() && surface_controls.is_empty() && faces.is_empty() {
+        if controls.is_empty() && surface_controls.is_empty() && faces.is_empty() && edges.is_empty() {
             for id in &targets {
                 if let Some(o) = doc.object(*id) {
                     bb = bb.union(&o.body.bbox());
@@ -589,12 +603,19 @@ impl TransformTool {
             }
         }
         let pivot = if bb.is_empty() { DVec3::ZERO } else { bb.center() };
-        Self { kind, targets, controls, surface_controls, faces, pivot, start: None, current: None, axis: None, typed: None, value: 0.0, falloff: 0, mirror: false }
+        Self { kind, targets, controls, surface_controls, faces, edges, pivot, start: None, current: None, axis: None, typed: None, value: 0.0, falloff: 0, mirror: false }
     }
 
     /// The object's body after applying `m` to it, or to its selected
     /// control points.
     fn moved(&self, id: ObjectId, body: &Body, m: &DMat4) -> Body {
+        if !self.edges.is_empty() {
+            let mine: Vec<EdgeId> = self.edges.iter().filter(|e| e.0 == id).map(|e| e.1).collect();
+            if mine.is_empty() {
+                return body.clone();
+            }
+            return ductile_brep::ops::draft::move_edges(body, &mine, m).unwrap_or_else(|| body.clone());
+        }
         if !self.faces.is_empty() {
             // Moving faces: the planes go where `m` takes them, the faces
             // around follow; the body stays put when they cannot.
@@ -841,6 +862,8 @@ impl Tool for TransformTool {
             ("Select control points", self.surface_controls.len(), "point", "points")
         } else if !self.faces.is_empty() {
             ("Select faces", self.faces.len(), "face", "faces")
+        } else if !self.edges.is_empty() {
+            ("Select edges", self.edges.len(), "edge", "edges")
         } else {
             ("Select objects", self.targets.len(), "object", "objects")
         };
@@ -878,7 +901,7 @@ impl Tool for TransformTool {
         for id in self.targets.clone() {
             if let Some(o) = doc.object(id) {
                 let b = self.moved(id, &o.body, &m);
-                if self.faces.is_empty() && self.controls.is_empty() && self.surface_controls.is_empty() {
+                if self.faces.is_empty() && self.edges.is_empty() && self.controls.is_empty() && self.surface_controls.is_empty() {
                     doc.move_body(id, b, &m);
                 } else {
                     doc.replace_body(id, b);
@@ -5293,6 +5316,23 @@ impl Tool for RevolveTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_a_block_edge_makes_a_slope() {
+        let mut doc = Document::default();
+        let id = doc.add_body("Box", make_box(&Frame::WORLD, DVec3::new(2.0, 2.0, 1.0)));
+        let b = doc.object(id).unwrap().body.clone();
+        let e = b.edge_ids().find(|e| (b.edge(*e).mid() - DVec3::new(2.0, 1.0, 1.0)).length() < 1e-9).unwrap();
+        doc.selection.insert(Pick::Edge(id, e));
+        let mut t = TransformTool::new(TransformKind::Move, &doc);
+        t.constrain_axis(0);
+        t.typed_value(Some(-0.5));
+        assert!(t.commit(&mut doc));
+        let after = &doc.object(id).unwrap().body;
+        assert_eq!(after.faces.len(), 6);
+        assert!(after.vertices.iter().any(|v| (v.point - DVec3::new(1.5, 0.0, 1.0)).length() < 1e-9));
+        assert!(after.vertices.iter().any(|v| (v.point - DVec3::new(2.0, 0.0, 0.0)).length() < 1e-9));
+    }
 
     #[test]
     fn spiral_commits_a_flat_curve() {

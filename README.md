@@ -39,6 +39,9 @@ code from them.
   traces curves onto solids along the construction plane's normal.
 - Move faces: G in face mode pushes or tilts planar faces and re-trims the
   faces around them (curved neighbours follow a straight push).
+- Move edges: G with straight edges of a solid selected tilts the planar
+  faces along them about their far sides, so pulling a block's edge in
+  makes a slope.
 - Delete faces (Delete in face mode) heals the solid where it can: holes
   and bosses close up, and fillets or chamfers between planes grow back to
   a sharp edge, as do round fillets on circular edges (the top or foot of

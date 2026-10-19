@@ -96,6 +96,51 @@ pub fn replace_planes(b: &Body, planes: &HashMap<FaceId, Surface>) -> Option<Bod
     Some(out)
 }
 
+/// Moves straight edges of planar faces by `m`: each face along a moved
+/// edge tilts about its far side to pass through the edge's new place,
+/// and the faces around follow, as pulling the edge of a block makes a
+/// slope. None when an edge is not straight between planar faces or the
+/// faces cannot follow.
+pub fn move_edges(b: &Body, edges: &[EdgeId], m: &DMat4) -> Option<Body> {
+    let mut moved: HashMap<VertexId, DVec3> = HashMap::new();
+    let mut faces: Vec<FaceId> = Vec::new();
+    for e in edges {
+        let edge = b.edge(*e);
+        if !matches!(edge.curve, Curve3::Line { .. }) {
+            return None;
+        }
+        for v in [edge.v0, edge.v1] {
+            moved.insert(v, m.transform_point3(b.vertex(v)));
+        }
+        for (f, _) in b.edge_faces(*e) {
+            if !faces.contains(&f) {
+                faces.push(f);
+            }
+        }
+    }
+    let mut planes = HashMap::new();
+    for f in faces {
+        let face = b.face(f);
+        let Surface::Plane { frame } = &face.surface else { return None };
+        let verts: Vec<VertexId> = b.face_loops(f).flat_map(|l| l.coedges.iter()).map(|c| b.coedge_vertices(*c).0).collect();
+        let mut pts: Vec<DVec3> = verts.iter().filter_map(|v| moved.get(v).copied()).collect();
+        pts.dedup_by(|a, b| a.distance(*b) < 1e-12);
+        // The moved points, and the fixed corner farthest from them to
+        // hinge about.
+        let (a, c) = (pts[0], *pts.last()?);
+        let line = (c - a).try_normalize()?;
+        let off = |p: DVec3| (p - a - line * line.dot(p - a)).length();
+        let third = pts.iter().copied().filter(|p| off(*p) > 1e-9).max_by(|x, y| off(*x).total_cmp(&off(*y))).or_else(|| {
+            verts.iter().filter(|v| !moved.contains_key(v)).map(|v| b.vertex(*v)).max_by(|x, y| off(*x).total_cmp(&off(*y)))
+        })?;
+        let n = line.cross(third - a).try_normalize()?;
+        let n = if n.dot(frame.z) < 0.0 { -n } else { n };
+        let x = (frame.x - n * n.dot(frame.x)).try_normalize()?;
+        planes.insert(f, Surface::Plane { frame: ductile_geom::Frame { origin: a, x, y: n.cross(x), z: n } });
+    }
+    replace_planes(b, &planes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,5 +164,20 @@ mod tests {
         assert!((top - (2.0 - a.tan())).abs() < 1e-9);
         // Too steep: the top would turn inside out.
         assert!(draft_faces(&bx, &sides, DVec3::ZERO, DVec3::Z, 70f64.to_radians()).is_none());
+    }
+
+    #[test]
+    fn pulling_an_edge_of_a_block_makes_a_slope() {
+        let bx = make_box(&Frame::WORLD, DVec3::new(2.0, 2.0, 1.0));
+        // The top edge along y at x = 2, pulled in by 0.5.
+        let e = bx.edge_ids().find(|e| {
+            let m = bx.edge(*e).mid();
+            (m.x - 2.0).abs() < 1e-9 && (m.z - 1.0).abs() < 1e-9
+        }).unwrap();
+        let d = move_edges(&bx, &[e], &DMat4::from_translation(DVec3::new(-0.5, 0.0, 0.0))).unwrap();
+        // The block loses a wedge 0.5 wide and 1 tall along its 2 length.
+        let v = tessellate(&d, &TessOptions::default()).volume();
+        assert!((v - (4.0 - 0.5)).abs() < 1e-9, "{v}");
+        assert_eq!(d.faces.len(), 6);
     }
 }
