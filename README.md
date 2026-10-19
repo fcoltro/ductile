@@ -162,6 +162,8 @@ code from them.
   then an exact cone, the smooth one its G2 counterpart. Chordal sizes a
   round blend by the width of its chord instead of its radius; along one
   edge whose faces open up, the radius varies to keep the chord.
+  Picking one edge of a tangent run (a filleted outline) blends the whole
+  run, as in Plasticity; T or the panel's Add tangent edges turns that off.
   Limit points (L, one straight edge between planes) blend only part of
   the edge, between two fractions along it, ending square where the sharp
   edge carries on.

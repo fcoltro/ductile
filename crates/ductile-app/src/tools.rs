@@ -2424,20 +2424,34 @@ pub struct FilletTool {
     pub limits: (f64, f64),
     /// Smooth (G2) sections: 0.5 the default, higher fuller.
     pub tension: f64,
+    /// Add the edges running on tangentially from the picked ones (T).
+    pub tangent: bool,
+    picked: Vec<ductile_brep::EdgeId>,
+    grown: Vec<ductile_brep::EdgeId>,
     typed: Option<f64>,
     bg: Background<FilletKey, (Option<Body>, Option<String>)>,
 }
 
-type FilletKey = (f64, BlendShape, bool, f64, Option<(f64, f64)>, f64);
+type FilletKey = (f64, BlendShape, bool, f64, Option<(f64, f64)>, f64, bool);
 
 impl FilletTool {
     /// Starts on the selected edges of the first object that has any.
     pub fn new(doc: &Document, chamfer: bool) -> Option<Self> {
         let sel = doc.selected_edges();
         let target = sel.first()?.0;
-        let edges: Vec<_> = sel.iter().filter(|(o, _)| *o == target).map(|(_, e)| *e).collect();
+        let picked: Vec<_> = sel.iter().filter(|(o, _)| *o == target).map(|(_, e)| *e).collect();
         let o = doc.object(target)?;
         let b = &o.body;
+        // The picked edges' tangent runs, through creased edges only.
+        let mut grown = Vec::new();
+        for &e in &picked {
+            for x in ductile_brep::ops::chain::grow_tangent_chain(b, e, &|x| edge_turn(b, x, 0.5).is_some_and(|a| a > 0.09)) {
+                if !grown.contains(&x) {
+                    grown.push(x);
+                }
+            }
+        }
+        let edges = grown.clone();
         let ed = b.edge(edges[0]);
         let base = ed.mid();
         // Drag handle: into the material, between the two faces.
@@ -2451,21 +2465,26 @@ impl FilletTool {
             .sum();
         let dir = (-n).try_normalize().unwrap_or(DVec3::Z);
         let shape = if chamfer { BlendShape::Chamfer } else { BlendShape::Round };
-        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, shape, variable: false, end_radius: 1.0, limited: false, limits: (0.25, 0.75), tension: 0.5, typed: None, bg: Background::default() })
+        Some(Self { target, body: o.body.clone(), edges, base, dir, start_t: None, radius: 0.0, shape, variable: false, end_radius: 1.0, limited: false, limits: (0.25, 0.75), tension: 0.5, tangent: true, picked, grown, typed: None, bg: Background::default() })
     }
 
     fn value(&self) -> f64 {
         self.typed.unwrap_or(self.radius)
     }
 
+    fn set_tangent(&mut self, on: bool) {
+        self.tangent = on;
+        self.edges = if on { self.grown.clone() } else { self.picked.clone() };
+    }
+
     fn key(&self) -> FilletKey {
-        (self.value(), self.shape, self.variable, self.end_radius, (self.limited && self.edges.len() == 1).then_some(self.limits), self.tension)
+        (self.value(), self.shape, self.variable, self.end_radius, (self.limited && self.edges.len() == 1).then_some(self.limits), self.tension, self.tangent)
     }
 
     /// The blend computation for the current values, owning its inputs.
     fn job(&self) -> Box<dyn FnOnce() -> (Option<Body>, Option<String>) + Send> {
         use ductile_brep::ops::fillet::{blend_edge_between, blend_edges, blend_edges_variable, Blend};
-        let (body, edges, (r, shape, variable, end_radius, limits, tension)) = (self.body.clone(), self.edges.clone(), self.key());
+        let (body, edges, (r, shape, variable, end_radius, limits, tension, _)) = (self.body.clone(), self.edges.clone(), self.key());
         Box::new(move || ductile_brep::ops::fillet::with_tension(tension, || {
             // Chordal: the radius from the chord at each edge's ends; one
             // fillet where they agree, else a varying one along one edge.
@@ -2517,7 +2536,7 @@ impl FilletTool {
 
 impl Tool for FilletTool {
     fn keys(&self) -> Vec<(&'static str, &'static str)> {
-        vec![("D / Tab", "Distance"), ("L", "Limit points")]
+        vec![("D / Tab", "Distance"), ("L", "Limit points"), ("T", "Tangent edges")]
     }
     fn name(&self) -> &'static str {
         if self.shape == BlendShape::Chamfer {
@@ -2594,6 +2613,10 @@ impl Tool for FilletTool {
                 }
             }
         }
+        if self.grown.len() > self.picked.len() && ui.checkbox(&mut self.tangent, "Add tangent edges (T)").changed() {
+            self.set_tangent(self.tangent);
+            ch = true;
+        }
         if self.edges.len() == 1 {
             ch |= ui.checkbox(&mut self.limited, "Limit points (L)").changed();
             if self.limited {
@@ -2608,6 +2631,10 @@ impl Tool for FilletTool {
     fn command_key(&mut self, key: egui::Key, m: egui::Modifiers) -> bool {
         if key == egui::Key::L && !m.ctrl && !m.alt && self.edges.len() == 1 {
             self.limited = !self.limited;
+            return true;
+        }
+        if key == egui::Key::T && !m.ctrl && !m.alt {
+            self.set_tangent(!self.tangent);
             return true;
         }
         false
@@ -5190,6 +5217,24 @@ mod tests {
         let mut o = ShellTool::new(&doc, OffsetMode::Solid).unwrap();
         o.typed_value(Some(0.1));
         assert!(o.commit(&mut doc));
+    }
+
+    #[test]
+    fn fillets_take_the_tangent_run_of_a_picked_edge() {
+        use ductile_brep::ops::fillet::{blend_edges, Blend};
+        let b = ductile_brep::primitives::make_box(&ductile_geom::Frame::WORLD, DVec3::new(4.0, 3.0, 2.0));
+        let vertical: Vec<_> = b.edge_ids().filter(|e| (b.edge(*e).end() - b.edge(*e).start()).z.abs() > 1.0).collect();
+        let b = blend_edges(&b, &vertical, Blend::Fillet(0.5)).unwrap();
+        let mut doc = Document::default();
+        let id = doc.add_body("Block", b);
+        let body = doc.object(id).unwrap().body.clone();
+        let top = body.edge_ids().find(|e| body.edge(*e).start().z > 1.9 && body.edge(*e).end().z > 1.9 && body.edge(*e).curve.is_linear()).unwrap();
+        doc.selection.insert(Pick::Edge(id, top));
+        let mut f = FilletTool::new(&doc, false).unwrap();
+        // Four lines and four arcs round the top.
+        assert_eq!(f.edges.len(), 8);
+        f.set_tangent(false);
+        assert_eq!(f.edges.len(), 1);
     }
 
     #[test]
