@@ -146,6 +146,9 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
     if !blendable.is_empty() && blendable.len() < edges.len() {
         return blend_edges(body, &blendable, blend);
     }
+    if let Some(Ok(b)) = mixed_corners_first(body, edges, blend) {
+        return Ok(b);
+    }
     let first = blend_selected(body, edges, blend);
     if first.is_ok() || edges.is_empty() {
         return first;
@@ -196,6 +199,64 @@ pub fn blend_edges(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, 
         }
     }
     first
+}
+
+/// Mixed corners, where a convex edge meets two concave ones (a boss's
+/// upright edge and its base) or the other way round: the odd edge out is
+/// blended first, so that the other two then run on through its round as
+/// one tangent chain and the ball rolls a smooth toroidal corner, as one
+/// would fillet them by hand. None when the selection has no such corner.
+fn mixed_corners_first(body: &Body, edges: &[EdgeId], blend: Blend) -> Option<Result<Body, FilletError>> {
+    let set: BTreeSet<EdgeId> = edges.iter().copied().collect();
+    let mut odd: BTreeSet<EdgeId> = BTreeSet::new();
+    for vi in 0..body.vertices.len() {
+        let v = VertexId(vi as u32);
+        let inc: Vec<EdgeId> = body.edge_ids().filter(|e| (body.edge(*e).v0 == v || body.edge(*e).v1 == v) && body.edge_faces(*e).len() == 2).collect();
+        if inc.len() != 3 || !inc.iter().all(|e| set.contains(e)) {
+            continue;
+        }
+        let Ok(conv) = inc.iter().map(|e| edge_info(body, *e).map(|i| i.convex)).collect::<Result<Vec<bool>, _>>() else { continue };
+        let n = conv.iter().filter(|c| **c).count();
+        if n == 1 || n == 2 {
+            let lone = n == 1;
+            odd.extend(inc.iter().zip(&conv).filter(|(_, c)| **c == lone).map(|(e, _)| *e));
+        }
+    }
+    if odd.is_empty() || odd.len() == set.len() {
+        return None;
+    }
+    let first: Vec<EdgeId> = odd.iter().copied().collect();
+    let b = match blend_selected(body, &first, blend) {
+        Ok(b) => b,
+        Err(e) => return Some(Err(e)),
+    };
+    // The other edges, found again on the new body along their old curves,
+    // with the rounds the first pass left between them.
+    let tol = 1e-6 * body.bbox().diagonal().max(1.0);
+    let on_edge = |orig: &crate::topo::Edge, p: DVec3| orig.curve.point(orig.curve.closest_param_in(p, orig.t0, orig.t1)).distance(p) < tol;
+    let on = |x: EdgeId, of: &[EdgeId]| {
+        let ed = b.edge(x);
+        of.iter().any(|e| {
+            let o = body.edge(*e);
+            on_edge(o, ed.start()) && on_edge(o, ed.end()) && on_edge(o, ed.mid())
+        })
+    };
+    let rest: Vec<EdgeId> = set.iter().copied().filter(|e| !odd.contains(e)).collect();
+    let now: Vec<EdgeId> = b.edge_ids().filter(|x| b.edge_faces(*x).len() == 2 && on(*x, &rest)).collect();
+    let all: Vec<EdgeId> = body.edge_ids().collect();
+    let new_edge = |x: EdgeId| !on(x, &all);
+    let mut grown: Vec<EdgeId> = Vec::new();
+    for &e in &now {
+        for x in super::chain::grow_tangent_chain(&b, e, &|x| now.contains(&x) || new_edge(x)) {
+            if !grown.contains(&x) {
+                grown.push(x);
+            }
+        }
+    }
+    if grown.is_empty() {
+        return Some(Ok(b));
+    }
+    Some(blend_selected(&b, &grown, blend))
 }
 
 fn blend_selected(body: &Body, edges: &[EdgeId], blend: Blend) -> Result<Body, FilletError> {
@@ -416,6 +477,12 @@ fn line_ends(b: &Body, e: EdgeId, info: &EdgeInfo, caps: &[(DVec3, DVec3)], r: f
                 ends.push((p, n));
                 continue;
             }
+            // A convex edge rising from a floor (a boss's upright edge)
+            // stops at the floor, so its cut does not groove it.
+            if info.convex && b.face(f).surface.is_planar() && n.dot(along) < -1e-6 {
+                ends.push((p, -n));
+                continue;
+            }
         }
         ends.push((p + along * margin, along));
     }
@@ -614,7 +681,10 @@ fn cap_line_tool(b: &Body, e: EdgeId, info: &EdgeInfo, mut tool: Body, size: f64
             let n = outward(b, others[0], p);
             // Only cap when the end face actually faces away along the edge.
             let along = if p.distance(p1) < p.distance(p0) { t } else { -t };
-            if n.dot(along) > 1e-6 {
+            if info.convex && b.face(others[0]).surface.is_planar() && n.dot(along) < -1e-6 {
+                // Rising from a floor: keep the cut above it.
+                tool = boolean(&tool, &half_space(p, -n, size), BoolOp::Intersection)?;
+            } else if n.dot(along) > 1e-6 {
                 tool = match &b.face(others[0]).surface {
                     // A curved end face (a hole the edge runs into) bends
                     // away from its tangent plane: stop at the face itself.
@@ -988,6 +1058,29 @@ mod tests {
         let f = blend_edges(&b, &[e], Blend::Fillet(0.14645104439179424)).unwrap();
         assert_eq!(open_edges(&f), 0);
         assert!(vol(&f) < vol(&b) && vol(&f) > vol(&b) - 0.01, "{} vs {}", vol(&f), vol(&b));
+    }
+
+    #[test]
+    fn fillets_a_boss_corner_of_mixed_edges() {
+        // A boss on a plate: at its foot the upright edge is convex and the
+        // two foot edges concave. The upright fillet alone stops at the
+        // plate instead of grooving it; all three together meet in a corner.
+        let plate = make_box(&Frame::WORLD, DVec3::new(4.0, 4.0, 1.0));
+        let boss = make_box(&Frame { origin: DVec3::new(1.0, 1.0, 1.0), ..Frame::WORLD }, DVec3::new(2.0, 2.0, 1.0));
+        let b = crate::ops::boolean::boolean(&plate, &boss, crate::ops::boolean::BoolOp::Union).unwrap();
+        let at = DVec3::new(1.0, 1.0, 1.0);
+        let edges: Vec<EdgeId> = b.edge_ids().filter(|e| b.edge(*e).start().distance(at) < 1e-9 || b.edge(*e).end().distance(at) < 1e-9).collect();
+        assert_eq!(edges.len(), 3);
+        let r = 0.3;
+        let upright = *edges.iter().find(|e| (b.edge(**e).start() - b.edge(**e).end()).z.abs() > 0.5).unwrap();
+        let f = blend_edges(&b, &[upright], Blend::Fillet(r)).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        let cut = r * r * (1.0 - PI / 4.0);
+        assert!((vol(&f) - (20.0 - cut)).abs() < 1e-3, "{}", vol(&f));
+        let f = blend_edges(&b, &edges, Blend::Fillet(r)).unwrap();
+        assert_eq!(open_edges(&f), 0);
+        // Two foot fillets add material, the upright one takes a little.
+        assert!(vol(&f) > 20.0 + cut && vol(&f) < 20.0 + 4.0 * cut, "{}", vol(&f));
     }
 
     #[test]

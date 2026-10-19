@@ -228,6 +228,10 @@ impl DuctileApp {
         if opts.section {
             app.toggle_section();
         }
+        // Screenshots show the model unselected unless --select names one.
+        if app.screenshot.is_some() {
+            app.doc.selection.clear();
+        }
         if let Some(id) = opts.select.and_then(|i| app.doc.objects.get(i)).map(|o| o.id) {
             app.doc.selection.insert(Pick::Object(id));
         }
