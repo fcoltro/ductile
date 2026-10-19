@@ -152,6 +152,8 @@ pub enum Command {
     Palette,
     Help,
     Preferences,
+    ToggleLeftPanel,
+    ToggleRightPanel,
     Repeat,
     InvertSelection,
     Boolean,
@@ -301,6 +303,8 @@ impl Command {
         Command::Palette,
         Command::Help,
         Command::Preferences,
+        Command::ToggleLeftPanel,
+        Command::ToggleRightPanel,
         Command::Repeat,
         Command::InvertSelection,
         Command::Boolean,
@@ -451,6 +455,8 @@ impl Command {
             Palette => "Command palette",
             Help => "Help",
             Preferences => "Preferences",
+            ToggleLeftPanel => "Toggle left panel",
+            ToggleRightPanel => "Toggle right panel",
             Repeat => "Repeat last command",
             InvertSelection => "Invert selection",
             Boolean => "Boolean (union, subtract, intersect or slice)",
@@ -482,7 +488,7 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
     // Shift+R repeats modeling commands, not navigation or selection.
     let fleeting = matches!(
         cmd,
-        Repeat | Palette | Help | Preferences | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | Group | Ungroup | LockSelected | UnlockAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleIsophote | ToggleDraft | ToggleFaceDirection | ToggleCurvature | ToggleSection | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
+        Repeat | Palette | Help | Preferences | ToggleLeftPanel | ToggleRightPanel | Undo | Redo | New | Open | Save | SaveAs | SelectAll | InvertSelection | DeselectAll | Hide | Isolate | UnhideAll | Group | Ungroup | LockSelected | UnlockAll | ModeVertex | ModeEdge | ModeFace | ModeObject | ViewTop | ViewFront | ViewRight | ViewIso | ToggleOrtho | FrameSelection | ToggleGrid | ToggleEdges | ToggleXray | ToggleZebra | ToggleIsophote | ToggleDraft | ToggleFaceDirection | ToggleCurvature | ToggleSection | Measure | ToggleSnap | SetCPlane | SetCPlaneOnly | CPlaneView
     );
     if !fleeting {
         app.last_command = Some(cmd);
@@ -1221,6 +1227,8 @@ pub fn run(app: &mut DuctileApp, cmd: Command) {
         }
         Help => app.show_help = !app.show_help,
         Preferences => app.show_prefs = !app.show_prefs,
+        ToggleLeftPanel => app.show_left = !app.show_left,
+        ToggleRightPanel => app.show_right = !app.show_right,
     }
 }
 

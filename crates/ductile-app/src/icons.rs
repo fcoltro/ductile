@@ -216,9 +216,132 @@ pub fn paint(cmd: Command, painter: &Painter, rect: Rect, color: Color32) -> boo
             p.line(&[(0.43, 0.45), (0.45, 0.75)]);
             p.line(&[(0.57, 0.45), (0.55, 0.75)]);
         }
+        Command::Palette => {
+            p.ellipse((0.43, 0.43), 0.26, 0.26);
+            p.line(&[(0.62, 0.62), (0.86, 0.86)]);
+        }
+        Command::Boolean => {
+            p.ellipse((0.38, 0.5), 0.26, 0.26);
+            p.ellipse((0.62, 0.5), 0.26, 0.26);
+        }
+        Command::LinearArray => {
+            for (x, y) in [(0.14, 0.14), (0.56, 0.14), (0.14, 0.56), (0.56, 0.56)] {
+                p.closed(&[(x, y), (x + 0.3, y), (x + 0.3, y + 0.3), (x, y + 0.3)]);
+            }
+        }
+        Command::Trim => {
+            p.ellipse((0.28, 0.75), 0.13, 0.13);
+            p.ellipse((0.72, 0.75), 0.13, 0.13);
+            p.line(&[(0.36, 0.64), (0.78, 0.12)]);
+            p.line(&[(0.64, 0.64), (0.22, 0.12)]);
+        }
+        Command::SplitCurve => {
+            p.line(&[(0.1, 0.7), (0.42, 0.45)]);
+            p.line(&[(0.58, 0.55), (0.9, 0.3)]);
+            p.fill(&[(0.44, 0.38), (0.56, 0.5), (0.44, 0.62), (0.32, 0.5)], color);
+        }
+        Command::BridgeCurve => {
+            p.line(&[(0.08, 0.8), (0.3, 0.8)]);
+            p.line(&[(0.7, 0.2), (0.92, 0.2)]);
+            Pen { stroke: Stroke::new(1.4, soft), ..p }.line(&[(0.3, 0.8), (0.5, 0.8), (0.5, 0.2), (0.7, 0.2)]);
+        }
+        Command::Measure => {
+            p.closed(&[(0.08, 0.62), (0.62, 0.08), (0.92, 0.38), (0.38, 0.92)]);
+            for k in 1..5 {
+                let t = k as f32 * 0.2;
+                let (x, y) = (0.08 + 0.54 * t, 0.62 - 0.54 * t);
+                p.line(&[(x, y), (x + 0.1, y + 0.1)]);
+            }
+        }
+        Command::Helix => {
+            let pts: Vec<(f32, f32)> = (0..=64).map(|i| {
+                let a = i as f32 / 64.0 * 3.0 * TAU;
+                let r = 0.06 + 0.36 * i as f32 / 64.0;
+                (0.5 + r * a.cos(), 0.5 + r * a.sin())
+            }).collect();
+            p.line(&pts);
+        }
+        Command::ModeVertex => {
+            Pen { stroke: Stroke::new(1.0, soft), ..p }.closed(&[(0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8)]);
+            for (x, y) in [(0.2, 0.2), (0.8, 0.2), (0.8, 0.8), (0.2, 0.8)] {
+                p.fill(&[(x - 0.09, y - 0.09), (x + 0.09, y - 0.09), (x + 0.09, y + 0.09), (x - 0.09, y + 0.09)], color);
+            }
+        }
+        Command::ModeEdge | Command::ModeFace | Command::ModeObject => {
+            // A cube in line art; the mode's element is drawn solid.
+            let top = [(0.5, 0.12), (0.88, 0.3), (0.5, 0.48), (0.12, 0.3)];
+            let left = [(0.12, 0.3), (0.5, 0.48), (0.5, 0.9), (0.12, 0.72)];
+            let right = [(0.5, 0.48), (0.88, 0.3), (0.88, 0.72), (0.5, 0.9)];
+            match cmd {
+                Command::ModeFace => p.fill(&top, color),
+                Command::ModeObject => {
+                    p.fill(&top, color);
+                    p.fill(&left, color.gamma_multiply(0.75));
+                    p.fill(&right, color.gamma_multiply(0.55));
+                }
+                _ => {}
+            }
+            let thin = Pen { stroke: Stroke::new(1.1, if cmd == Command::ModeEdge { soft } else { color }), ..p };
+            thin.closed(&top);
+            thin.closed(&left);
+            thin.closed(&right);
+            if cmd == Command::ModeEdge {
+                Pen { stroke: Stroke::new(2.2, color), ..p }.line(&[(0.5, 0.48), (0.5, 0.9)]);
+            }
+        }
+        Command::ToggleSection => {
+            p.ellipse((0.5, 0.5), 0.36, 0.36);
+            p.fill(&[(0.5, 0.14), (0.5, 0.86), (0.36, 0.83), (0.24, 0.75), (0.16, 0.6), (0.14, 0.5), (0.16, 0.4), (0.24, 0.25), (0.36, 0.17)], color);
+        }
+        Command::ToggleOrtho => {
+            p.closed(&[(0.15, 0.3), (0.55, 0.3), (0.55, 0.85), (0.15, 0.85)]);
+            Pen { stroke: Stroke::new(1.0, soft), ..p }.closed(&[(0.45, 0.15), (0.85, 0.15), (0.85, 0.7), (0.45, 0.7)]);
+        }
+        Command::ToggleXray => {
+            p.closed(&[(0.18, 0.18), (0.82, 0.18), (0.82, 0.82), (0.18, 0.82)]);
+            Pen { stroke: Stroke::new(1.0, soft), ..p }.line(&[(0.18, 0.82), (0.82, 0.18)]);
+            Pen { stroke: Stroke::new(1.0, soft), ..p }.line(&[(0.18, 0.5), (0.5, 0.18)]);
+            Pen { stroke: Stroke::new(1.0, soft), ..p }.line(&[(0.5, 0.82), (0.82, 0.5)]);
+        }
+        Command::ToggleEdges => {
+            p.closed(&[(0.15, 0.15), (0.85, 0.15), (0.85, 0.85), (0.15, 0.85)]);
+            p.line(&[(0.15, 0.5), (0.85, 0.5)]);
+            p.line(&[(0.5, 0.15), (0.5, 0.85)]);
+        }
         _ => return false,
     }
     true
+}
+
+/// Three dots: a "more" menu.
+pub fn dots(painter: &Painter, rect: Rect, color: Color32) {
+    for k in [-1.0, 0.0, 1.0] {
+        painter.circle_filled(rect.center() + egui::vec2(k * rect.width() * 0.3, 0.0), 1.6, color);
+    }
+}
+
+/// A window with one side bar marked: the left or right panel toggle.
+pub fn sidebar(painter: &Painter, rect: Rect, color: Color32, left: bool) {
+    let r = rect.shrink(2.0);
+    painter.rect_stroke(r, 2.0, Stroke::new(1.3, color), egui::StrokeKind::Inside);
+    let w = r.width() * 0.32;
+    let bar = if left { Rect::from_min_size(r.min, egui::vec2(w, r.height())) } else { Rect::from_min_size(pos2(r.max.x - w, r.min.y), egui::vec2(w, r.height())) };
+    painter.rect_filled(bar.shrink(2.0), 1.0, color);
+}
+
+/// A chevron pointing down (open) or right (closed).
+pub fn chevron(painter: &Painter, rect: Rect, color: Color32, open: bool) {
+    let c = rect.center();
+    let s = rect.width().min(rect.height()) * 0.22;
+    let pts = if open { vec![c + egui::vec2(-s, -s * 0.5), c + egui::vec2(0.0, s * 0.5), c + egui::vec2(s, -s * 0.5)] } else { vec![c + egui::vec2(-s * 0.5, -s), c + egui::vec2(s * 0.5, 0.0), c + egui::vec2(-s * 0.5, s)] };
+    painter.add(Shape::line(pts, Stroke::new(1.4, color)));
+}
+
+/// A cross: close or leave.
+pub fn cross(painter: &Painter, rect: Rect, color: Color32) {
+    let r = rect.shrink(rect.width() * 0.3);
+    painter.line_segment([r.left_top(), r.right_bottom()], Stroke::new(1.4, color));
+    painter.line_segment([r.right_top(), r.left_bottom()], Stroke::new(1.4, color));
 }
 
 /// An eye, open or struck through, for visibility toggles.

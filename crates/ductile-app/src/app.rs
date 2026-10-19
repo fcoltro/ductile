@@ -67,6 +67,13 @@ pub struct DuctileApp {
     pub palette_query: String,
     pub show_help: bool,
     pub show_prefs: bool,
+    pub show_left: bool,
+    pub show_right: bool,
+    /// The left panel's tab: 0 Outliner, 1 Assets.
+    pub left_tab: u8,
+    pub outliner_filter: String,
+    /// The status message last shown and since when, so it fades.
+    status_seen: (String, std::time::Instant),
     pub prefs: crate::prefs::Prefs,
     /// Set while the running tool was started by selecting a face or edge
     /// (auto-invoke): whether a drag is driving it right now. Such a tool
@@ -74,7 +81,7 @@ pub struct DuctileApp {
     /// change goes back to selecting.
     auto_tool: Option<bool>,
     screenshot: Option<(std::path::PathBuf, u32)>,
-    viewport_rect: egui::Rect,
+    pub viewport_rect: egui::Rect,
     last_cursor: Option<DVec2>,
     pub pending: Vec<Command>,
     /// The last modeling command run, for Shift+R.
@@ -145,6 +152,11 @@ impl DuctileApp {
             palette_query: String::new(),
             show_help: false,
             show_prefs: false,
+            show_left: true,
+            show_right: true,
+            left_tab: 0,
+            outliner_filter: String::new(),
+            status_seen: (String::new(), std::time::Instant::now()),
             prefs: if opts.screenshot.is_some() { crate::prefs::Prefs::default() } else { crate::prefs::Prefs::load() },
             auto_tool: None,
             screenshot: opts.screenshot.map(|p| (p, 0)),
@@ -188,6 +200,17 @@ impl DuctileApp {
             app.camera.pitch = c[5].to_radians();
         }
         app
+    }
+
+    /// The aligned view the camera looks along, if any (Top, Front, …).
+    pub fn named_view(&self) -> Option<&'static str> {
+        let b = self.camera.back();
+        [(DVec3::Z, "Top"), (-DVec3::Z, "Bottom"), (-DVec3::Y, "Front"), (DVec3::Y, "Back"), (DVec3::X, "Right"), (-DVec3::X, "Left")].into_iter().find(|(d, _)| b.dot(*d) > 1.0 - 1e-6).map(|(_, n)| n)
+    }
+
+    /// The status message while it is fresh (a few seconds after it changed).
+    pub fn recent_status(&self) -> Option<&str> {
+        (!self.status.is_empty() && self.status_seen.0 == self.status && self.status_seen.1.elapsed() < std::time::Duration::from_secs(5)).then_some(self.status.as_str())
     }
 
     pub fn start_tool(&mut self, t: Box<dyn Tool>) {
@@ -354,18 +377,33 @@ impl DuctileApp {
                 out.push(LineInstance { style: [1.0, 0.0, -1.0, 0.0], ..LineInstance::new(p0, p1, c, 1.0) });
             }
         };
+        let minor_col = [0.205, 0.207, 0.215, 1.0];
+        let major_col = [0.235, 0.237, 0.246, 1.0];
         for i in -n..=n {
             let x = cx + step * i as f64;
             let y = cy + step * i as f64;
             let is_major_x = ((x / major).round() * major - x).abs() < step * 0.01;
             let is_major_y = ((y / major).round() * major - y).abs() < step * 0.01;
-            let minor_col = [0.20, 0.21, 0.24, 0.5];
-            let major_col = [0.28, 0.29, 0.33, 0.85];
-            let cx_col = if x.abs() < step * 0.01 { [0.30, 0.60, 0.25, 1.0] } else if is_major_x { major_col } else { minor_col };
-            let cy_col = if y.abs() < step * 0.01 { [0.70, 0.25, 0.25, 1.0] } else if is_major_y { major_col } else { minor_col };
-            push(f.to_world(DVec3::new(x, cy - ext, 0.0)), f.to_world(DVec3::new(x, cy + ext, 0.0)), cx_col);
-            push(f.to_world(DVec3::new(cx - ext, y, 0.0)), f.to_world(DVec3::new(cx + ext, y, 0.0)), cy_col);
+            // The axes are drawn on their own below.
+            if x.abs() >= step * 0.01 {
+                push(f.to_world(DVec3::new(x, cy - ext, 0.0)), f.to_world(DVec3::new(x, cy + ext, 0.0)), if is_major_x { major_col } else { minor_col });
+            }
+            if y.abs() >= step * 0.01 {
+                push(f.to_world(DVec3::new(cx - ext, y, 0.0)), f.to_world(DVec3::new(cx + ext, y, 0.0)), if is_major_y { major_col } else { minor_col });
+            }
         }
+        // The plane's axes run right across the view, as in Plasticity.
+        let far = ext * 6.0;
+        let axis = |out: &mut Vec<LineInstance>, d: DVec3, col: [f32; 4]| {
+            let k = 48;
+            for i in 0..k {
+                let (a, b) = (-far + 2.0 * far * i as f64 / k as f64, -far + 2.0 * far * (i + 1) as f64 / k as f64);
+                out.push(LineInstance { style: [1.2, 0.0, -1.0, 0.0], ..LineInstance::new(f.to_world(d * a), f.to_world(d * b), col, 1.2) });
+            }
+        };
+        axis(out, DVec3::X, [0.62, 0.16, 0.17, 1.0]);
+        axis(out, DVec3::Y, [0.18, 0.52, 0.20, 1.0]);
+        axis(out, DVec3::Z, [0.20, 0.36, 0.72, 1.0]);
     }
 
     /// Snapped pointer position (with the snap's label): object snaps,
@@ -837,7 +875,7 @@ impl DuctileApp {
 
     /// Small orientation widget in the viewport corner; click an axis to view along it.
     fn view_gizmo(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
-        let center = rect.right_top() + egui::vec2(-60.0, 60.0);
+        let center = rect.right_top() + egui::vec2(-60.0, 110.0);
         let painter = ui.painter_at(rect);
         let view = self.camera.view();
         let axes = [
@@ -1203,6 +1241,10 @@ impl eframe::App for DuctileApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_keys(&ctx);
+        if self.status_seen.0 != self.status {
+            self.status_seen = (self.status.clone(), std::time::Instant::now());
+            ctx.request_repaint_after(std::time::Duration::from_secs(5));
+        }
         // Every couple of minutes with unsaved changes, keep a copy to
         // recover from (File > Recover autosave).
         if self.doc.dirty && self.tool.is_none() && self.prefs.autosave_minutes > 0 && self.last_autosave.elapsed() > std::time::Duration::from_secs(60 * self.prefs.autosave_minutes as u64) {
@@ -1224,10 +1266,10 @@ impl eframe::App for DuctileApp {
             self.cancel_tool();
         }
         crate::ui::top_bar(self, ui);
-        crate::ui::status_bar(self, ui);
-        crate::ui::toolbar(self, ui);
-        crate::ui::side_panel(self, ui);
-        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| self.viewport(ui, frame));
+        crate::ui::left_panel(self, ui);
+        crate::ui::right_panel(self, ui);
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(crate::theme::FRAME).inner_margin(egui::Margin { left: 0, right: 0, top: 0, bottom: 6 })).show(ui, |ui| self.viewport(ui, frame));
+        crate::ui::viewport_overlays(self, &ctx);
         crate::ui::palette(self, &ctx);
         crate::ui::help_window(self, &ctx);
         crate::ui::prefs_window(self, &ctx);

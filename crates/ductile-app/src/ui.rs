@@ -8,152 +8,141 @@ use crate::document::{GroupId, ObjectId, SelectMode};
 use crate::theme;
 use egui::{Color32, RichText};
 
-pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
-    egui::Panel::top("top").frame(egui::Frame::new().fill(theme::PANEL_DARK).inner_margin(egui::Margin::symmetric(8, 4))).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Ductile").strong().color(theme::ACCENT));
-            ui.separator();
-            ui.menu_button("File", |ui| {
-                for c in [Command::New, Command::Open] {
-                    menu_item(app, ui, c);
-                }
-                let recent = crate::recent::list();
-                ui.add_enabled_ui(!recent.is_empty(), |ui| {
-                    ui.menu_button("Open recent", |ui| {
-                        for p in recent {
-                            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                            if ui.button(name).on_hover_text(p.display().to_string()).clicked() {
-                                crate::commands::open_file(app, &p);
-                                ui.close();
-                            }
-                        }
-                    });
-                });
-                if let Some(p) = crate::recent::autosave_path().filter(|p| p.exists()) {
-                    if ui.button("Recover autosave").on_hover_text("Open the copy kept while you work").clicked() {
+/// The menus behind the app button at the left of the title row.
+fn app_menu(app: &mut DuctileApp, ui: &mut egui::Ui) {
+    ui.menu_button("File", |ui| {
+        for c in [Command::New, Command::Open] {
+            menu_item(app, ui, c);
+        }
+        let recent = crate::recent::list();
+        ui.add_enabled_ui(!recent.is_empty(), |ui| {
+            ui.menu_button("Open recent", |ui| {
+                for p in recent {
+                    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    if ui.button(name).on_hover_text(p.display().to_string()).clicked() {
                         crate::commands::open_file(app, &p);
-                        // Not the document's own file: Save asks where.
-                        app.doc.path = None;
-                        app.doc.dirty = true;
                         ui.close();
                     }
                 }
-                ui.separator();
-                for c in [Command::Save, Command::SaveAs, Command::ImportStep, Command::ImportSvg, Command::ImportMesh, Command::ImportImage, Command::ExportStep, Command::ExportStl, Command::ExportObj, Command::ExportHiddenLine] {
-                    menu_item(app, ui, c);
-                }
             });
-            ui.menu_button("Edit", |ui| {
-                for c in [Command::Undo, Command::Redo, Command::Duplicate, Command::Instance, Command::MakeUnique, Command::DeleteRedundant, Command::CompleteEdge, Command::UnwrapFace, Command::Delete, Command::SelectAll, Command::DeselectAll, Command::SelectPrevious, Command::Hide, Command::Isolate, Command::UnhideAll, Command::Preferences] {
-                    menu_item(app, ui, c);
-                }
-            });
-            ui.menu_button("Create", |ui| {
-                for c in [Command::Box, Command::Cylinder, Command::Cone, Command::Sphere, Command::Torus] {
-                    menu_item(app, ui, c);
-                }
-            });
-            ui.menu_button("Curve", |ui| {
-                for c in [Command::Curve, Command::Spline, Command::Arc, Command::TangentArc, Command::Rectangle, Command::Circle, Command::TangentCircle, Command::Ellipse, Command::Polygon, Command::Slot, Command::Helix, Command::Text, Command::OffsetCurve, Command::JoinCurves, Command::Trim, Command::SplitCurve, Command::InsertKnot, Command::ConvertVertex, Command::DeformCurve, Command::SlideCv, Command::BridgeCurve, Command::AlignCurve, Command::ExtendCurve, Command::ReverseCurve, Command::RaiseDegree, Command::RebuildCurve, Command::IntersectionCurve, Command::ProjectCurve] {
-                    menu_item(app, ui, c);
-                }
-            });
-            ui.menu_button("Solid", |ui| {
-                for c in [Command::Extrude, Command::Revolve, Command::Loft, Command::Sweep, Command::Pipe, Command::Patch, Command::ConstrainedSurface, Command::BridgeSurface, Command::MatchSurface, Command::Isoparam, Command::RaiseSurfaceDegree, Command::RebuildFace, Command::Untrim, Command::Unjoin, Command::ReverseSheet, Command::FindBoundaryEdges, Command::Thicken, Command::Cut, Command::Imprint, Command::OffsetEdge, Command::OffsetFaceTo, Command::Draft, Command::Fillet, Command::FullRound, Command::RemoveFillets, Command::Chamfer, Command::Shell, Command::OffsetSolid, Command::Union, Command::Subtract, Command::Intersect] {
-                    menu_item(app, ui, c);
-                }
-            });
-            ui.menu_button("Transform", |ui| {
-                for c in [Command::Move, Command::Rotate, Command::Scale, Command::MirrorX, Command::MirrorY, Command::MirrorZ, Command::LinearArray, Command::RadialArray, Command::CurveArray, Command::Place] {
-                    menu_item(app, ui, c);
-                }
-            });
-            ui.menu_button("View", |ui| {
-                for c in [
-                    Command::ViewTop,
-                    Command::ViewFront,
-                    Command::ViewRight,
-                    Command::ViewIso,
-                    Command::ToggleOrtho,
-                    Command::FrameSelection,
-                    Command::ToggleGrid,
-                    Command::ToggleEdges,
-                    Command::ToggleXray,
-                    Command::ToggleZebra,
-                    Command::ToggleIsophote,
-                    Command::ToggleDraft,
-                    Command::ToggleFaceDirection,
-                    Command::ToggleCurvature,
-                    Command::ToggleSection,
-                    Command::Measure,
-                    Command::Dimension,
-                    Command::DeleteDimensions,
-                    Command::ToggleSnap,
-                ] {
-                    menu_item(app, ui, c);
-                }
-            });
-            ui.menu_button("Help", |ui| {
-                menu_item(app, ui, Command::Palette);
-                menu_item(app, ui, Command::Help);
-            });
-            ui.separator();
-            // Selection mode switcher.
-            for (m, label, cmd) in [
-                (SelectMode::Vertex, "Vertex", Command::ModeVertex),
-                (SelectMode::Edge, "Edge", Command::ModeEdge),
-                (SelectMode::Face, "Face", Command::ModeFace),
-                (SelectMode::Object, "Solid", Command::ModeObject),
-            ] {
-                let sel = app.doc.mode == m;
-                if ui
-                    .add(egui::Button::new(label).selected(sel))
-                    .on_hover_text(format!("{} ({})", cmd.label(), cmd.shortcut_text()))
-                    .clicked()
-                {
-                    app.pending.push(cmd);
-                }
+        });
+        if let Some(p) = crate::recent::autosave_path().filter(|p| p.exists()) {
+            if ui.button("Recover autosave").on_hover_text("Open the copy kept while you work").clicked() {
+                crate::commands::open_file(app, &p);
+                // Not the document's own file: Save asks where.
+                app.doc.path = None;
+                app.doc.dirty = true;
+                ui.close();
+            }
+        }
+        ui.separator();
+        for c in [Command::Save, Command::SaveAs, Command::ImportStep, Command::ImportSvg, Command::ImportMesh, Command::ImportImage, Command::ExportStep, Command::ExportStl, Command::ExportObj, Command::ExportHiddenLine] {
+            menu_item(app, ui, c);
+        }
+    });
+    ui.menu_button("Edit", |ui| {
+        for c in [Command::Undo, Command::Redo, Command::Duplicate, Command::Instance, Command::MakeUnique, Command::DeleteRedundant, Command::CompleteEdge, Command::UnwrapFace, Command::Delete, Command::SelectAll, Command::DeselectAll, Command::SelectPrevious, Command::Hide, Command::Isolate, Command::UnhideAll] {
+            menu_item(app, ui, c);
+        }
+    });
+    ui.menu_button("Create", |ui| {
+        for c in [Command::Box, Command::Cylinder, Command::Cone, Command::Sphere, Command::Torus] {
+            menu_item(app, ui, c);
+        }
+    });
+    ui.menu_button("Curve", |ui| {
+        for c in [Command::Curve, Command::Spline, Command::Arc, Command::TangentArc, Command::Rectangle, Command::Circle, Command::TangentCircle, Command::Ellipse, Command::Polygon, Command::Slot, Command::Helix, Command::Text, Command::OffsetCurve, Command::JoinCurves, Command::Trim, Command::SplitCurve, Command::InsertKnot, Command::ConvertVertex, Command::DeformCurve, Command::SlideCv, Command::BridgeCurve, Command::AlignCurve, Command::ExtendCurve, Command::ReverseCurve, Command::RaiseDegree, Command::RebuildCurve, Command::IntersectionCurve, Command::ProjectCurve] {
+            menu_item(app, ui, c);
+        }
+    });
+    ui.menu_button("Solid", |ui| {
+        for c in [Command::Extrude, Command::Revolve, Command::Loft, Command::Sweep, Command::Pipe, Command::Patch, Command::ConstrainedSurface, Command::BridgeSurface, Command::MatchSurface, Command::Isoparam, Command::RaiseSurfaceDegree, Command::RebuildFace, Command::Untrim, Command::Unjoin, Command::ReverseSheet, Command::FindBoundaryEdges, Command::Thicken, Command::Cut, Command::Imprint, Command::OffsetEdge, Command::OffsetFaceTo, Command::Draft, Command::Fillet, Command::FullRound, Command::RemoveFillets, Command::Chamfer, Command::Shell, Command::OffsetSolid, Command::Union, Command::Subtract, Command::Intersect] {
+            menu_item(app, ui, c);
+        }
+    });
+    ui.menu_button("Transform", |ui| {
+        for c in [Command::Move, Command::Rotate, Command::Scale, Command::MirrorX, Command::MirrorY, Command::MirrorZ, Command::LinearArray, Command::RadialArray, Command::CurveArray, Command::Place] {
+            menu_item(app, ui, c);
+        }
+    });
+    ui.menu_button("View", |ui| {
+        for c in [
+            Command::ViewTop,
+            Command::ViewFront,
+            Command::ViewRight,
+            Command::ViewIso,
+            Command::ToggleOrtho,
+            Command::FrameSelection,
+            Command::ToggleGrid,
+            Command::ToggleEdges,
+            Command::ToggleXray,
+            Command::ToggleZebra,
+            Command::ToggleIsophote,
+            Command::ToggleDraft,
+            Command::ToggleFaceDirection,
+            Command::ToggleCurvature,
+            Command::ToggleSection,
+            Command::Measure,
+            Command::Dimension,
+            Command::DeleteDimensions,
+            Command::ToggleSnap,
+        ] {
+            menu_item(app, ui, c);
+        }
+    });
+    ui.separator();
+    menu_item(app, ui, Command::Preferences);
+    menu_item(app, ui, Command::Palette);
+    menu_item(app, ui, Command::Help);
+}
+
+/// A frameless square button painted by `paint`, with a tooltip.
+fn glyph_button(ui: &mut egui::Ui, size: f32, on: bool, tip: &str, paint: impl FnOnce(&egui::Painter, egui::Rect, Color32)) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::click());
+    let p = ui.painter();
+    if on {
+        p.rect_filled(rect, 4.0, theme::ACCENT);
+    } else if resp.hovered() {
+        p.rect_filled(rect, 4.0, theme::HOVER);
+    }
+    let col = if on || resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+    paint(p, rect.shrink(size * 0.2), col);
+    resp.on_hover_text(tip)
+}
+
+fn tip(c: Command) -> String {
+    match c.shortcut_text().as_str() {
+        "" => c.label().to_string(),
+        s => format!("{}   {s}", c.label()),
+    }
+}
+
+/// The title row: the app menu, the panel toggles and whether the
+/// document has unsaved changes.
+pub fn top_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
+    egui::Panel::top("top").exact_size(32.0).frame(egui::Frame::new().fill(theme::FRAME).inner_margin(egui::Margin::symmetric(10, 4))).show(ui, |ui| {
+        ui.horizontal_centered(|ui| {
+            ui.menu_button(RichText::new("Ductile").strong().color(theme::TEXT), |ui| app_menu(app, ui)).response.on_hover_text("Menu");
+            ui.add_space(6.0);
+            if glyph_button(ui, 22.0, false, "Left panel   Ctrl+B", |p, r, c| crate::icons::sidebar(p, r, c, true)).clicked() {
+                app.show_left = !app.show_left;
+            }
+            ui.add_space(10.0);
+            let name = app.doc.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "UNSAVED".into());
+            ui.label(RichText::new(name).size(12.0).color(theme::TEXT_DIM));
+            // A hollow dot when saved, filled once changed.
+            let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            if app.doc.dirty {
+                ui.painter().circle_filled(r.center(), 3.5, theme::TEXT_DIM);
+            } else {
+                ui.painter().circle_stroke(r.center(), 3.0, egui::Stroke::new(1.2, theme::TEXT_DIM));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let proj = match app.camera.projection {
-                    crate::camera::Projection::Perspective => "Perspective",
-                    crate::camera::Projection::Orthographic => "Orthographic",
-                };
-                if ui.button(proj).clicked() {
-                    app.pending.push(Command::ToggleOrtho);
+                if glyph_button(ui, 22.0, false, "Right panel   Ctrl+Shift+B", |p, r, c| crate::icons::sidebar(p, r, c, false)).clicked() {
+                    app.show_right = !app.show_right;
                 }
-                if ui.add(egui::Button::new("Snap").selected(app.snap_enabled)).clicked() {
-                    app.pending.push(Command::ToggleSnap);
-                }
-                if app.show_curvature {
-                    ui.add(egui::DragValue::new(&mut app.comb_scale).speed(0.002).range(0.001..=5.0).max_decimals(3)).on_hover_text("Comb scale");
-                }
-                if ui.add(egui::Button::new("Curvature").selected(app.show_curvature)).on_hover_text("Curvature combs on the selected curves and edges").clicked() {
-                    app.pending.push(Command::ToggleCurvature);
-                }
-                if let Some((_, n, d)) = app.section.as_mut() {
-                    if ui.small_button("Flip").on_hover_text("Cut away the other side").clicked() {
-                        *n = -*n;
-                        *d = -*d;
-                    }
-                    ui.add(egui::DragValue::new(d).speed(0.01).max_decimals(3)).on_hover_text("Section offset");
-                }
-                if ui.add(egui::Button::new("Section").selected(app.section.is_some())).on_hover_text("Cut the scene away beyond a plane along the construction plane's normal").clicked() {
-                    app.pending.push(Command::ToggleSection);
-                }
-                if let Some(a) = app.draft_angle() {
-                    ui.add(egui::DragValue::new(a).speed(0.1).range(0.0..=45.0).suffix("°")).on_hover_text("Minimum draft angle");
-                }
-                let current = app.analysis();
-                egui::ComboBox::from_id_salt("analysis").selected_text(current.label()).width(110.0).show_ui(ui, |ui| {
-                    for a in Analysis::ALL {
-                        if ui.selectable_label(current == a, a.label()).clicked() && current != a {
-                            app.toggle_analysis(a);
-                        }
-                    }
-                });
-                if ui.add(egui::Button::new("X-ray").selected(app.xray())).clicked() {
-                    app.pending.push(Command::ToggleXray);
+                if app.tool.as_ref().is_some_and(|t| t.busy()) {
+                    ui.add(egui::Spinner::new().size(14.0).color(theme::TEXT_DIM));
                 }
             });
         });
@@ -168,108 +157,461 @@ fn menu_item(app: &mut DuctileApp, ui: &mut egui::Ui, c: Command) {
     }
 }
 
-pub fn status_bar(app: &mut DuctileApp, ui: &mut egui::Ui) {
-    egui::Panel::bottom("status").frame(egui::Frame::new().fill(theme::PANEL_DARK).inner_margin(egui::Margin::symmetric(10, 4))).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            let hint = app.tool.as_ref().map(|t| t.hint()).unwrap_or_else(|| app.status.clone());
-            if app.tool.as_ref().is_some_and(|t| t.busy()) {
-                ui.add(egui::Spinner::new().size(12.0).color(theme::TEXT_DIM));
-            }
-            ui.label(RichText::new(hint).color(theme::TEXT));
+/// A side-panel card: a heading in capitals that folds the body away.
+fn card(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new().fill(theme::CARD).corner_radius(6.0).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let id = ui.make_persistent_id(("card", title));
+        let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
+        let head = ui.horizontal(|ui| {
+            ui.label(RichText::new(title).size(11.5).strong().color(theme::TEXT_DIM));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let n = app.doc.selection.len();
-                ui.label(RichText::new(format!("{} objects · {} selected", app.doc.objects.len(), n)).color(theme::TEXT_DIM));
+                let (r, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+                crate::icons::chevron(ui.painter(), r, theme::TEXT_DIM, open);
             });
         });
+        if ui.interact(head.response.rect, id.with("head"), egui::Sense::click()).clicked() {
+            open = !open;
+            ui.data_mut(|d| d.insert_persisted(id, open));
+        }
+        if open {
+            ui.add_space(4.0);
+            body(ui);
+        }
     });
+    ui.add_space(6.0);
 }
 
-pub fn toolbar(app: &mut DuctileApp, ui: &mut egui::Ui) {
-    use Command::*;
-    let groups: [(&str, &[Command]); 4] = [
-        ("Solid", &[Box, Cylinder, Cone, Sphere, Torus]),
-        ("Curve", &[Curve, Spline, Arc, Rectangle, Circle, Ellipse, Polygon]),
-        ("Model", &[Extrude, Revolve, Loft, Sweep, Pipe, Fillet, Chamfer, Shell, Union, Subtract, Intersect]),
-        ("Edit", &[Move, Rotate, Scale, MirrorX, RadialArray, Duplicate, Delete]),
-    ];
-    egui::Panel::left("tools").resizable(false).exact_size(64.0).frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(6))).show(ui, |ui| {
-        egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                for (title, cmds) in groups {
-                    section(ui, title);
-                    for pair in cmds.chunks(2) {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            for c in pair {
-                                icon_button(app, ui, *c);
-                            }
-                        });
+/// The left panel: the Outliner and the Assets (reference images).
+pub fn left_panel(app: &mut DuctileApp, ui: &mut egui::Ui) {
+    if !app.show_left {
+        return;
+    }
+    egui::Panel::left("outliner").resizable(true).default_size(230.0).frame(egui::Frame::new().fill(theme::FRAME).inner_margin(egui::Margin { left: 8, right: 4, top: 4, bottom: 8 })).show(ui, |ui| {
+        egui::Frame::new().fill(theme::CARD).corner_radius(6.0).inner_margin(3.0).show(ui, |ui| {
+            ui.columns(2, |cols| {
+                for (k, name) in [(0u8, "OUTLINER"), (1, "ASSETS")] {
+                    let on = app.left_tab == k;
+                    let b = egui::Button::new(RichText::new(name).size(11.5).color(if on { theme::TEXT } else { theme::TEXT_DIM })).fill(if on { theme::HOVER } else { Color32::TRANSPARENT }).frame(on);
+                    if cols[k as usize].add_sized([cols[k as usize].available_width(), 22.0], b).clicked() {
+                        app.left_tab = k;
                     }
                 }
             });
         });
-    });
-}
-
-/// A square toolbar button showing the command's icon, its name and
-/// shortcut on hover.
-fn icon_button(app: &mut DuctileApp, ui: &mut egui::Ui, cmd: Command) {
-    let tip = match cmd.shortcut_text().as_str() {
-        "" => cmd.label().to_string(),
-        s => format!("{}   ({s})", cmd.label()),
-    };
-    let active = app.tool.as_ref().map(|t| t.name() == cmd.label()).unwrap_or(false);
-    let resp = ui.add(egui::Button::new("").selected(active).min_size(egui::vec2(24.0, 24.0)));
-    let color = if active || resp.hovered() { theme::TEXT } else { theme::TEXT_DIM };
-    crate::icons::paint(cmd, ui.painter(), resp.rect.shrink(3.0), color);
-    if resp.on_hover_text(tip).clicked() {
-        app.pending.push(cmd);
-    }
-}
-
-fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(4.0);
-    ui.label(RichText::new(title).size(10.0).color(theme::TEXT_DIM));
-}
-
-pub fn side_panel(app: &mut DuctileApp, ui: &mut egui::Ui) {
-    egui::Panel::right("side").resizable(true).default_size(250.0).frame(egui::Frame::new().fill(theme::PANEL).inner_margin(egui::Margin::same(10))).show(ui, |ui| {
-        if let Some(tool) = app.tool.as_mut() {
-            ui.label(RichText::new(tool.name()).strong().size(15.0));
-            ui.add_space(4.0);
-            tool.panel(ui);
-            ui.add_space(6.0);
+        ui.add_space(6.0);
+        if app.left_tab == 1 {
             ui.horizontal(|ui| {
-                if ui.button("OK").clicked() {
-                    app.pending_finish = true;
-                }
-                if ui.button("Cancel").clicked() {
-                    app.pending_cancel = true;
+                if ui.button("Import image…").clicked() {
+                    app.pending.push(Command::ImportImage);
                 }
             });
-            ui.separator();
+            ui.add_space(4.0);
+            if app.doc.images.is_empty() {
+                ui.label(RichText::new("No reference images yet").color(theme::TEXT_DIM));
+            } else {
+                reference_images(app, ui);
+            }
+            return;
         }
-        ui.label(RichText::new("Outliner").strong());
-        egui::ScrollArea::vertical().max_height(ui.available_height() * 0.6).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            if glyph_button(ui, 20.0, false, "Group selected   Ctrl+G", |p, r, c| crate::icons::folder(p, r, c)).clicked() {
+                app.pending.push(Command::Group);
+            }
+            ui.add(egui::TextEdit::singleline(&mut app.outliner_filter).hint_text("Search").desired_width(f32::INFINITY));
+        });
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical().show(ui, |ui| {
             let mut acts = vec![];
-            outliner_level(app, ui, None, 0, &mut acts);
+            ui.label(RichText::new("Scene").color(theme::TEXT));
+            outliner_level(app, ui, None, 1, &mut acts, false);
+            outliner_kinds(app, ui, &mut acts);
             let shift = ui.input(|i| i.modifiers.shift);
             for a in acts {
                 outliner_act(app, a, shift);
             }
         });
-        if !app.doc.images.is_empty() {
-            ui.separator();
-            reference_images(app, ui);
+    });
+}
+
+/// Ungrouped objects under a heading per kind, as Plasticity's Scene tree.
+fn outliner_kinds(app: &DuctileApp, ui: &mut egui::Ui, acts: &mut Vec<OutlinerAct>) {
+    use ductile_brep::BodyKind;
+    let doc = &app.doc;
+    let q = app.outliner_filter.to_lowercase();
+    let loose: Vec<&crate::document::Object> = doc.objects.iter().filter(|o| (o.group.is_none() || o.group.is_some_and(|g| doc.group(g).is_none())) && (q.is_empty() || o.name.to_lowercase().contains(&q))).collect();
+    for (title, kind) in [("Solids", Some(BodyKind::Solid)), ("Surfaces", Some(BodyKind::Sheet)), ("Curves", Some(BodyKind::Wire)), ("Meshes", None)] {
+        let these: Vec<&&crate::document::Object> = loose.iter().filter(|o| if kind.is_some() { o.body.mesh.is_none() && Some(o.body.kind) == kind } else { o.body.mesh.is_some() }).collect();
+        if these.is_empty() {
+            continue;
         }
-        ui.separator();
-        properties(app, ui);
+        egui::CollapsingHeader::new(RichText::new(title).color(theme::TEXT_DIM)).id_salt(("kind", title)).default_open(true).show(ui, |ui| {
+            for o in these {
+                object_row(app, ui, o, 0.0, acts);
+            }
+        });
+    }
+}
+
+/// The floating command dialog, the hint strip, the tool strip, the
+/// command bar and the toggles over the viewport.
+pub fn viewport_overlays(app: &mut DuctileApp, ctx: &egui::Context) {
+    let vr = app.viewport_rect;
+    if !vr.is_positive() {
+        return;
+    }
+    let pill = |ui: &mut egui::Ui, body: &mut dyn FnMut(&mut egui::Ui)| {
+        egui::Frame::new().fill(theme::CARD).corner_radius(6.0).inner_margin(3.0).show(ui, |ui| body(ui));
+    };
+    // Selection modes, top left.
+    egui::Area::new(egui::Id::unique("modes")).fixed_pos(vr.min + egui::vec2(10.0, 10.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+        pill(ui, &mut |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                for (m, cmd) in [(SelectMode::Vertex, Command::ModeVertex), (SelectMode::Edge, Command::ModeEdge), (SelectMode::Face, Command::ModeFace), (SelectMode::Object, Command::ModeObject)] {
+                    if glyph_button(ui, 26.0, app.doc.mode == m, &tip(cmd), |p, r, c| {
+                        crate::icons::paint(cmd, p, r, c);
+                    })
+                    .clicked()
+                    {
+                        app.pending.push(cmd);
+                    }
+                }
+            });
+        });
+    });
+    // The named view, top centre.
+    if let Some(name) = app.named_view() {
+        egui::Area::new(egui::Id::unique("view chip")).pivot(egui::Align2::CENTER_TOP).fixed_pos(egui::pos2(vr.center().x, vr.min.y + 10.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+            pill(ui, &mut |ui| {
+                ui.horizontal(|ui| {
+                    if glyph_button(ui, 22.0, false, "Leave the aligned view", |p, r, c| crate::icons::cross(p, r, c)).clicked() {
+                        app.pending.push(Command::ViewIso);
+                    }
+                    ui.label(RichText::new(name).color(theme::TEXT));
+                    ui.add_space(4.0);
+                });
+            });
+        });
+    }
+    // View toggles, top right.
+    egui::Area::new(egui::Id::unique("view toggles")).pivot(egui::Align2::RIGHT_TOP).fixed_pos(egui::pos2(vr.max.x - 10.0, vr.min.y + 10.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+        ui.horizontal(|ui| {
+            pill(ui, &mut |ui| {
+                if glyph_button(ui, 26.0, app.section.is_some(), &tip(Command::ToggleSection), |p, r, c| {
+                    crate::icons::paint(Command::ToggleSection, p, r, c);
+                })
+                .clicked()
+                {
+                    app.pending.push(Command::ToggleSection);
+                }
+            });
+            pill(ui, &mut |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    let ortho = app.camera.projection == crate::camera::Projection::Orthographic;
+                    for (cmd, on) in [(Command::ToggleOrtho, ortho), (Command::ToggleEdges, app.show_edges), (Command::ToggleXray, app.xray())] {
+                        if glyph_button(ui, 26.0, on, &tip(cmd), |p, r, c| {
+                            crate::icons::paint(cmd, p, r, c);
+                        })
+                        .clicked()
+                        {
+                            app.pending.push(cmd);
+                        }
+                    }
+                    let current = app.analysis();
+                    let r = glyph_button(ui, 26.0, current != Analysis::ALL[0], &format!("Render mode: {}", current.label()), |p, r, c| {
+                        p.circle_stroke(r.center(), r.width() * 0.45, egui::Stroke::new(1.4, c));
+                        p.circle_filled(r.center() + egui::vec2(-r.width() * 0.12, -r.width() * 0.12), r.width() * 0.16, c);
+                    });
+                    egui::Popup::menu(&r).show(|ui| {
+                        for a in Analysis::ALL {
+                            if ui.selectable_label(current == a, a.label()).clicked() && current != a {
+                                app.toggle_analysis(a);
+                            }
+                        }
+                    });
+                });
+            });
+        });
+    });
+    // The tool strip, left.
+    {
+        use Command::*;
+        let strip = [Curve, Spline, Circle, Polygon, Helix, Rectangle, Arc, BridgeCurve, Trim, SplitCurve, Sphere, Box, Cylinder, Measure];
+        egui::Area::new(egui::Id::unique("tool strip")).pivot(egui::Align2::LEFT_CENTER).fixed_pos(egui::pos2(vr.min.x + 10.0, vr.center().y)).order(egui::Order::Foreground).show(ctx, |ui| {
+            pill(ui, &mut |ui| {
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    for c in strip {
+                        let active = app.tool.as_ref().is_some_and(|t| t.name() == c.label());
+                        if glyph_button(ui, 28.0, active, &tip(c), |p, r, col| {
+                            crate::icons::paint(c, p, r, col);
+                        })
+                        .clicked()
+                        {
+                            app.pending.push(c);
+                        }
+                    }
+                });
+            });
+        });
+    }
+    // The command bar, bottom centre.
+    {
+        use Command::*;
+        egui::Area::new(egui::Id::unique("command bar")).pivot(egui::Align2::CENTER_BOTTOM).fixed_pos(egui::pos2(vr.center().x, vr.max.y - 10.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+            pill(ui, &mut |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    for (k, c) in [Palette, Move, Rotate, Scale, Duplicate, Boolean, LinearArray, RadialArray].into_iter().enumerate() {
+                        if k == 1 {
+                            ui.add_space(6.0);
+                        }
+                        if glyph_button(ui, 28.0, false, &tip(c), |p, r, col| {
+                            crate::icons::paint(c, p, r, col);
+                        })
+                        .clicked()
+                        {
+                            app.pending.push(c);
+                        }
+                    }
+                    let more = glyph_button(ui, 28.0, false, "More commands   Shift+F", |p, r, c| crate::icons::dots(p, r, c));
+                    egui::Popup::menu(&more).show(|ui| suggested(app, ui));
+                });
+            });
+        });
+    }
+    // The command dialog, bottom left.
+    if app.tool.is_some() {
+        egui::Area::new(egui::Id::unique("dialog")).pivot(egui::Align2::LEFT_BOTTOM).fixed_pos(egui::pos2(vr.min.x + 52.0, vr.max.y - 10.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+            egui::Frame::new().fill(theme::CARD).corner_radius(8.0).stroke(egui::Stroke::new(1.0, Color32::from_rgb(44, 44, 49))).inner_margin(egui::Margin::same(10)).show(ui, |ui| {
+                ui.set_width(270.0);
+                let tool = app.tool.as_mut().unwrap();
+                let id = ui.make_persistent_id("dialog open");
+                let mut open = ui.data_mut(|d| *d.get_persisted_mut_or(id, true));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(tool.name().to_uppercase()).size(12.0).strong().color(theme::TEXT));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if glyph_button(ui, 18.0, false, if open { "Fold" } else { "Unfold" }, |p, r, c| crate::icons::chevron(p, r, c, open)).clicked() {
+                            open = !open;
+                            ui.data_mut(|d| d.insert_persisted(id, open));
+                        }
+                    });
+                });
+                if open {
+                    ui.add_space(4.0);
+                    tool.panel(ui);
+                }
+                ui.add_space(6.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.add(egui::Button::new(RichText::new("Esc  Cancel").color(theme::TEXT_DIM)).frame(false)).clicked() {
+                        app.pending_cancel = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(egui::Button::new(RichText::new("OK  Enter").color(theme::TEXT)).frame(false)).clicked() {
+                            app.pending_finish = true;
+                        }
+                    });
+                });
+            });
+        });
+    }
+    // The command's keys, bottom right; else the last message, bottom left.
+    let keys = app.tool.as_ref().map(|t| t.keys()).unwrap_or_default();
+    if !keys.is_empty() {
+        egui::Area::new(egui::Id::unique("hints")).pivot(egui::Align2::RIGHT_BOTTOM).fixed_pos(egui::pos2(vr.max.x - 14.0, vr.max.y - 12.0)).order(egui::Order::Foreground).interactable(false).show(ctx, |ui| {
+            ui.horizontal_top(|ui| {
+                for col in keys.chunks(4) {
+                    ui.vertical(|ui| {
+                        for (k, what) in col {
+                            ui.horizontal(|ui| {
+                                egui::Frame::new().fill(theme::FIELD).corner_radius(3.0).inner_margin(egui::Margin::symmetric(4, 1)).show(ui, |ui| {
+                                    ui.label(RichText::new(*k).size(11.0).color(theme::TEXT_DIM));
+                                });
+                                ui.label(RichText::new(*what).size(11.5).color(theme::TEXT_DIM));
+                            });
+                        }
+                    });
+                    ui.add_space(10.0);
+                }
+            });
+        });
+    }
+    let message = app.tool.as_ref().map(|t| t.hint()).or_else(|| app.recent_status().map(str::to_string));
+    if let Some(m) = message {
+        let at = egui::pos2(vr.center().x, vr.min.y + if app.named_view().is_some() { 48.0 } else { 12.0 });
+        egui::Area::new(egui::Id::unique("message")).pivot(egui::Align2::CENTER_TOP).fixed_pos(at).order(egui::Order::Foreground).interactable(false).show(ctx, |ui| {
+            egui::Frame::new().fill(theme::CARD.gamma_multiply(0.9)).corner_radius(5.0).inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
+                ui.set_max_width(520.0);
+                ui.add(egui::Label::new(RichText::new(m).size(12.0).color(theme::TEXT)).wrap());
+            });
+        });
+    }
+}
+
+/// The More menu (Shift+F): one fixed list, with what does not apply to
+/// the selection greyed out so places stay put.
+fn suggested(app: &mut DuctileApp, ui: &mut egui::Ui) {
+    use crate::document::Pick;
+    use Command::*;
+    let sel = &app.doc.selection;
+    let objs = app.doc.selected_objects();
+    let kinds: Vec<ductile_brep::BodyKind> = objs.iter().filter_map(|id| app.doc.object(*id)).map(|o| o.body.kind).collect();
+    let curves = kinds.contains(&ductile_brep::BodyKind::Wire);
+    let solids = kinds.contains(&ductile_brep::BodyKind::Solid);
+    let sheets = kinds.contains(&ductile_brep::BodyKind::Sheet);
+    let faces = sel.iter().any(|p| matches!(p, Pick::Face(..)));
+    let edges = sel.iter().any(|p| matches!(p, Pick::Edge(..)));
+    let any = !sel.is_empty();
+    for (c, ok) in [
+        (CurveArray, any),
+        (MirrorX, any),
+        (Cut, solids || sheets),
+        (JoinCurves, curves || sheets),
+        (Unjoin, solids || sheets),
+        (Shell, solids || faces),
+        (Thicken, sheets || faces),
+        (Pipe, curves || edges),
+        (Loft, curves || edges || faces),
+        (Sweep, curves),
+        (Revolve, curves || faces),
+        (Extrude, curves || faces),
+        (Patch, curves || edges),
+        (OffsetCurve, curves),
+        (RaiseDegree, curves),
+        (RebuildCurve, curves),
+        (ProjectCurve, curves),
+        (Imprint, curves),
+        (CompleteEdge, edges),
+        (Fillet, edges || curves),
+        (Draft, faces),
+        (MatchSurface, edges),
+    ] {
+        let b = egui::Button::new(c.label()).shortcut_text(c.shortcut_text());
+        if ui.add_enabled(ok, b).clicked() {
+            app.pending.push(c);
+            ui.close();
+        }
+    }
+}
+
+/// The right panel: cards for how the scene shows, the camera, the grid,
+/// snapping, construction planes, curvature combs and the selection.
+pub fn right_panel(app: &mut DuctileApp, ui: &mut egui::Ui) {
+    if !app.show_right {
+        return;
+    }
+    egui::Panel::right("cards").resizable(false).exact_size(230.0).frame(egui::Frame::new().fill(theme::FRAME).inner_margin(egui::Margin { left: 4, right: 8, top: 4, bottom: 8 })).show(ui, |ui| {
+        egui::ScrollArea::vertical().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().slider_width = 60.0;
+            if app.doc.selected_objects().len() == 1 {
+                card(ui, "SELECTION", |ui| properties(app, ui));
+            }
+            card(ui, "SHADER MODE", |ui| {
+                let current = app.analysis();
+                egui::Grid::new("shader modes").num_columns(2).spacing([4.0, 4.0]).show(ui, |ui| {
+                    for (k, a) in Analysis::ALL.into_iter().enumerate() {
+                        let b = egui::Button::new(RichText::new(a.label()).size(12.0)).selected(current == a).min_size(egui::vec2(92.0, 22.0));
+                        if ui.add(b).clicked() && current != a {
+                            app.toggle_analysis(a);
+                        }
+                        if k % 2 == 1 {
+                            ui.end_row();
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                let mut edges = app.show_edges;
+                if theme::switch_row(ui, "Show edges", &mut edges) {
+                    app.pending.push(Command::ToggleEdges);
+                }
+                let mut xray = app.xray();
+                if theme::switch_row(ui, "X-ray", &mut xray) {
+                    app.pending.push(Command::ToggleXray);
+                }
+                if let Some(a) = app.draft_angle() {
+                    ui.horizontal(|ui| {
+                        ui.label("Minimum draft");
+                        ui.add(egui::DragValue::new(a).speed(0.1).range(0.0..=45.0).suffix("°"));
+                    });
+                }
+            });
+            card(ui, "CAMERA", |ui| {
+                let mut ortho = app.camera.projection == crate::camera::Projection::Orthographic;
+                if theme::switch_row(ui, "Orthographic", &mut ortho) {
+                    app.pending.push(Command::ToggleOrtho);
+                }
+                ui.add_enabled_ui(!ortho, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("FOV");
+                        let mut deg = app.camera.fov_y.to_degrees();
+                        if ui.add(egui::DragValue::new(&mut deg).range(10.0..=120.0).speed(0.5).suffix("°")).changed() {
+                            app.camera.fov_y = deg.to_radians();
+                        }
+                    });
+                });
+                if ui.add_sized([ui.available_width(), 22.0], egui::Button::new("Reset to default")).clicked() {
+                    app.pending.push(Command::ViewIso);
+                }
+            });
+            card(ui, "GRID", |ui| {
+                let mut grid = app.show_grid;
+                if theme::switch_row(ui, "Show grid", &mut grid) {
+                    app.pending.push(Command::ToggleGrid);
+                }
+            });
+            card(ui, "SNAPPING", |ui| {
+                let mut snap = app.snap_enabled;
+                if theme::switch_row(ui, "Object snapping", &mut snap) {
+                    app.pending.push(Command::ToggleSnap);
+                }
+                ui.add(egui::Label::new(RichText::new("Hold Ctrl to suspend snapping while you draw").size(11.0).color(theme::TEXT_DIM)).wrap());
+            });
+            card(ui, "PLANES", |ui| {
+                ui.columns(3, |cols| {
+                    for (k, (name, z, x)) in [("XY", ductile_geom::DVec3::Z, ductile_geom::DVec3::X), ("YZ", ductile_geom::DVec3::X, ductile_geom::DVec3::Y), ("XZ", -ductile_geom::DVec3::Y, ductile_geom::DVec3::X)].into_iter().enumerate() {
+                        if cols[k].add_sized([cols[k].available_width(), 22.0], egui::Button::new(name)).on_hover_text(format!("Construction plane {name}")).clicked() {
+                            app.cplane = crate::tools::CPlane { frame: ductile_geom::Frame::new(ductile_geom::DVec3::ZERO, z, x) };
+                        }
+                    }
+                });
+                for (label, c) in [("Plane from selection", Command::SetCPlaneOnly), ("Plane from camera", Command::CPlaneView)] {
+                    if ui.add_sized([ui.available_width(), 22.0], egui::Button::new(label)).on_hover_text(tip(c)).clicked() {
+                        app.pending.push(c);
+                    }
+                }
+            });
+            card(ui, "CURVATURE", |ui| {
+                let mut combs = app.show_curvature;
+                if theme::switch_row(ui, "Combs on selection", &mut combs) {
+                    app.pending.push(Command::ToggleCurvature);
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Comb scale");
+                    ui.add(egui::DragValue::new(&mut app.comb_scale).speed(0.002).range(0.001..=5.0).max_decimals(3));
+                });
+            });
+            if let Some((_, n, d)) = app.section.as_mut() {
+                card(ui, "SECTION", |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Offset");
+                        ui.add(egui::DragValue::new(d).speed(0.01).max_decimals(3));
+                        if ui.small_button("Flip").on_hover_text("Cut away the other side").clicked() {
+                            *n = -*n;
+                            *d = -*d;
+                        }
+                    });
+                });
+            }
+        });
     });
 }
 
 /// The reference images: shown, opacity, size and placement.
 fn reference_images(app: &mut DuctileApp, ui: &mut egui::Ui) {
-    ui.label(RichText::new("Reference images").strong());
     let mut remove = None;
     let cplane = crate::tools::current_cplane().frame;
     for (k, img) in app.doc.images.iter_mut().enumerate() {
@@ -339,7 +681,7 @@ fn row_icon(ui: &mut egui::Ui, tip: &str, paint: impl FnOnce(&egui::Painter, egu
 }
 
 /// The groups and objects directly inside `parent`, indented by `depth`.
-fn outliner_level(app: &DuctileApp, ui: &mut egui::Ui, parent: Option<GroupId>, depth: usize, acts: &mut Vec<OutlinerAct>) {
+fn outliner_level(app: &DuctileApp, ui: &mut egui::Ui, parent: Option<GroupId>, depth: usize, acts: &mut Vec<OutlinerAct>, objects: bool) {
     let doc = &app.doc;
     let indent = depth as f32 * 14.0;
     for g in doc.groups.iter().filter(|g| g.parent == parent) {
@@ -401,35 +743,43 @@ fn outliner_level(app: &DuctileApp, ui: &mut egui::Ui, parent: Option<GroupId>, 
             });
         });
         if g.open {
-            outliner_level(app, ui, Some(g.id), depth + 1, acts);
+            outliner_level(app, ui, Some(g.id), depth + 1, acts, true);
         }
     }
-    for o in doc.objects.iter().filter(|o| o.group == parent || (parent.is_none() && o.group.is_some_and(|g| doc.group(g).is_none()))) {
-        let selected = doc.selection.contains(&crate::document::Pick::Object(o.id));
-        ui.horizontal(|ui| {
-            ui.add_space(indent);
-            let (vis, locked) = (o.visible, o.locked);
-            if row_icon(ui, if vis { "Hide" } else { "Show" }, |p, r, c| crate::icons::eye(p, r, if vis { c } else { c.gamma_multiply(0.5) }, vis)) {
-                acts.push(OutlinerAct::ToggleVisible(o.id));
-            }
-            if row_icon(ui, if locked { "Unlock" } else { "Lock (shows, but can't be selected)" }, |p, r, c| crate::icons::lock(p, r, if locked { c } else { c.gamma_multiply(0.45) }, locked)) {
-                acts.push(OutlinerAct::ToggleLock(o.id));
-            }
-            let text = RichText::new(o.name.as_str()).color(if vis && !locked { theme::TEXT } else { theme::TEXT_DIM });
-            let r = ui.selectable_label(selected, text);
-            if r.clicked() && !doc.is_locked(o.id) {
-                acts.push(OutlinerAct::Select(o.id));
-            }
-            if o.group.is_some() {
-                r.context_menu(|ui| {
-                    if ui.button("Move to root").clicked() {
-                        acts.push(OutlinerAct::ToRoot(o.id));
-                        ui.close();
-                    }
-                });
-            }
-        });
+    if !objects {
+        return;
     }
+    for o in doc.objects.iter().filter(|o| o.group == parent) {
+        object_row(app, ui, o, indent, acts);
+    }
+}
+
+fn object_row(app: &DuctileApp, ui: &mut egui::Ui, o: &crate::document::Object, indent: f32, acts: &mut Vec<OutlinerAct>) {
+    let doc = &app.doc;
+    let selected = doc.selection.contains(&crate::document::Pick::Object(o.id));
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        let (vis, locked) = (o.visible, o.locked);
+        if row_icon(ui, if vis { "Hide" } else { "Show" }, |p, r, c| crate::icons::eye(p, r, if vis { c } else { c.gamma_multiply(0.5) }, vis)) {
+            acts.push(OutlinerAct::ToggleVisible(o.id));
+        }
+        if row_icon(ui, if locked { "Unlock" } else { "Lock (shows, but can't be selected)" }, |p, r, c| crate::icons::lock(p, r, if locked { c } else { c.gamma_multiply(0.45) }, locked)) {
+            acts.push(OutlinerAct::ToggleLock(o.id));
+        }
+        let text = RichText::new(o.name.as_str()).color(if vis && !locked { theme::TEXT } else { theme::TEXT_DIM });
+        let r = ui.selectable_label(selected, text);
+        if r.clicked() && !doc.is_locked(o.id) {
+            acts.push(OutlinerAct::Select(o.id));
+        }
+        if o.group.is_some() {
+            r.context_menu(|ui| {
+                if ui.button("Move to root").clicked() {
+                    acts.push(OutlinerAct::ToRoot(o.id));
+                    ui.close();
+                }
+            });
+        }
+    });
 }
 
 fn outliner_act(app: &mut DuctileApp, a: OutlinerAct, shift: bool) {
@@ -526,10 +876,9 @@ fn properties(app: &mut DuctileApp, ui: &mut egui::Ui) {
     }
     let id = ids[0];
     let Some(o) = app.doc.objects.iter_mut().find(|o| o.id == id) else { return };
-    ui.label(RichText::new("Properties").strong());
     ui.horizontal(|ui| {
         ui.label("Name");
-        ui.text_edit_singleline(&mut o.name);
+        ui.add(egui::TextEdit::singleline(&mut o.name).desired_width(f32::INFINITY));
     });
     ui.horizontal(|ui| {
         ui.label("Color");
@@ -538,10 +887,12 @@ fn properties(app: &mut DuctileApp, ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.label("Metal");
         ui.add(egui::Slider::new(&mut o.metalness, 0.0..=1.0).show_value(false));
+    });
+    ui.horizontal(|ui| {
         ui.label("Rough");
         ui.add(egui::Slider::new(&mut o.roughness, 0.0..=1.0).show_value(false));
     });
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         for (name, c, m, r) in [("Plastic", [0.62, 0.63, 0.65], 0.0, 0.45), ("Steel", [0.78, 0.78, 0.80], 1.0, 0.3), ("Chrome", [0.95, 0.95, 0.96], 1.0, 0.05), ("Gold", [1.0, 0.78, 0.34], 1.0, 0.2), ("Rubber", [0.12, 0.12, 0.13], 0.0, 0.9)] {
             if ui.small_button(name).clicked() {
                 (o.color, o.metalness, o.roughness) = (c, m, r);

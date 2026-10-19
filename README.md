@@ -246,6 +246,13 @@ code from them.
   Ctrl+Alt+click the faces parallel to it (coaxial for cylinders). A box
   dragged right to left picks anything it touches, left to right only what
   it holds.
+- The window follows Plasticity's layout: a slim title row (the app menu,
+  panel toggles, the document's saved state), the Outliner and Assets on
+  the left (Ctrl+B), cards for shading, camera, grid, snapping, planes and
+  curvature on the right (Ctrl+Shift+B), and over the viewport the
+  selection modes, the view toggles, a drawing tool strip, a bottom
+  command bar with a More menu (inapplicable commands greyed, never
+  hidden), the floating command dialog and a strip of the command's keys.
 - Click drill-down and auto-invoke, as in Plasticity: in solid mode the
   first click selects the solid and a second click the face or edge under
   the cursor. Selecting faces starts Push face and edges start Fillet;

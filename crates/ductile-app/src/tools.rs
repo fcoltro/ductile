@@ -71,6 +71,11 @@ pub trait Tool {
     fn typed_value(&mut self, _v: Option<f64>) {}
     /// Axis constraint keys.
     fn constrain_axis(&mut self, _axis: usize) {}
+    /// The command's own keys, listed in the hint strip over the viewport
+    /// as (key, what it does).
+    fn keys(&self) -> Vec<(&'static str, &'static str)> {
+        vec![]
+    }
     /// The command's own keys (Plasticity's in-command keys); true when
     /// the key was used.
     fn command_key(&mut self, _key: egui::Key, _m: egui::Modifiers) -> bool {
@@ -613,6 +618,9 @@ pub fn scale_about(p: DVec3, f: f64) -> DMat4 {
 }
 
 impl Tool for TransformTool {
+    fn keys(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("X Y Z", "Axis"), ("Tab", "Value"), ("Ctrl", "Snap off")]
+    }
     fn name(&self) -> &'static str {
         match self.kind {
             TransformKind::Move => "Move",
@@ -1495,6 +1503,9 @@ impl ExtrudeTool {
 }
 
 impl Tool for ExtrudeTool {
+    fn keys(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("Tab", "Distance"), ("Q", "Union"), ("W", "Difference"), ("Shift+E", "Intersect"), ("B", "New body")]
+    }
     fn name(&self) -> &'static str {
         "Extrude"
     }
@@ -1945,6 +1956,9 @@ impl CurveTool {
 }
 
 impl Tool for CurveTool {
+    fn keys(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("C", "Variant"), ("K", "Knife"), ("Tab", "Size"), ("Ctrl", "Snap off"), ("Enter", "Finish curve")]
+    }
     fn anchor(&self) -> Option<DVec3> {
         self.points.last().copied()
     }
@@ -2323,6 +2337,9 @@ impl FilletTool {
 }
 
 impl Tool for FilletTool {
+    fn keys(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("D / Tab", "Distance"), ("L", "Limit points")]
+    }
     fn name(&self) -> &'static str {
         if self.shape == BlendShape::Chamfer {
             "Chamfer"
@@ -3239,6 +3256,9 @@ impl BooleanTool {
 }
 
 impl Tool for BooleanTool {
+    fn keys(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("Q", "Union"), ("W", "Difference"), ("Shift+E", "Intersect"), ("Shift+Q", "Slice"), ("Shift+R", "Region"), ("T", "Keep tools")]
+    }
     fn name(&self) -> &'static str {
         match self.kind {
             BooleanKind::Union => "Union",
@@ -3954,6 +3974,9 @@ impl SplitCurveTool {
 }
 
 impl Tool for SplitCurveTool {
+    fn keys(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("K", "Insert knot")]
+    }
     fn name(&self) -> &'static str {
         if self.knot {
             "Insert knot"
@@ -4595,6 +4618,9 @@ impl ConstrainedSurfaceTool {
 }
 
 impl Tool for ConstrainedSurfaceTool {
+    fn keys(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("Backspace", "Remove last point"), ("Enter", "Make surface")]
+    }
     fn name(&self) -> &'static str {
         "Constrained surface"
     }
@@ -6039,6 +6065,9 @@ impl IsoparamTool {
 }
 
 impl Tool for IsoparamTool {
+    fn keys(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("Tab", "U / V")]
+    }
     fn name(&self) -> &'static str {
         "Isoparam"
     }
@@ -7019,6 +7048,9 @@ impl AlignCurveTool {
 }
 
 impl Tool for AlignCurveTool {
+    fn keys(&self) -> Vec<(&'static str, &'static str)> {
+        vec![("0-3", "Continuity G0-G3")]
+    }
     fn name(&self) -> &'static str {
         "Align curve"
     }

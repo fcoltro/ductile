@@ -365,7 +365,8 @@ fn vs_bg(@builtin(vertex_index) vi: u32) -> BgOut {
 
 @fragment
 fn fs_bg(o: BgOut) -> @location(0) vec4<f32> {
-    let top = vec3<f32>(0.090, 0.095, 0.105);
-    let bottom = vec3<f32>(0.032, 0.034, 0.040);
+    // A flat mid-dark grey, faintly lighter at the top.
+    let top = vec3<f32>(0.172, 0.174, 0.182);
+    let bottom = vec3<f32>(0.160, 0.162, 0.170);
     return vec4<f32>(mix(bottom, top, o.uv.y), 1.0);
 }

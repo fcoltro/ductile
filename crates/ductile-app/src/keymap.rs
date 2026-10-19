@@ -133,6 +133,8 @@ const DEFAULTS: &[(Command, &str)] = {
         (ToggleZebra, "Alt+R"),
         (Help, "F1"),
         (Preferences, "Ctrl+,"),
+        (ToggleLeftPanel, "Ctrl+B"),
+        (ToggleRightPanel, "Ctrl+Shift+B"),
         (Group, "Ctrl+G"),
         (Isoparam, "Ctrl+R"),
         (Untrim, "Alt+T"),
