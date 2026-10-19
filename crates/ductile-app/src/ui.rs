@@ -263,6 +263,19 @@ pub fn viewport_overlays(app: &mut DuctileApp, ctx: &egui::Context) {
     let pill = |ui: &mut egui::Ui, body: &mut dyn FnMut(&mut egui::Ui)| {
         egui::Frame::new().fill(theme::CARD).corner_radius(6.0).inner_margin(3.0).show(ui, |ui| body(ui));
     };
+    // The value being dragged, next to the handle.
+    if let Some((p, text)) = app.tool.as_ref().and_then(|t| t.readout()) {
+        if let Some(n) = app.camera.project(p) {
+            let at = egui::pos2(vr.min.x + ((n.x + 1.0) * 0.5) as f32 * vr.width(), vr.min.y + ((1.0 - n.y) * 0.5) as f32 * vr.height()) + egui::vec2(14.0, -14.0);
+            if vr.contains(at) {
+                let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("readout")));
+                let galley = painter.layout_no_wrap(text, egui::FontId::monospace(12.0), theme::TEXT);
+                let r = egui::Rect::from_min_size(at - egui::vec2(0.0, galley.size().y), galley.size()).expand2(egui::vec2(6.0, 3.0));
+                painter.rect_filled(r, 4.0, theme::CARD.gamma_multiply(0.92));
+                painter.galley(r.min + egui::vec2(6.0, 3.0), galley, theme::TEXT);
+            }
+        }
+    }
     // Selection modes, top left.
     egui::Area::new(egui::Id::unique("modes")).fixed_pos(vr.min + egui::vec2(10.0, 10.0)).order(egui::Order::Foreground).show(ctx, |ui| {
         pill(ui, &mut |ui| {

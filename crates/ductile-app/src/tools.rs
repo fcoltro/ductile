@@ -90,6 +90,11 @@ pub trait Tool {
     fn anchor(&self) -> Option<DVec3> {
         None
     }
+    /// The value being dragged and where to show it, drawn as a label
+    /// next to the handle while the pointer moves.
+    fn readout(&self) -> Option<(DVec3, String)> {
+        None
+    }
 }
 
 fn drag_value(ui: &mut egui::Ui, label: &str, v: &mut f64, speed: f64) -> bool {
@@ -732,6 +737,25 @@ impl Tool for TransformTool {
     }
     fn constrain_axis(&mut self, axis: usize) {
         self.axis = if self.axis == Some(axis) { None } else { Some(axis) };
+    }
+    fn readout(&self) -> Option<(DVec3, String)> {
+        if self.start.is_none() && self.typed.is_none() {
+            return None;
+        }
+        let m = self.matrix();
+        let at = self.current.unwrap_or(self.pivot);
+        let text = match self.kind {
+            TransformKind::Move => {
+                let d = m.w_axis.truncate();
+                return Some((self.pivot + d, format!("{:.5}", d.length())));
+            }
+            TransformKind::Rotate => {
+                let (_, q, _) = m.to_scale_rotation_translation();
+                format!("{:.5}°", q.to_axis_angle().1.to_degrees())
+            }
+            TransformKind::Scale => format!("{:.5}", m.x_axis.truncate().length()),
+        };
+        Some((at, text))
     }
     fn commit(&mut self, doc: &mut Document) -> bool {
         let m = self.matrix();
@@ -1545,8 +1569,12 @@ impl Tool for ExtrudeTool {
     }
     fn guides(&self, out: &mut Vec<LineInstance>) {
         let tip = self.base + self.normal * self.value();
+        out.push(LineInstance::new(self.base - self.normal * 1e4, self.base + self.normal * 1e4, [0.55, 0.55, 0.6, 0.5], 1.0));
         out.push(LineInstance::new(self.base, tip, [1.0, 0.85, 0.3, 1.0], 2.0));
         out.push(LineInstance::point(tip, [1.0, 0.85, 0.3, 1.0], 7.0));
+    }
+    fn readout(&self) -> Option<(DVec3, String)> {
+        (self.start_t.is_some() || self.typed.is_some()).then(|| (self.base + self.normal * self.value(), format!("{:.5}", self.value())))
     }
     fn panel(&mut self, ui: &mut egui::Ui) -> bool {
         let mut d = self.value();
@@ -2372,8 +2400,12 @@ impl Tool for FilletTool {
     }
     fn guides(&self, out: &mut Vec<LineInstance>) {
         let tip = self.base + self.dir * self.value();
+        out.push(LineInstance::new(self.base - self.dir * 1e4, self.base + self.dir * 1e4, [0.55, 0.55, 0.6, 0.5], 1.0));
         out.push(LineInstance::new(self.base, tip, [1.0, 0.85, 0.3, 1.0], 2.0));
         out.push(LineInstance::point(tip, [1.0, 0.85, 0.3, 1.0], 7.0));
+    }
+    fn readout(&self) -> Option<(DVec3, String)> {
+        (self.start_t.is_some() || self.typed.is_some()).then(|| (self.base + self.dir * self.value(), format!("{:.5}", self.value())))
     }
     fn panel(&mut self, ui: &mut egui::Ui) -> bool {
         let mut r = self.value();
